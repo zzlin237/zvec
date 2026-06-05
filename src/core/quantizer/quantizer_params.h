@@ -108,12 +108,16 @@ static const std::string COSINE_REFORMER_FORCED_HALF_FLOAT =
 //! IntegerStreamingConverter
 static const std::string INTEGER_STREAMING_CONVERTER_ENABLE_NORMALIZE =
     "integer_streaming.converter.enable_normalize";
+static const std::string INTEGER_STREAMING_CONVERTER_ENABLE_ROTATE =
+    "integer_streaming.converter.enable_rotate";
 
-//! IntegerStreamingConverter
+//! IntegerStreamingReformer
 static const std::string INTEGER_STREAMING_REFORMER_ENABLE_NORMALIZE =
     "integer_streaming.reformer.enable_normalize";
 static const std::string INTEGER_STREAMING_REFORMER_IS_EUCLIDEAN =
     "integer_streaming.reformer.is_euclidean";
+static const std::string INTEGER_STREAMING_REFORMER_ENABLE_ROTATE =
+    "integer_streaming.reformer.enable_rotate";
 
 //! DoubleBitConverter
 static const std::string DOUBLE_BIT_CONVERTER_TRAIN_SAMPLE_COUNT =
