@@ -24,6 +24,15 @@ namespace core {
 
 // All rabitqlib types are confined to this translation unit via pimpl.
 struct RecordRotator::Impl {
+  //! Self-describing header prepended to the rabitqlib blob on dump
+  struct Header {
+    uint8_t type;
+    uint32_t origin_dim;
+    uint32_t padded_dim;
+  };
+
+  static constexpr size_t kHeaderSize = sizeof(Header);  // 9 bytes
+
   size_t dimension{0};
   size_t padded_dim{0};
   RecordRotatorType type{RecordRotatorType::FhtKac};
@@ -33,6 +42,12 @@ struct RecordRotator::Impl {
     return t == RecordRotatorType::Matrix
                ? rabitqlib::RotatorType::MatrixRotator
                : rabitqlib::RotatorType::FhtKacRotator;
+  }
+
+  static RecordRotatorType from_rabitq(uint8_t t) {
+    return t == static_cast<uint8_t>(RecordRotatorType::Matrix)
+               ? RecordRotatorType::Matrix
+               : RecordRotatorType::FhtKac;
   }
 };
 
@@ -63,7 +78,7 @@ std::vector<float> RecordRotator::rotate(const float *in) const {
 }
 
 size_t RecordRotator::dump_bytes() const {
-  return impl_->rotator->dump_bytes();
+  return Impl::kHeaderSize + impl_->rotator->dump_bytes();
 }
 
 int RecordRotator::dump(const IndexDumper::Pointer &dumper,
@@ -81,10 +96,17 @@ int RecordRotator::dump(const IndexDumper::Pointer &dumper,
     return (size + 0x1F) & (~0x1F);
   };
 
-  // Serialize rotator to buffer
-  const size_t data_size = impl_->rotator->dump_bytes();
+  // Serialize: [Header: type|origin_dim|padded_dim] [rabitqlib blob]
+  const size_t blob_size = impl_->rotator->dump_bytes();
+  const size_t data_size = Impl::kHeaderSize + blob_size;
   std::vector<char> buffer(data_size);
-  impl_->rotator->save(buffer.data());
+
+  Impl::Header header;
+  header.type = static_cast<uint8_t>(impl_->type);
+  header.origin_dim = static_cast<uint32_t>(impl_->dimension);
+  header.padded_dim = static_cast<uint32_t>(impl_->padded_dim);
+  std::memcpy(buffer.data(), &header, Impl::kHeaderSize);
+  impl_->rotator->save(buffer.data() + Impl::kHeaderSize);
 
   // Write rotator data
   size_t written = dumper->write(buffer.data(), data_size);
@@ -117,50 +139,88 @@ int RecordRotator::dump(const IndexDumper::Pointer &dumper,
   return 0;
 }
 
-int RecordRotator::load(IndexStorage::Pointer storage,
+int RecordRotator::open(IndexStorage::Pointer storage,
                         const std::string &seg_id) {
   if (!storage) {
-    LOG_ERROR("RecordRotator::load: null storage");
+    LOG_ERROR("RecordRotator::open: null storage");
     return IndexError_InvalidArgument;
   }
 
   auto segment = storage->get(seg_id);
   if (!segment) {
-    LOG_ERROR("RecordRotator::load: segment '%s' not found", seg_id.c_str());
+    LOG_ERROR("RecordRotator::open: segment '%s' not found", seg_id.c_str());
     return IndexError_InvalidFormat;
   }
 
-  // Read the rotator data from the segment
+  // Read the rotator data from the segment (header + blob)
   const size_t data_size = segment->data_size();
+  if (data_size <= Impl::kHeaderSize) {
+    LOG_ERROR("RecordRotator::open: data too small (%zu bytes)", data_size);
+    return IndexError_InvalidFormat;
+  }
+
   IndexStorage::MemoryBlock block;
   size_t read_size = segment->read(0, block, data_size);
   if (read_size != data_size) {
-    LOG_ERROR("RecordRotator::load: read failed, read=%zu, expected=%zu",
+    LOG_ERROR("RecordRotator::open: read failed, read=%zu, expected=%zu",
               read_size, data_size);
     return IndexError_InvalidFormat;
   }
 
-  // Verify CRC if available
+  // Verify CRC if available (covers header + blob)
   uint32_t expected_crc = segment->data_crc();
   if (expected_crc != 0) {
     uint32_t actual_crc = ailego::Crc32c::Hash(block.data(), data_size, 0);
     if (actual_crc != expected_crc) {
       LOG_ERROR(
-          "RecordRotator::load: CRC mismatch, expected=0x%08x, actual=0x%08x",
+          "RecordRotator::open: CRC mismatch, expected=0x%08x, actual=0x%08x",
           expected_crc, actual_crc);
       return IndexError_InvalidFormat;
     }
   }
 
-  // Reconstruct the rotator from serialized data
+  // Parse self-describing header
+  const char *raw = reinterpret_cast<const char *>(block.data());
+  Impl::Header header;
+  std::memcpy(&header, raw, Impl::kHeaderSize);
+
+  impl_->type = Impl::from_rabitq(header.type);
+  impl_->dimension = static_cast<size_t>(header.origin_dim);
+  impl_->padded_dim = static_cast<size_t>(header.padded_dim);
+
+  // Reconstruct the rotator from header info and load blob
   impl_->rotator.reset(rabitqlib::choose_rotator<float>(
       impl_->dimension, Impl::to_rabitq(impl_->type), impl_->padded_dim));
-  impl_->rotator->load(reinterpret_cast<const char *>(block.data()));
+  impl_->rotator->load(raw + Impl::kHeaderSize);
 
   LOG_DEBUG(
-      "RecordRotator::load done: seg=%s, dim=%zu, padded_dim=%zu, "
+      "RecordRotator::open done: seg=%s, dim=%zu, padded_dim=%zu, "
       "data_size=%zu",
       seg_id.c_str(), impl_->dimension, impl_->padded_dim, data_size);
+  return 0;
+}
+
+int RecordRotator::load(const float *matrix, size_t dimension,
+                        size_t padded_dim) {
+  if (!matrix) {
+    LOG_ERROR("RecordRotator::load: null matrix");
+    return IndexError_InvalidArgument;
+  }
+  if (dimension == 0 || padded_dim == 0) {
+    LOG_ERROR("RecordRotator::load: invalid dims %zu x %zu", dimension,
+              padded_dim);
+    return IndexError_InvalidArgument;
+  }
+
+  impl_->dimension = dimension;
+  impl_->padded_dim = padded_dim;
+  impl_->type = RecordRotatorType::Matrix;
+  impl_->rotator.reset(rabitqlib::choose_rotator<float>(
+      dimension, rabitqlib::RotatorType::MatrixRotator, padded_dim));
+  impl_->rotator->load(reinterpret_cast<const char *>(matrix));
+
+  LOG_DEBUG("RecordRotator::load done: dim=%zu, padded_dim=%zu",
+            dimension, padded_dim);
   return 0;
 }
 

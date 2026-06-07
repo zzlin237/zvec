@@ -69,19 +69,26 @@ class RecordRotator {
   //! @return    vector<float> of size padded_dim containing rotated result
   std::vector<float> rotate(const float *in) const;
 
-  //! Return the serialized size of the rotator in bytes
+  //! Return the serialized size of the rotator in bytes (header + blob)
   size_t dump_bytes() const;
 
-  //! Dump the rotator data to an IndexDumper as a named segment.
-  //! Writes the raw rotator bytes, appends padding for 32-byte alignment,
-  //! and registers the segment meta (id, size, padding, crc).
+  //! Dump the rotator to an IndexDumper as a named segment.
+  //! Format: [Header: type(1B)|origin_dim(4B)|padded_dim(4B)] [rabitqlib blob]
+  //! Appends padding for 32-byte alignment, registers segment meta (id, size, padding, crc).
   int dump(const IndexDumper::Pointer &dumper,
            const std::string &seg_id = RECORD_ROTATOR_SEG_ID) const;
 
-  //! Load the rotator data from an IndexStorage segment.
-  //! Reads the serialized rotator bytes and reconstructs the rotator.
-  int load(IndexStorage::Pointer storage,
+  //! Open the rotator from an IndexStorage segment (self-describing, no init needed).
+  //! Parses header to get type/dimension/padded_dim, then reconstructs the rotator.
+  int open(IndexStorage::Pointer storage,
            const std::string &seg_id = RECORD_ROTATOR_SEG_ID);
+
+  //! Load a user-specified rotation matrix.
+  //! Always uses MatrixRotator internally.
+  //! @param matrix       row-major matrix of shape dimension x padded_dim
+  //! @param dimension    original vector dimension
+  //! @param padded_dim   padded dimension (must be multiple of 64)
+  int load(const float *matrix, size_t dimension, size_t padded_dim);
 
   //! Return the original dimension
   size_t dimension() const;

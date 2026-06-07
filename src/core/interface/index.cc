@@ -294,8 +294,13 @@ int Index::Open(const std::string &file_path, StorageOptions storage_options) {
     return core::IndexError_Runtime;
   }
 
-  // converter/reformer/metric are created in IndexFactory::CreateIndex
-  // TODO: init
+  // Load reformer data from storage (e.g., rotation matrix for IntegerStreaming)
+  if (reformer_ != nullptr) {
+    if (reformer_->load(storage_) != 0) {
+      LOG_ERROR("Failed to load reformer, path: %s", file_path.c_str());
+      return core::IndexError_Runtime;
+    }
+  }
 
   // TODO: context pool
   if (!init_context()) {  // to validate if any error, will be overwritten

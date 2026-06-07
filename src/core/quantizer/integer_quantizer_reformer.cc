@@ -19,6 +19,7 @@
 #include <core/quantizer/quantizer_params.h>
 #include <zvec/core/framework/index_factory.h>
 #include "record_quantizer.h"
+#include "record_rotater.h"
 
 namespace zvec {
 namespace core {
@@ -286,6 +287,7 @@ class IntegerStreamingReformer : public IndexReformer {
   int init(const ailego::Params &params) override {
     params.get(INTEGER_STREAMING_REFORMER_ENABLE_NORMALIZE, &enable_normalize_);
     params.get(INTEGER_STREAMING_REFORMER_IS_EUCLIDEAN, &is_euclidean_);
+    params.get(INTEGER_STREAMING_REFORMER_ENABLE_ROTATE, &enable_rotate_);
     return 0;
   }
 
@@ -295,7 +297,18 @@ class IntegerStreamingReformer : public IndexReformer {
   }
 
   //! Load index from container
-  int load(IndexStorage::Pointer) override {
+  int load(IndexStorage::Pointer storage) override {
+    if (enable_rotate_) {
+      rotator_ = std::make_shared<RecordRotator>();
+      int ret = rotator_->open(storage);
+      if (ret != 0) {
+        LOG_ERROR("IntegerStreamingReformer: load rotator failed, ret=%d", ret);
+        return ret;
+      }
+      LOG_DEBUG("IntegerStreamingReformer: rotator loaded, origin_dim=%zu, "
+                "padded_dim=%zu",
+                rotator_->dimension(), rotator_->padded_dim());
+    }
     return 0;
   }
 
@@ -319,10 +332,16 @@ class IntegerStreamingReformer : public IndexReformer {
     ometa->set_meta(data_type_, qmeta.dimension() + extra_dimension_);
     out->resize(ometa->element_size());
     const float *vec = reinterpret_cast<const float *>(query);
+    std::unique_ptr<float[]> rotate_buffer;
+    if (enable_rotate_ && rotator_) {
+      rotate_buffer.reset(new float[qmeta.dimension()]);
+      rotator_->rotate(vec, rotate_buffer.get());
+      vec = rotate_buffer.get();
+    }
     std::unique_ptr<float[]> normalized;
     if (enable_normalize_) {
       normalized.reset(new float[qmeta.dimension()]);
-      vec = normalize(query, qmeta, normalized.get());
+      vec = normalize(vec, qmeta, normalized.get());
     }
 
     RecordQuantizer::quantize_record(vec, qmeta.dimension(), data_type_,
@@ -344,13 +363,21 @@ class IntegerStreamingReformer : public IndexReformer {
     *ometa = qmeta;
     ometa->set_meta(data_type_, qmeta.dimension() + extra_dimension_);
     out->resize(count * ometa->element_size());
+    std::unique_ptr<float[]> rotate_buffer;
     std::unique_ptr<float[]> normalized;
+    if (enable_rotate_ && rotator_) {
+      rotate_buffer.reset(new float[qmeta.dimension()]);
+    }
     if (enable_normalize_) {
       normalized.reset(new float[qmeta.dimension()]);
     }
     for (size_t i = 0; i < count; ++i) {
       const float *vec =
           reinterpret_cast<const float *>(query) + i * qmeta.dimension();
+      if (enable_rotate_ && rotator_) {
+        rotator_->rotate(vec, rotate_buffer.get());
+        vec = rotate_buffer.get();
+      }
       if (enable_normalize_) {
         vec = normalize(vec, qmeta, normalized.get());
       }
@@ -378,10 +405,16 @@ class IntegerStreamingReformer : public IndexReformer {
     ometa->set_meta(data_type_, rmeta.dimension() + extra_dimension_);
     out->resize(ometa->element_size());
     const float *vec = reinterpret_cast<const float *>(record);
+    std::unique_ptr<float[]> rotate_buffer;
+    if (enable_rotate_ && rotator_) {
+      rotate_buffer.reset(new float[rmeta.dimension()]);
+      rotator_->rotate(vec, rotate_buffer.get());
+      vec = rotate_buffer.get();
+    }
     std::unique_ptr<float[]> normalized;
     if (enable_normalize_) {
       normalized.reset(new float[rmeta.dimension()]);
-      vec = normalize(record, rmeta, normalized.get());
+      vec = normalize(vec, rmeta, normalized.get());
     }
 
     RecordQuantizer::quantize_record(vec, rmeta.dimension(), data_type_,
@@ -404,13 +437,21 @@ class IntegerStreamingReformer : public IndexReformer {
     *ometa = rmeta;
     ometa->set_meta(data_type_, rmeta.dimension() + extra_dimension_);
     out->resize(count * ometa->element_size());
+    std::unique_ptr<float[]> rotate_buffer;
     std::unique_ptr<float[]> normalized;
+    if (enable_rotate_ && rotator_) {
+      rotate_buffer.reset(new float[rmeta.dimension()]);
+    }
     if (enable_normalize_) {
       normalized.reset(new float[rmeta.dimension()]);
     }
     for (size_t i = 0; i < count; ++i) {
       const float *vec =
           reinterpret_cast<const float *>(records) + i * rmeta.dimension();
+      if (enable_rotate_ && rotator_) {
+        rotator_->rotate(vec, rotate_buffer.get());
+        vec = rotate_buffer.get();
+      }
       if (enable_normalize_) {
         vec = normalize(vec, rmeta, normalized.get());
       }
@@ -445,6 +486,10 @@ class IntegerStreamingReformer : public IndexReformer {
 
   int revert(const void *in, const IndexQueryMeta &qmeta,
              std::string *out) const override {
+    if (enable_rotate_) {
+      LOG_ERROR("Unsupported revert for rotated value");
+      return IndexError_Unsupported;
+    }
     if (enable_normalize_) {
       LOG_ERROR("Unsupported revert for normalized value");
 
@@ -465,6 +510,8 @@ class IntegerStreamingReformer : public IndexReformer {
   uint32_t extra_dimension_{0};
   bool enable_normalize_{false};
   bool is_euclidean_{false};
+  bool enable_rotate_{false};
+  std::shared_ptr<RecordRotator> rotator_{};
 };
 
 INDEX_FACTORY_REGISTER_REFORMER_ALIAS(

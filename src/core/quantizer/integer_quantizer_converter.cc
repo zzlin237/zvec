@@ -19,6 +19,7 @@
 #include <core/quantizer/quantizer_params.h>
 #include <zvec/core/framework/index_factory.h>
 #include "record_quantizer.h"
+#include "record_rotater.h"
 #include "../metric/metric_params.h"
 
 namespace zvec {
@@ -378,9 +379,13 @@ class IntegerStreamingConverter : public IndexConverter {
     meta_ = index_meta;
     params.get(INTEGER_STREAMING_CONVERTER_ENABLE_NORMALIZE,
                &enable_normalize_);
+    params.get(INTEGER_STREAMING_CONVERTER_ENABLE_ROTATE, &enable_rotate_);
     ailego::Params reformer_params;
     if (enable_normalize_) {
       reformer_params.set(INTEGER_STREAMING_REFORMER_ENABLE_NORMALIZE, true);
+    }
+    if (enable_rotate_) {
+      reformer_params.set(INTEGER_STREAMING_REFORMER_ENABLE_ROTATE, true);
     }
 
     is_euclidean_ = index_meta.metric_name() == "MipsSquaredEuclidean" ||
@@ -390,6 +395,17 @@ class IntegerStreamingConverter : public IndexConverter {
       reformer_params.set(INTEGER_STREAMING_REFORMER_IS_EUCLIDEAN, true);
     }
 
+    // Compute padded dimension and create rotator if rotation is enabled
+    size_t padded_dim = index_meta.dimension();
+    if (enable_rotate_) {
+      size_t dim = index_meta.dimension();
+      padded_dim = ((dim + 63) / 64) * 64;
+      rotator_ = std::make_shared<RecordRotator>();
+      rotator_->init(dim, padded_dim);
+      LOG_DEBUG("IntegerStreamingConverter: rotation enabled, dim=%zu, "
+                "padded_dim=%zu",
+                dim, padded_dim);
+    }
 
     if (data_type_ == IndexMeta::DataType::DT_INT8) {
       meta_.set_converter("Int8StreamingConverter", 0, params);
@@ -409,7 +425,7 @@ class IntegerStreamingConverter : public IndexConverter {
     metric_params.set(QUANTIZED_INTEGER_METRIC_ORIGIN_METRIC_PARAMS,
                       index_meta.metric_params());
     meta_.set_metric("QuantizedInteger", 0, metric_params);
-    meta_.set_meta(data_type_, meta_.dimension() + ExtraDimension(data_type_));
+    meta_.set_meta(data_type_, padded_dim + ExtraDimension(data_type_));
     return 0;
   }
 
@@ -433,12 +449,20 @@ class IntegerStreamingConverter : public IndexConverter {
 
     *stats_.mutable_transformed_count() += holder->count();
     holder_ = std::make_shared<IntegerStreamingConverterHolder>(
-        holder, data_type_, enable_normalize_, is_euclidean_);
+        holder, data_type_, enable_normalize_, is_euclidean_, rotator_);
     return 0;
   }
 
   //! Dump index into storage
-  int dump(const IndexDumper::Pointer & /*dumper*/) override {
+  int dump(const IndexDumper::Pointer &dumper) override {
+    if (enable_rotate_ && rotator_) {
+      int ret = rotator_->dump(dumper);
+      if (ret != 0) {
+        LOG_ERROR("IntegerStreamingConverter: dump rotator failed, ret=%d", ret);
+        return ret;
+      }
+      stats_.set_dumped_size(stats_.dumped_size() + rotator_->dump_bytes());
+    }
     return 0;
   }
 
@@ -469,6 +493,7 @@ class IntegerStreamingConverter : public IndexConverter {
           : owner_(owner),
             buffer_(owner->element_size(), 0),
             normalize_buffer_(owner->front_->element_size(), 0),
+            rotate_buffer_(owner->padded_dim() * sizeof(float), 0),
             front_iter_(std::move(iter)) {
         this->encode_record();
       }
@@ -503,17 +528,24 @@ class IntegerStreamingConverter : public IndexConverter {
         if (front_iter_->is_valid()) {
           const float *vec =
               reinterpret_cast<const float *>(front_iter_->data());
+          size_t pdim = owner_->padded_dim();
+          if (owner_->rotator_) {
+            float *rotate_buf =
+                reinterpret_cast<float *>(rotate_buffer_.data());
+            owner_->rotator_->rotate(vec, rotate_buf);
+            vec = rotate_buf;
+          }
           if (owner_->enable_normalize_) {
             float norm = 0.0;
             memcpy((void *)normalize_buffer_.data(), vec,
-                   owner_->front_->element_size());
+                   pdim * sizeof(float));
             ailego::Normalizer<float>::L2((float *)normalize_buffer_.data(),
-                                          owner_->dimension_, &norm);
+                                          pdim, &norm);
             vec = (float *)normalize_buffer_.data();
           }
 
           RecordQuantizer::quantize_record(
-              vec, owner_->dimension_, owner_->data_type(),
+              vec, pdim, owner_->data_type(),
               owner_->is_euclidean_, buffer_.data());
         }
       }
@@ -522,18 +554,27 @@ class IntegerStreamingConverter : public IndexConverter {
       const IntegerStreamingConverterHolder *owner_{nullptr};
       std::vector<uint8_t> buffer_{};
       std::string normalize_buffer_{};
+      std::string rotate_buffer_{};
       IndexHolder::Iterator::Pointer front_iter_{};
     };
 
     //! Constructor
     IntegerStreamingConverterHolder(IndexHolder::Pointer front,
                                     IndexMeta::DataType tp,
-                                    bool enable_normalize, bool is_euclidean)
+                                    bool enable_normalize, bool is_euclidean,
+                                    std::shared_ptr<RecordRotator> rotator)
         : front_(std::move(front)),
           data_type_(tp),
           dimension_(front_->dimension()),
           enable_normalize_(enable_normalize),
-          is_euclidean_(is_euclidean) {}
+          is_euclidean_(is_euclidean),
+          rotator_(std::move(rotator)) {}
+
+    //! Retrieve padded dimension
+    size_t padded_dim(void) const {
+      return rotator_ ? rotator_->padded_dim()
+                      : static_cast<size_t>(dimension_);
+    }
 
     //! Retrieve count of elements in holder (-1 indicates unknown)
     size_t count(void) const override {
@@ -542,7 +583,7 @@ class IntegerStreamingConverter : public IndexConverter {
 
     //! Retrieve dimension
     size_t dimension(void) const override {
-      return dimension_ + ExtraDimension(data_type_);
+      return padded_dim() + ExtraDimension(data_type_);
     }
 
     //! Retrieve type information
@@ -576,6 +617,7 @@ class IntegerStreamingConverter : public IndexConverter {
     uint32_t dimension_{0};
     bool enable_normalize_{false};
     bool is_euclidean_{false};
+    std::shared_ptr<RecordRotator> rotator_{};
   };
 
   static size_t ExtraDimension(IndexMeta::DataType type) {
@@ -593,7 +635,9 @@ class IntegerStreamingConverter : public IndexConverter {
   IndexHolder::Pointer holder_{};
   IndexMeta::DataType data_type_{};
   bool enable_normalize_{false};
+  bool enable_rotate_{false};
   bool is_euclidean_{false};
+  std::shared_ptr<RecordRotator> rotator_{};
 };
 
 INDEX_FACTORY_REGISTER_CONVERTER_ALIAS(

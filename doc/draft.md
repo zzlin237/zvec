@@ -28,7 +28,7 @@ Search 阶段:
 ```
 ## Int8StreamingConverter具体实现
 
-### 1: 新增参数定义
+### 1: 新增参数定义 [DONE]
 ```cpp
 //! IntegerStreamingConverter
 static const std::string INTEGER_STREAMING_CONVERTER_ENABLE_ROTATE =
@@ -43,8 +43,9 @@ static const std::string INTEGER_STREAMING_REFORMER_ENABLE_ROTATE =
 2. 实现方式参考/root/code/zvec/src/core/algorithm/hnsw_rabitq中的旋转方式，具体实现调用第三方库/root/code/zvec/thirdparty/RaBitQ-Library
 3. 包含功能：
   1. O(d \log d)复杂度的快速旋转
-  2. 保存矩阵（通过IndexDumper写入segment，含CRC + 32字节对齐）
-  3. 加载矩阵（通过IndexStorage读取segment，含CRC校验）
+  2. dump：保存矩阵（通过IndexDumper写入segment，含自描述Header + rabitqlib blob + CRC + 32字节对齐）
+  3. open：从Storage加载序列化旋转器（通过IndexStorage读取segment，从Header解析type/dim/padded_dim，无需预先init，含CRC校验）
+  4. load：加载用户自定义旋转矩阵（MatrixRotator，行主序 dim x padded_dim）
 ```cpp
 class RecordRotator {
  public:
@@ -74,19 +75,26 @@ class RecordRotator {
   //! @return    vector<float> of size padded_dim containing rotated result
   std::vector<float> rotate(const float *in) const;
 
-  //! Return the serialized size of the rotator in bytes
+  //! Return the serialized size of the rotator in bytes (header + blob)
   size_t dump_bytes() const;
 
-  //! Dump the rotator data to an IndexDumper as a named segment.
-  //! Writes the raw rotator bytes, appends padding for 32-byte alignment,
-  //! and registers the segment meta (id, size, padding, crc).
+  //! Dump the rotator to an IndexDumper as a named segment.
+  //! Format: [Header: type(1B)|origin_dim(4B)|padded_dim(4B)] [rabitqlib blob]
+  //! Appends padding for 32-byte alignment, registers segment meta (id, size, padding, crc).
   int dump(const IndexDumper::Pointer &dumper,
            const std::string &seg_id = RECORD_ROTATOR_SEG_ID) const;
 
-  //! Load the rotator data from an IndexStorage segment.
-  //! Reads the serialized rotator bytes and reconstructs the rotator.
-  int load(IndexStorage::Pointer storage,
+  //! Open the rotator from an IndexStorage segment (self-describing, no init needed).
+  //! Parses header to get type/dimension/padded_dim, then reconstructs the rotator.
+  int open(IndexStorage::Pointer storage,
            const std::string &seg_id = RECORD_ROTATOR_SEG_ID);
+
+  //! Load a user-specified rotation matrix.
+  //! Always uses MatrixRotator internally.
+  //! @param matrix       row-major matrix of shape dimension x padded_dim
+  //! @param dimension    original vector dimension
+  //! @param padded_dim   padded dimension (must be multiple of 64)
+  int load(const float *matrix, size_t dimension, size_t padded_dim);
 
   //! Return the original dimension
   size_t dimension() const;
@@ -105,3 +113,41 @@ class RecordRotator {
   std::unique_ptr<Impl> impl_;
 };
 ```
+### 3. 修改 IntegerStreaming 的 Converter 和 Reformer [DONE]
+
+1. 修改文件：`integer_quantizer_converter.cc` 和 `integer_quantizer_reformer.cc`
+2. Converter 修改：
+  1. 新增 `#include "record_rotater.h"` 和成员变量 `enable_rotate_`, `rotator_`（无 `padded_dim_`，由 `rotator_->padded_dim()` 派生）
+  2. `init()` 读取 `enable_rotate` 标记，创建 FhtKacRotator（padded_dim=向上取64倍数），将 `enable_rotate` 写入 reformer_params
+  3. `transform()` 将 `rotator_` 传入 Holder，Holder 通过 `rotator_->padded_dim()` 获取对齐维度
+  4. `dump()` 调用 `rotator_->dump(dumper)` 保存旋转矩阵（自描述格式）
+  5. Holder Iterator 的 `encode_record()` 管线：rotate → normalize → quantize
+3. Reformer 修改：
+  1. `init()` 仅读取 `enable_rotate` 标记（维度信息从序列化数据自描述获取）
+  2. `load()` 创建 rotator，调用 `rotator_->open(storage)` 加载旋转矩阵（open 内部从 header 解析 type/dim/padded_dim）
+  3. 所有 `transform()`/`convert()` 方法在量化前应用旋转
+  4. `revert()` 在旋转模式下拒绝反量化
+
+### 4. 修改 Index::Open() [DONE]
+1. 修改代码：`src/core/interface/index.cc`
+2. 在 `Index::Open()` 中 streamer 打开后，调用 `reformer_->load(storage_)` 加载序列化数据（旋转矩阵等）
+3. 对无序列化数据的 reformer（如非旋转模式），`load()` 为 no-op 直接返回 0，不干扰运行时功能
+
+### 5. 修改运行时测试代码
+1. 修改代码：/root/code/zvec/tools/core/local_builder.cc，使其可以保存旋转矩阵
+2. 编译代码：
+```cpp
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+```
+3. 测试代码：
+索引构建：
+```cpp
+./build/bin/local_builder /root/code/zvec/config/construct.yaml
+```
+搜索测试：
+```cpp
+./build/bin/bench /root/code/zvec/config/search_baseline.yaml
+./build/bin/bench /root/code/zvec/config/search_current.yaml
+```
+4. 运行代码，并修改错误
