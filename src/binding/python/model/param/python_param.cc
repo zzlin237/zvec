@@ -421,13 +421,14 @@ Examples:
     {'metric_type': 'IP', 'm': 16, 'ef_construction': 200, 'quantize_type': 'INT8', 'use_contiguous_memory': True}
 )pbdoc");
   hnsw_params
-      .def(py::init<MetricType, int, int, QuantizeType, bool>(),
+      .def(py::init<MetricType, int, int, QuantizeType, bool, bool>(),
            py::arg("metric_type") = MetricType::IP,
            py::arg("m") = core_interface::kDefaultHnswNeighborCnt,
            py::arg("ef_construction") =
                core_interface::kDefaultHnswEfConstruction,
            py::arg("quantize_type") = QuantizeType::UNDEFINED,
-           py::arg("use_contiguous_memory") = false)
+           py::arg("use_contiguous_memory") = false,
+           py::arg("enable_rotate") = false)
       .def_property_readonly(
           "m", &HnswIndexParams::m,
           "int: Maximum number of neighbors per node in upper layers.")
@@ -439,6 +440,11 @@ Examples:
           "bool: Whether to allocate a single contiguous memory arena for "
           "all HNSW graph nodes. Improves cache locality and search "
           "throughput at the cost of peak memory usage. Defaults to False.")
+      .def_property_readonly(
+          "enable_rotate", &HnswIndexParams::enable_rotate,
+          "bool: Whether to apply random rotation before INT8 quantization "
+          "to reduce quantization error. Only effective with "
+          "quantize_type=INT8. Defaults to False.")
       .def(
           "to_dict",
           [](const HnswIndexParams &self) -> py::dict {
@@ -450,6 +456,7 @@ Examples:
             dict["quantize_type"] =
                 quantize_type_to_string(self.quantize_type());
             dict["use_contiguous_memory"] = self.use_contiguous_memory();
+            dict["enable_rotate"] = self.enable_rotate();
             return dict;
           },
           "Convert to dictionary with all fields")
@@ -464,20 +471,25 @@ Examples:
                     ", \"quantize_type\":" +
                     quantize_type_to_string(self.quantize_type()) +
                     ", \"use_contiguous_memory\":" +
-                    (self.use_contiguous_memory() ? "true" : "false") + "}";
+                    (self.use_contiguous_memory() ? "true" : "false") +
+                    ", \"enable_rotate\":" +
+                    (self.enable_rotate() ? "true" : "false") + "}";
            })
       .def(py::pickle(
           [](const HnswIndexParams &self) {
             return py::make_tuple(self.metric_type(), self.m(),
                                   self.ef_construction(), self.quantize_type(),
-                                  self.use_contiguous_memory());
+                                  self.use_contiguous_memory(),
+                                  self.enable_rotate());
           },
           [](py::tuple t) {
-            if (t.size() != 5)
+            if (t.size() != 5 && t.size() != 6)
               throw std::runtime_error("Invalid state for HnswIndexParams");
+            bool enable_rotate = t.size() >= 6 ? t[5].cast<bool>() : false;
             return std::make_shared<HnswIndexParams>(
                 t[0].cast<MetricType>(), t[1].cast<int>(), t[2].cast<int>(),
-                t[3].cast<QuantizeType>(), t[4].cast<bool>());
+                t[3].cast<QuantizeType>(), t[4].cast<bool>(),
+                enable_rotate);
           }));
 
   // binding hnsw rabitq index params

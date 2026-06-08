@@ -100,6 +100,9 @@ message HnswIndexParams {
   // arena for all graph nodes, which improves cache locality / search
   // throughput at the cost of peak memory usage. Defaults to false.
   bool use_contiguous_memory = 4;
+  // When enabled, vectors are rotated before INT8 quantization to reduce
+  // quantization error. Only effective with quantize_type=INT8.
+  bool enable_rotate = 5;
 }
 
 message HnswRabitqIndexParams {

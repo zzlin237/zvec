@@ -178,6 +178,17 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
     }
   }
 
+  // Pass enable_rotate to converter_params (only effective for INT8)
+  if (index_param.enable_rotate) {
+    if (param.type == QuantizerType::kInt8) {
+      converter_params.set("integer_streaming.converter.enable_rotate", true);
+    } else {
+      LOG_WARN(
+          "enable_rotate is only supported for INT8 quantizer, "
+          "ignoring for current quantizer type");
+    }
+  }
+
   proxima_index_meta_.set_converter(converter_name, 0, converter_params);
   converter_ = core::IndexFactory::CreateConverter(converter_name);
   if (converter_ == nullptr ||

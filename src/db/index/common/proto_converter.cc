@@ -22,7 +22,8 @@ HnswIndexParams::OPtr ProtoConverter::FromPb(
       MetricTypeCodeBook::Get(params_pb.base().metric_type()), params_pb.m(),
       params_pb.ef_construction(),
       QuantizeTypeCodeBook::Get(params_pb.base().quantize_type()),
-      params_pb.use_contiguous_memory());
+      params_pb.use_contiguous_memory(),
+      params_pb.enable_rotate());
 
   return params;
 }
@@ -36,6 +37,7 @@ proto::HnswIndexParams ProtoConverter::ToPb(const HnswIndexParams *params) {
   params_pb.set_ef_construction(params->ef_construction());
   params_pb.set_m(params->m());
   params_pb.set_use_contiguous_memory(params->use_contiguous_memory());
+  params_pb.set_enable_rotate(params->enable_rotate());
   return params_pb;
 }
 

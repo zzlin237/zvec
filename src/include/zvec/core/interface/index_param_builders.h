@@ -88,6 +88,11 @@ class BaseIndexParamBuilder {  //  : public
     return static_cast<ActualIndexParamBuilderType &>(*this);
   }
 
+  ActualIndexParamBuilderType &WithEnableRotate(bool enable_rotate) {
+    param->enable_rotate = enable_rotate;
+    return static_cast<ActualIndexParamBuilderType &>(*this);
+  }
+
   virtual std::shared_ptr<ActualIndexParamType> Build() = 0;
 
  protected:

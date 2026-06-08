@@ -182,3 +182,87 @@ class RecordRotator {
 2. 构建索引：`./build/bin/local_builder config/construct2.yaml`
 3. baseline测试：`./build/bin/bench config/search_baseline2.yaml`、`./build/bin/recall config/search_baseline2.yaml`
 4. 搜索测试：`./build/bin/bench config/search_current2.yaml`、`./build/bin/recall config/search_current2.yaml`
+
+## python层接口
+1. 当前的enable_rotate仅仅支持int8，如果不是int8却有该配置，默认无效并警告
+2. 实现时上层和下层尽量解耦合
+
+### 实现方案 [DONE]
+
+#### 层级解耦设计
+```
+Python SDK (HnswIndexParam)
+    ↓  pybind11
+DB Layer (HnswIndexParams) — enable_rotate_ 用户接口
+    ↓  engine_helper.hpp
+Core Layer (BaseIndexParam) — enable_rotate 内部字段
+    ↓  index.cc CreateAndInitConverterReformer()
+Converter Layer — converter_params.set("integer_streaming.converter.enable_rotate", true)
+```
+
+#### 修改文件清单
+1. `src/include/zvec/db/index_params.h`：`HnswIndexParams` 新增 `enable_rotate_` 成员、构造函数参数、getter/setter、clone/to_string/operator==
+2. `src/include/zvec/core/interface/index_param.h`：`BaseIndexParam` 新增 `enable_rotate` 字段
+3. `src/include/zvec/core/interface/index_param_builders.h`：`BaseIndexParamBuilder` 新增 `WithEnableRotate()` 方法
+4. `src/db/index/column/vector_column/engine_helper.hpp`：HNSW 分支调用 `WithEnableRotate(db_index_params->enable_rotate())`
+5. `src/core/interface/index.cc`：`CreateAndInitConverterReformer()` 检查 `index_param.enable_rotate`，仅 INT8 生效，非 INT8 打印 WARN
+6. `src/db/proto/zvec.proto`：`HnswIndexParams` message 新增 `enable_rotate = 5`
+7. `src/db/index/common/proto_converter.cc`：`FromPb`/`ToPb` 处理 `enable_rotate`
+8. `src/binding/python/model/param/python_param.cc`：`HnswIndexParam` pybind11 绑定新增 `enable_rotate` 参数、property、to_dict/repr/pickle
+
+#### Python 使用方式
+```python
+from zvec import HnswIndexParam, MetricType, QuantizeType
+
+# 创建带旋转的 INT8 索引
+params = HnswIndexParam(
+    metric_type=MetricType.COSINE,
+    m=15,
+    ef_construction=500,
+    quantize_type=QuantizeType.INT8,
+    enable_rotate=True,  # 新增参数
+)
+print(params)
+# {"metric_type":COSINE, "m":15, "ef_construction":500, "quantize_type":INT8, "use_contiguous_memory":false, "enable_rotate":true}
+```
+
+## 对接 VectorDBBench
+1. 环境：
+```
+conda activate baseline
+```
+2. 原始指令
+```
+vectordbbench zvec \
+--path /root/code/VectorDBBench/db/cohere-1m \
+--db-label 16c64g-v0.1 \
+--case-type Performance768D1M \
+--num-concurrency 16 \
+--quantize-type int8 \
+--m 15 \
+--ef-search 180 \
+--skip-drop-old \
+--skip-load
+```
+3. 对接随机旋转方式，改为：
+```
+vectordbbench zvec \
+--path /root/code/VectorDBBench/db/cohere-1m-exp \
+--db-label 16c64g-v0.1 \
+--case-type Performance768D1M \
+--num-concurrency 16 \
+--quantize-type int8 \
+--m 15 \
+--ef-search 180 \
+--enable_rotate \
+--skip-drop-old \
+--skip-load
+```
+从而开启随机旋转方式，然后测试
+4. 修改/root/code/VectorDBBench完成对接，
+```
+cd /root/code/VectorDBBench
+pip install -e .
+```
+进行安装
+5. 进行测试，没有--skip-drop-old --skip-load为构建，有则为搜索

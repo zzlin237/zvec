@@ -244,6 +244,7 @@ class BaseIndexParam : public SerializableBase {
   bool is_huge_page = false;
   DataType data_type = DataType::DT_UNDEFINED;
   bool use_id_map = true;
+  bool enable_rotate = false;
 
   // IndexMeta meta;
   ailego::Params params;
