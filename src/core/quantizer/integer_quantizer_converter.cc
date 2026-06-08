@@ -453,15 +453,20 @@ class IntegerStreamingConverter : public IndexConverter {
     return 0;
   }
 
-  //! Dump index into storage
-  int dump(const IndexDumper::Pointer &dumper) override {
+  //! Dump index into storage (no-op: DumpPath removed, use dump_to_storage instead)
+  int dump(const IndexDumper::Pointer & /*dumper*/) override { return 0; }
+
+  //! Dump converter state to IndexStorage for streaming build
+  int dump_to_storage(const IndexStorage::Pointer &storage) override {
     if (enable_rotate_ && rotator_) {
-      int ret = rotator_->dump(dumper);
+      int ret = rotator_->dump(storage);
       if (ret != 0) {
-        LOG_ERROR("IntegerStreamingConverter: dump rotator failed, ret=%d", ret);
+        LOG_ERROR(
+            "IntegerStreamingConverter: dump rotator to storage failed, ret=%d",
+            ret);
         return ret;
       }
-      stats_.set_dumped_size(stats_.dumped_size() + rotator_->dump_bytes());
+      LOG_DEBUG("IntegerStreamingConverter: rotator dumped to storage");
     }
     return 0;
   }

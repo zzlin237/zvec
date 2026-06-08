@@ -120,7 +120,7 @@ class RecordRotator {
   1. 新增 `#include "record_rotater.h"` 和成员变量 `enable_rotate_`, `rotator_`（无 `padded_dim_`，由 `rotator_->padded_dim()` 派生）
   2. `init()` 读取 `enable_rotate` 标记，创建 FhtKacRotator（padded_dim=向上取64倍数），将 `enable_rotate` 写入 reformer_params
   3. `transform()` 将 `rotator_` 传入 Holder，Holder 通过 `rotator_->padded_dim()` 获取对齐维度
-  4. `dump()` 调用 `rotator_->dump(dumper)` 保存旋转矩阵（自描述格式）
+  4. `dump()` 已删除（DumpPath 已移除），改为 `dump_to_storage()` 调用 `rotator_->dump(storage)` 保存旋转矩阵（自描述格式）
   5. Holder Iterator 的 `encode_record()` 管线：rotate → normalize → quantize
 3. Reformer 修改：
   1. `init()` 仅读取 `enable_rotate` 标记（维度信息从序列化数据自描述获取）
@@ -133,17 +133,29 @@ class RecordRotator {
 2. 在 `Index::Open()` 中 streamer 打开后，调用 `reformer_->load(storage_)` 加载序列化数据（旋转矩阵等）
 3. 对无序列化数据的 reformer（如非旋转模式），`load()` 为 no-op 直接返回 0，不干扰运行时功能
 
-### 5. 修改运行时测试代码
-0. 测试原始功能是否有问题：
+### 5. 修改local_builder.cc，使其可以保存旋转矩阵 [DONE]
+1. 删除 DumpPath 相关代码（AlignSize、dump_meta_segment、dump_taglist 辅助函数，check_config 中 DumpPath 检查，do_build/do_build_sparse 中的 DUMP 代码块）
+2. 保留 IndexPath 流式构建路径，保留 UseTrainer 路径的 IndexDumper（写入 TrainerIndexPath）
+3. RecordRotator 新增 `dump(IndexStorage::Pointer)` 重载，将旋转矩阵写入 IndexStorage segment
+4. IndexConverter 基类新增 `dump_to_storage()` 虚方法（默认 no-op），IntegerStreamingConverter 重写以持久化 rotator
+5. local_builder.cc 中 `convert_holder()`/`convert_sparse_holder()` 输出 converter 指针，`build_by_streamer()`/`build_sparse_by_streamer()` 在 `streamer->open(storage)` 后调用 `converter->dump_to_storage(storage)`
+6. 删除 RecordRotator::dump(IndexDumper) 死代码（DumpPath 已删除，无调用者）
+7. 修改文件清单：
+  - `tools/core/local_builder.cc`：删除 DumpPath 代码，添加 converter 传递和 dump_to_storage 调用
+  - `src/core/quantizer/record_rotater.h/cc`：新增 dump(IndexStorage)，删除 dump(IndexDumper)
+  - `src/include/zvec/core/framework/index_converter.h`：新增 dump_to_storage() 虚方法
+  - `src/core/quantizer/integer_quantizer_converter.cc`：重写 dump_to_storage()，删除 dump(IndexDumper) override
+
+### 6. 修改运行时测试代码
+1. 测试原始功能是否有问题：
 ```
 ./build/bin/bench /root/code/zvec/config/search_baseline.yaml
 ./build/bin/recall /root/code/zvec/config/search_baseline.yaml
 ```
 查看是否能正常运行，以检查原始功能是否出现问题
-1. 修改代码：/root/code/zvec/tools/core/local_builder.cc，使其可以保存旋转矩阵
 2. 编译代码：
 ```cpp
-cmake -DENABLE_SKYLAKE=ON -DCMAKE_BUILD_TYPE=Release ..
+cmake -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
 3. 测试代码：

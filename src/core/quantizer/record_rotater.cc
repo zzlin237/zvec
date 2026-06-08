@@ -81,14 +81,14 @@ size_t RecordRotator::dump_bytes() const {
   return Impl::kHeaderSize + impl_->rotator->dump_bytes();
 }
 
-int RecordRotator::dump(const IndexDumper::Pointer &dumper,
+int RecordRotator::dump(const IndexStorage::Pointer &storage,
                         const std::string &seg_id) const {
-  if (!dumper) {
-    LOG_ERROR("RecordRotator::dump: null dumper");
+  if (!storage) {
+    LOG_ERROR("RecordRotator::dump(storage): null storage");
     return IndexError_InvalidArgument;
   }
   if (!impl_->rotator) {
-    LOG_ERROR("RecordRotator::dump: rotator not initialized");
+    LOG_ERROR("RecordRotator::dump(storage): rotator not initialized");
     return IndexError_NoReady;
   }
 
@@ -99,6 +99,7 @@ int RecordRotator::dump(const IndexDumper::Pointer &dumper,
   // Serialize: [Header: type|origin_dim|padded_dim] [rabitqlib blob]
   const size_t blob_size = impl_->rotator->dump_bytes();
   const size_t data_size = Impl::kHeaderSize + blob_size;
+  const size_t total_size = align_size(data_size);
   std::vector<char> buffer(data_size);
 
   Impl::Header header;
@@ -108,34 +109,34 @@ int RecordRotator::dump(const IndexDumper::Pointer &dumper,
   std::memcpy(buffer.data(), &header, Impl::kHeaderSize);
   impl_->rotator->save(buffer.data() + Impl::kHeaderSize);
 
-  // Write rotator data
-  size_t written = dumper->write(buffer.data(), data_size);
-  if (written != data_size) {
-    LOG_ERROR("RecordRotator::dump: write failed, written=%zu, expected=%zu",
-              written, data_size);
-    return IndexError_WriteData;
-  }
-  uint32_t crc = ailego::Crc32c::Hash(buffer.data(), data_size, 0);
-
-  // Write padding for 32-byte alignment
-  size_t padding_size = align_size(data_size) - data_size;
-  if (padding_size > 0) {
-    std::string padding(padding_size, '\0');
-    if (dumper->write(padding.data(), padding_size) != padding_size) {
-      LOG_ERROR("RecordRotator::dump: padding write failed");
-      return IndexError_WriteData;
-    }
-  }
-
-  // Register segment meta
-  int ret = dumper->append(seg_id, data_size, padding_size, crc);
+  // Append segment to storage
+  int ret = storage->append(seg_id, total_size);
   if (ret != 0) {
-    LOG_ERROR("RecordRotator::dump: append segment meta failed, ret=%d", ret);
+    LOG_ERROR("RecordRotator::dump(storage): append segment '%s' failed, ret=%d",
+              seg_id.c_str(), ret);
     return ret;
   }
 
-  LOG_DEBUG("RecordRotator::dump done: seg=%s, data_size=%zu, padding=%zu",
-            seg_id.c_str(), data_size, padding_size);
+  auto segment = storage->get(seg_id);
+  if (!segment) {
+    LOG_ERROR("RecordRotator::dump(storage): get segment '%s' failed",
+              seg_id.c_str());
+    return IndexError_WriteData;
+  }
+
+  size_t written = segment->write(0, buffer.data(), data_size);
+  if (written != data_size) {
+    LOG_ERROR(
+        "RecordRotator::dump(storage): write failed, written=%zu, expected=%zu",
+        written, data_size);
+    return IndexError_WriteData;
+  }
+  segment->resize(data_size);
+  segment->update_data_crc(ailego::Crc32c::Hash(buffer.data(), data_size, 0));
+
+  LOG_DEBUG(
+      "RecordRotator::dump(storage) done: seg=%s, data_size=%zu, total=%zu",
+      seg_id.c_str(), data_size, total_size);
   return 0;
 }
 

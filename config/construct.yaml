@@ -4,7 +4,7 @@ BuilderCommon:
   # NeedTrain: true #是否需要走train流程
   # TrainFile: /root/data/cohere/1m/cohere_train_vector_1m.norm.zvec.vecs
   DumpPath:  ./flase.tmp
-  IndexPath: /root/data/gist/index/gist.random2.l2.fp32.index
+  IndexPath: /root/data/gist/index/gist.random2.l2.int8.index
 
   ThreadCount: 16
 
