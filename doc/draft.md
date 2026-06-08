@@ -16,15 +16,18 @@ ConverterParams:
 ```
 ```
 Build 阶段:
-  Converter::init()      → 读取 enable_rotate=true，创建 rabitqlib::Rotator
-  Converter::transform() → 每条向量: rotator->rotate(x) → [normalize] → int8 量化
-  Converter::dump()      → 将 rotator 数据写入独立 segment
-  Streamer::dump()       → 写入 meta + HNSW 图数据（不感知 converter）
-  meta.set_reformer()    → reformer_params 中写入 enable_rotate=true
+  Converter::init()        → 读取 enable_rotate=true，创建 rabitqlib::Rotator
+  Converter::transform()   → 每条向量: rotator->rotate(x) → [normalize] → int8 量化
+  Converter::dump_to_storage() → 将 rotator 写入 IndexStorage segment（自描述格式）
+  Reformer::load(storage)  → 从 segment 加载 rotator（构建时由 local_builder 调用）
+  Reformer::convert()      → 每条向量: rotator->rotate(x) → [normalize] → int8 量化 → 写入 HNSW
+  Streamer::dump()         → 写入 meta + HNSW 图数据（不感知 converter）
+  meta.set_reformer()      → reformer_params 中写入 enable_rotate=true
 
 Search 阶段:
-  Index::Open()          → reformer_->load(storage_) → 从 segment 加载 rotator
-  Reformer::transform()  → 每条 query: rotator->rotate(q) → [normalize] → int8 量化
+  Index::Open()            → reformer_->load(storage_) → 自动检测 storage 中的 rotator segment
+                              若存在则加载（无需搜索侧配置 enable_rotate），若不存在则为 no-op
+  Reformer::transform()    → 每条 query: rotator->rotate(q) → [normalize] → int8 量化
 ```
 ## Int8StreamingConverter具体实现
 
@@ -43,8 +46,8 @@ static const std::string INTEGER_STREAMING_REFORMER_ENABLE_ROTATE =
 2. 实现方式参考/root/code/zvec/src/core/algorithm/hnsw_rabitq中的旋转方式，具体实现调用第三方库/root/code/zvec/thirdparty/RaBitQ-Library
 3. 包含功能：
   1. O(d \log d)复杂度的快速旋转
-  2. dump：保存矩阵（通过IndexDumper写入segment，含自描述Header + rabitqlib blob + CRC + 32字节对齐）
-  3. open：从Storage加载序列化旋转器（通过IndexStorage读取segment，从Header解析type/dim/padded_dim，无需预先init，含CRC校验）
+  2. dump(IndexStorage)：将旋转矩阵写入 IndexStorage segment（自描述Header + rabitqlib blob + 32字节对齐）
+  3. open：从Storage加载序列化旋转器（通过IndexStorage读取segment，从Header解析type/dim/padded_dim，无需预先init）
   4. load：加载用户自定义旋转矩阵（MatrixRotator，行主序 dim x padded_dim）
 ```cpp
 class RecordRotator {
@@ -78,10 +81,10 @@ class RecordRotator {
   //! Return the serialized size of the rotator in bytes (header + blob)
   size_t dump_bytes() const;
 
-  //! Dump the rotator to an IndexDumper as a named segment.
+  //! Dump the rotator to an IndexStorage as a named segment.
   //! Format: [Header: type(1B)|origin_dim(4B)|padded_dim(4B)] [rabitqlib blob]
-  //! Appends padding for 32-byte alignment, registers segment meta (id, size, padding, crc).
-  int dump(const IndexDumper::Pointer &dumper,
+  //! Appends padding for 32-byte alignment.
+  int dump(const IndexStorage::Pointer &storage,
            const std::string &seg_id = RECORD_ROTATOR_SEG_ID) const;
 
   //! Open the rotator from an IndexStorage segment (self-describing, no init needed).
@@ -124,8 +127,8 @@ class RecordRotator {
   5. Holder Iterator 的 `encode_record()` 管线：rotate → normalize → quantize
 3. Reformer 修改：
   1. `init()` 仅读取 `enable_rotate` 标记（维度信息从序列化数据自描述获取）
-  2. `load()` 创建 rotator，调用 `rotator_->open(storage)` 加载旋转矩阵（open 内部从 header 解析 type/dim/padded_dim）
-  3. 所有 `transform()`/`convert()` 方法在量化前应用旋转
+  2. `load(storage)` 自动检测 storage 中的 rotator segment（通过 `storage->get(RECORD_ROTATOR_SEG_ID)` 探测），若存在则创建 rotator 并调用 `rotator_->open(storage)` 加载，设置 `enable_rotate_=true`；若不存在则为 no-op。**搜索侧无需在配置中显式指定 enable_rotate**
+  3. `transform()`/`convert()` 方法在量化前应用旋转（`convert()` 供构建侧 `do_build_by_streamer()` 调用）
   4. `revert()` 在旋转模式下拒绝反量化
 
 ### 4. 修改 Index::Open() [DONE]
@@ -140,32 +143,36 @@ class RecordRotator {
 4. IndexConverter 基类新增 `dump_to_storage()` 虚方法（默认 no-op），IntegerStreamingConverter 重写以持久化 rotator
 5. local_builder.cc 中 `convert_holder()`/`convert_sparse_holder()` 输出 converter 指针，`build_by_streamer()`/`build_sparse_by_streamer()` 在 `streamer->open(storage)` 后调用 `converter->dump_to_storage(storage)`
 6. 删除 RecordRotator::dump(IndexDumper) 死代码（DumpPath 已删除，无调用者）
-7. 修改文件清单：
-  - `tools/core/local_builder.cc`：删除 DumpPath 代码，添加 converter 传递和 dump_to_storage 调用
+7. `do_build_by_streamer()` 新增 storage 参数，reformer `init()` 后调用 `reformer->load(storage)` 加载 rotator，确保构建侧数据向量被旋转
+8. 修改文件清单：
+  - `tools/core/local_builder.cc`：删除 DumpPath 代码，添加 converter 传递和 dump_to_storage 调用，`do_build_by_streamer()` 传入 storage 并加载 reformer
   - `src/core/quantizer/record_rotater.h/cc`：新增 dump(IndexStorage)，删除 dump(IndexDumper)
   - `src/include/zvec/core/framework/index_converter.h`：新增 dump_to_storage() 虚方法
   - `src/core/quantizer/integer_quantizer_converter.cc`：重写 dump_to_storage()，删除 dump(IndexDumper) override
+  - `src/core/quantizer/integer_quantizer_reformer.cc`：`load()` 改为自动检测 storage 中的 rotator segment
 
-### 6. 修改运行时测试代码
-1. 测试原始功能是否有问题：
-```
-./build/bin/bench /root/code/zvec/config/search_baseline.yaml
-./build/bin/recall /root/code/zvec/config/search_baseline.yaml
-```
-查看是否能正常运行，以检查原始功能是否出现问题
-2. 编译代码：
-```cpp
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
-```
-3. 测试代码：
-索引构建：
-```cpp
-./build/bin/local_builder /root/code/zvec/config/construct.yaml
-```
-搜索测试：
-```cpp
-./build/bin/bench /root/code/zvec/config/search_baseline.yaml
-./build/bin/bench /root/code/zvec/config/search_current.yaml
-```
-4. 运行代码，并修改错误
+### 6. 搜索侧自动检测旋转器 [DONE]
+1. `IntegerStreamingReformer::load(storage)` 自动检测 storage 中的 `RECORD_ROTATOR_SEG_ID` segment
+2. 若 segment 存在，创建 rotator 并从 storage 加载，设置 `enable_rotate_=true`
+3. 若 segment 不存在，为 no-op（非旋转索引正常工作）
+4. 搜索侧配置 `search_current.yaml` 无需指定 `enable_rotate`，旋转信息完全由索引文件自描述
+5. 修改文件：`src/core/quantizer/integer_quantizer_reformer.cc`
+
+### 7. 编译配置修复 [DONE]
+1. `record_rotater.cc` 包含 rabitqlib 的 `rotator.hpp`，其中 `flip_sign()` 和 `kacs_walk()` 使用编译时 `#if defined(__AVX2__)` 宏守卫
+2. 需要在 CMake 中为 `record_rotater.cc` 添加 `-march=core-avx2` 编译标志（即 `RABITQ_ARCH_FLAG`）
+3. 该文件被两个 CMake 目标编译，均需要添加：
+  - `src/core/CMakeLists.txt`：`zvec_core` 目标
+  - `src/core/quantizer/CMakeLists.txt`：`core_quantizer_objects` 目标（recall/bench 链接此目标，容易遗漏）
+4. 修改文件：`src/core/CMakeLists.txt`、`src/core/quantizer/CMakeLists.txt`
+
+### 8. 端到端验证 [DONE]
+1. 编译：`cmake -DCMAKE_BUILD_TYPE=Release .. && make -j$(nproc)`
+2. 构建索引：`./build/bin/local_builder config/construct.yaml`（ConverterParams 中指定 `integer_streaming.converter.enable_rotate: true`）
+3. 搜索测试：`./build/bin/bench config/search_current.yaml`、`./build/bin/recall config/search_current.yaml`
+4. 实验结果（gist 100万条 960维 FP32 → INT8，ef_search=180）：
+
+| 配置 | Recall@100 | QPS |
+|---|---|---|
+| Baseline（无旋转） | 84.317 | 21,715 |
+| 旋转索引 | 84.165 | 22,847 |

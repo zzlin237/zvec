@@ -1,12 +1,12 @@
 IndexCommon:
-  IndexConfig: '{"use_id_map":false,"data_type":"DT_FP32","dimension":960,"index_type":"kHNSW","metric_type":"kL2sq","quantizer_param":{"type":"kInt8"},"m":15}'
-  IndexPath: /root/data/gist/index/gist.random2.l2.int8.index
+  IndexConfig: '{"use_id_map":false,"data_type":"DT_FP32","dimension":768,"index_type":"kHNSW","metric_type":"kCosine","quantizer_param":{"type":"kInt8"},"m":15}'
+  IndexPath: /root/data/cohere/1m/index/cohere.random.cosine.int8.index
   TopK: 100 #指定返回topk，recall时多topk用逗号隔开，bench时会使用最大值
-  QueryFile: /root/data/gist/query.txt
+  QueryFile: /root/data/cohere/1m/cohere_test_vector_1m.1000.norm.random.txt
   QueryType: float #指定query向量类型，需要与索引类型一致（FP16索引使用float查询，内部会自动转换）
   QueryFirstSep: ";" #指定query第一分隔符，用于分割key和特征
   QuerySecondSep: " " #指定query第二分隔符，用于分割特征各维度
-  GroundTruthFile: /root/data/gist/ground_truth.txt
+  GroundTruthFile: /root/data/cohere/1m/neighbors.txt
 
   RecallThreadCount: 16
   BenchThreadCount: 16  #指定bench并发数（召回并发直接使用cpu核数）

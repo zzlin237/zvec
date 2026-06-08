@@ -400,7 +400,8 @@ int build_sparse_by_streamer(IndexStreamer::Pointer &streamer,
 }
 
 int do_build_by_streamer(IndexStreamer::Pointer &streamer,
-                         uint32_t thread_count, RetrievalMode retrieval_mode) {
+                         uint32_t thread_count, RetrievalMode retrieval_mode,
+                         const IndexStorage::Pointer &storage = nullptr) {
   int ret;
   ailego::ThreadPool pool(thread_count, false);
   std::atomic<size_t> finished{0};
@@ -422,6 +423,14 @@ int do_build_by_streamer(IndexStreamer::Pointer &streamer,
         return IndexError_NoExist;
       }
       reformer->init(meta.reformer_params());
+      // Load reformer state from storage (e.g. rotator for IntegerStreaming)
+      if (storage) {
+        ret = reformer->load(storage);
+        if (ret != 0) {
+          LOG_ERROR("Failed to load reformer from storage, ret=%d", ret);
+          return ret;
+        }
+      }
     }
   }
 
@@ -585,7 +594,7 @@ int build_by_streamer(IndexStreamer::Pointer &streamer,
 
   LOG_DEBUG("thread count: %zu, retrieval mode: %s", thread_count,
             retrieval_mode == 1 ? "Dense" : "Sparse");
-  do_build_by_streamer(streamer, thread_count, retrieval_mode);
+  do_build_by_streamer(streamer, thread_count, retrieval_mode, storage);
 
   return 0;
 }

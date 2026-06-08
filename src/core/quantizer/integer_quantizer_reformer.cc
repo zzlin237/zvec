@@ -297,17 +297,31 @@ class IntegerStreamingReformer : public IndexReformer {
   }
 
   //! Load index from container
+  //! Auto-detects rotation by checking for rotator segment in storage.
+  //! No need for enable_rotate in search config.
   int load(IndexStorage::Pointer storage) override {
-    if (enable_rotate_) {
+    // If config explicitly enables rotate but rotator not yet loaded, try storage
+    // If config doesn't enable rotate, still try storage (auto-detect)
+    if (enable_rotate_ || storage->get(RECORD_ROTATOR_SEG_ID)) {
       rotator_ = std::make_shared<RecordRotator>();
       int ret = rotator_->open(storage);
       if (ret != 0) {
-        LOG_ERROR("IntegerStreamingReformer: load rotator failed, ret=%d", ret);
-        return ret;
+        if (enable_rotate_) {
+          // Config said enable_rotate but storage has no rotator — error
+          LOG_ERROR(
+              "IntegerStreamingReformer: load rotator failed, ret=%d", ret);
+          rotator_.reset();
+          return ret;
+        }
+        // No rotator in storage, rotation not available
+        rotator_.reset();
+      } else {
+        enable_rotate_ = true;
+        LOG_DEBUG(
+            "IntegerStreamingReformer: rotator auto-loaded, origin_dim=%zu, "
+            "padded_dim=%zu",
+            rotator_->dimension(), rotator_->padded_dim());
       }
-      LOG_DEBUG("IntegerStreamingReformer: rotator loaded, origin_dim=%zu, "
-                "padded_dim=%zu",
-                rotator_->dimension(), rotator_->padded_dim());
     }
     return 0;
   }
