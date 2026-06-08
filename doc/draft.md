@@ -176,3 +176,9 @@ class RecordRotator {
 |---|---|---|
 | Baseline（无旋转） | 84.317 | 21,715 |
 | 旋转索引 | 84.165 | 22,847 |
+
+## CosineInt8Converter具体实现
+1. 模仿Int8StreamingConverter具体实现，将功能拓展到CosineInt8Converter
+2. 构建索引：`./build/bin/local_builder config/construct2.yaml`
+3. baseline测试：`./build/bin/bench config/search_baseline2.yaml`、`./build/bin/recall config/search_baseline2.yaml`
+4. 搜索测试：`./build/bin/bench config/search_current2.yaml`、`./build/bin/recall config/search_current2.yaml`

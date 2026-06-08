@@ -4,12 +4,12 @@ BuilderCommon:
   # NeedTrain: true #是否需要走train流程
   # TrainFile: /root/data/cohere/1m/cohere_train_vector_1m.norm.zvec.vecs
   DumpPath:  ./flase.tmp
-  IndexPath: /root/data/cohere/1m/cohere.random2.cosine.int8.index
+  IndexPath: /root/data/cohere/1m/index/cohere.random2.cosine.int8.index
 
   ThreadCount: 16
 
   MetricName: Cosine
-  ConverterName: CosineFp16Converter
+  ConverterName: CosineInt8Converter
   # ConverterName: Int8StreamingConverter
 
   DisableIdMap: true
