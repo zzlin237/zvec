@@ -134,10 +134,16 @@ class RecordRotator {
 3. 对无序列化数据的 reformer（如非旋转模式），`load()` 为 no-op 直接返回 0，不干扰运行时功能
 
 ### 5. 修改运行时测试代码
+0. 测试原始功能是否有问题：
+```
+./build/bin/bench /root/code/zvec/config/search_baseline.yaml
+./build/bin/recall /root/code/zvec/config/search_baseline.yaml
+```
+查看是否能正常运行，以检查原始功能是否出现问题
 1. 修改代码：/root/code/zvec/tools/core/local_builder.cc，使其可以保存旋转矩阵
 2. 编译代码：
 ```cpp
-cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake -DENABLE_SKYLAKE=ON -DCMAKE_BUILD_TYPE=Release ..
 make -j$(nproc)
 ```
 3. 测试代码：

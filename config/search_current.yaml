@@ -1,6 +1,6 @@
 IndexCommon:
   IndexConfig: '{"use_id_map":false,"data_type":"DT_FP32","dimension":960,"index_type":"kHNSW","metric_type":"kL2sq","quantizer_param":{"type":"kInt8"},"m":15}'
-  IndexPath: /root/data/gist/index/gist.random2.l2.fp32.index
+  IndexPath: /root/data/gist/index/gist.random2.l2.int8.index
   TopK: 100 #指定返回topk，recall时多topk用逗号隔开，bench时会使用最大值
   QueryFile: /root/data/gist/query.txt
   QueryType: float #指定query向量类型，需要与索引类型一致（FP16索引使用float查询，内部会自动转换）
