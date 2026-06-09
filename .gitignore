@@ -55,4 +55,4 @@ allure-*
 # congfig
 doc/
 config/
-example/python/
+examples/python/
