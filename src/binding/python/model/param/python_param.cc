@@ -421,7 +421,7 @@ Examples:
     {'metric_type': 'IP', 'm': 16, 'ef_construction': 200, 'quantize_type': 'INT8', 'use_contiguous_memory': True}
 )pbdoc");
   hnsw_params
-      .def(py::init<MetricType, int, int, QuantizeType, bool, bool>(),
+      .def(py::init<MetricType, int, int, QuantizeType, bool, bool>(), // Added a new parameter; refactored to QuantizerParam in future
            py::arg("metric_type") = MetricType::IP,
            py::arg("m") = core_interface::kDefaultHnswNeighborCnt,
            py::arg("ef_construction") =

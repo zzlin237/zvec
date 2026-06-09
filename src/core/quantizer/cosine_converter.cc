@@ -19,7 +19,7 @@
 #include <core/quantizer/quantizer_params.h>
 #include <zvec/core/framework/index_factory.h>
 #include "record_quantizer.h"
-#include "record_rotater.h"
+#include "record_rotator.h"
 #include "../metric/metric_params.h"
 
 namespace zvec {

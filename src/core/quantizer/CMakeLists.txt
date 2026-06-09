@@ -6,11 +6,9 @@ if(NOT APPLE)
       "-Wl,--exclude-libs,libparquet.a:libarrow.a:libarrow_bundled_dependencies.a")
 endif()
 
-# record_rotater.cc includes rabitqlib's rotator.hpp which uses AVX2
-# intrinsics (flip_sign, kacs_walk), so it needs the AVX2 compile flag.
 if(RABITQ_SUPPORTED AND RABITQ_ARCH_FLAG)
   set_source_files_properties(
-      record_rotater.cc
+      record_rotator.cc
       PROPERTIES
       COMPILE_FLAGS "${RABITQ_ARCH_FLAG}"
   )

@@ -13,10 +13,10 @@ if(RABITQ_SUPPORTED AND AUTO_DETECT_ARCH)
   set(HNSW_RABITQ_FILES_FULL ${HNSW_RABITQ_FILES})
   list(TRANSFORM HNSW_RABITQ_FILES_FULL PREPEND "algorithm/hnsw_rabitq/")
 
-  # record_rotater.cc includes rabitqlib's rotator.hpp which uses AVX2
+  # record_rotator.cc includes rabitqlib's rotator.hpp which uses AVX2
   # intrinsics in flip_sign() and kacs_walk(), so it also needs the
   # RABITQ_ARCH_FLAG at compile time.
-  list(APPEND HNSW_RABITQ_FILES_FULL "quantizer/record_rotater.cc")
+  list(APPEND HNSW_RABITQ_FILES_FULL "quantizer/record_rotator.cc")
 
   foreach(FILE ${HNSW_RABITQ_FILES_FULL})
       set_source_files_properties(

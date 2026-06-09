@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "record_rotater.h"
+#include "record_rotator.h"
 #include <cstring>
 #include <rabitqlib/utils/rotator.hpp>
 #include <zvec/ailego/hash/crc32c.h>
