@@ -39,12 +39,12 @@ static const std::string INTEGER_STREAMING_CONVERTER_ENABLE_ROTATE =
 //! IntegerStreamingReformer
 static const std::string INTEGER_STREAMING_REFORMER_ENABLE_ROTATE =
     "integer_streaming.reformer.enable_rotate";
-```
-【check】: CosineInt8Converter层和IntegerStreamingConverter共用同一个标志不太好：
-改为：
-```cpp
-integer_streaming.converter.enable_rotate
-consine.converter.enable_rotate
+//! CosineConverter
+static const std::string COSINE_CONVERTER_ENABLE_ROTATE =
+    "cosine.converter.enable_rotate";
+//! CosineReformer
+static const std::string COSINE_REFORMER_ENABLE_ROTATE =
+    "cosine.reformer.enable_rotate";
 ```
 
 

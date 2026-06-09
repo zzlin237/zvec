@@ -287,11 +287,11 @@ class CosineConverter : public IndexConverter {
     }
 
     // Read rotation config
-    params.get(INTEGER_STREAMING_CONVERTER_ENABLE_ROTATE, &enable_rotate_);
+    params.get(COSINE_CONVERTER_ENABLE_ROTATE, &enable_rotate_);
 
     ailego::Params reformer_params;
     if (enable_rotate_) {
-      reformer_params.set(INTEGER_STREAMING_REFORMER_ENABLE_ROTATE, true);
+      reformer_params.set(COSINE_REFORMER_ENABLE_ROTATE, true);
     }
 
     // Compute padded dimension and create rotator if rotation is enabled

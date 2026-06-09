@@ -15,7 +15,7 @@ BuilderCommon:
   DisableIdMap: true
 
 ConverterParams:
-    integer_streaming.converter.enable_rotate: !!bool true
+    cosine.converter.enable_rotate: !!bool true
 
 BuilderParams: #各Builder方法的params参数
   proxima.hnsw.streamer.efconstruction: !!int 500

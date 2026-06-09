@@ -45,7 +45,7 @@ class CosineReformer : public IndexReformer {
 
   //! Initialize Reformer
   int init(const ailego::Params &params) override {
-    params.get(INTEGER_STREAMING_REFORMER_ENABLE_ROTATE, &enable_rotate_);
+    params.get(COSINE_REFORMER_ENABLE_ROTATE, &enable_rotate_);
     return 0;
   }
 

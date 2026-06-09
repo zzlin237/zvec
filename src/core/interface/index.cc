@@ -181,7 +181,12 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
   // Pass enable_rotate to converter_params (only effective for INT8)
   if (index_param.enable_rotate) {
     if (param.type == QuantizerType::kInt8) {
-      converter_params.set("integer_streaming.converter.enable_rotate", true);
+      if (index_param.metric_type == MetricType::kCosine) {
+        converter_params.set("cosine.converter.enable_rotate", true);
+      } else {
+        converter_params.set("integer_streaming.converter.enable_rotate",
+                             true);
+      }
     } else {
       LOG_WARN(
           "enable_rotate is only supported for INT8 quantizer, "
