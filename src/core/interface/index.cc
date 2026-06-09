@@ -307,6 +307,12 @@ int Index::Open(const std::string &file_path, StorageOptions storage_options) {
 
   // Load reformer data from storage (e.g., rotation matrix for IntegerStreaming)
   if (reformer_ != nullptr) {
+    // When building a new index, dump converter state (e.g., rotator) to
+    // storage so the reformer can load it.  This is needed for
+    // enable_rotate with INT8 quantization.
+    if (storage_options.create_new && converter_ != nullptr) {
+      converter_->dump_to_storage(storage_);
+    }
     if (reformer_->load(storage_) != 0) {
       LOG_ERROR("Failed to load reformer, path: %s", file_path.c_str());
       return core::IndexError_Runtime;

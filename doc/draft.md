@@ -40,6 +40,13 @@ static const std::string INTEGER_STREAMING_CONVERTER_ENABLE_ROTATE =
 static const std::string INTEGER_STREAMING_REFORMER_ENABLE_ROTATE =
     "integer_streaming.reformer.enable_rotate";
 ```
+【check】: CosineInt8Converter层和IntegerStreamingConverter共用同一个标志不太好：
+改为：
+```cpp
+integer_streaming.converter.enable_rotate
+consine.converter.enable_rotate
+```
+
 
 ### 2. 新增矩阵旋转工具类 [DONE]
 1. 便于拓展，将旋转功能抽象到统一的文件`/root/code/zvec/src/core/quantizer/record_rotater.h`和`record_rotater.cc`中（pimpl模式，rabitqlib依赖仅在.cc中）
@@ -116,6 +123,7 @@ class RecordRotator {
   std::unique_ptr<Impl> impl_;
 };
 ```
+【check】: 当前直接复用rabitq的旋转方法，可能不太好，待修正
 ### 3. 修改 IntegerStreaming 的 Converter 和 Reformer [DONE]
 
 1. 修改文件：`integer_quantizer_converter.cc` 和 `integer_quantizer_reformer.cc`
@@ -130,7 +138,7 @@ class RecordRotator {
   2. `load(storage)` 自动检测 storage 中的 rotator segment（通过 `storage->get(RECORD_ROTATOR_SEG_ID)` 探测），若存在则创建 rotator 并调用 `rotator_->open(storage)` 加载，设置 `enable_rotate_=true`；若不存在则为 no-op。**搜索侧无需在配置中显式指定 enable_rotate**
   3. `transform()`/`convert()` 方法在量化前应用旋转（`convert()` 供构建侧 `do_build_by_streamer()` 调用）
   4. `revert()` 在旋转模式下拒绝反量化
-
+【check】: 
 ### 4. 修改 Index::Open() [DONE]
 1. 修改代码：`src/core/interface/index.cc`
 2. 在 `Index::Open()` 中 streamer 打开后，调用 `reformer_->load(storage_)` 加载序列化数据（旋转矩阵等）
@@ -209,6 +217,9 @@ Converter Layer — converter_params.set("integer_streaming.converter.enable_rot
 6. `src/db/proto/zvec.proto`：`HnswIndexParams` message 新增 `enable_rotate = 5`
 7. `src/db/index/common/proto_converter.cc`：`FromPb`/`ToPb` 处理 `enable_rotate`
 8. `src/binding/python/model/param/python_param.cc`：`HnswIndexParam` pybind11 绑定新增 `enable_rotate` 参数、property、to_dict/repr/pickle
+9. `src/core/interface/index.cc`：`Index::Open()` 新增 `create_new` 时 `converter_->dump_to_storage()` 逻辑，修复 DB 构建路径 Reformer 加载 rotator 失败
+10. `examples/python/int8_rotate_build.py`：新增 Python INT8+rotate 构建示例
+11. `examples/python/int8_rotate_query.py`：新增 Python INT8+rotate 查询示例
 
 #### Python 使用方式
 ```python
@@ -225,6 +236,37 @@ params = HnswIndexParam(
 print(params)
 # {"metric_type":COSINE, "m":15, "ef_construction":500, "quantize_type":INT8, "use_contiguous_memory":false, "enable_rotate":true}
 ```
+
+#### Python 示例脚本（已完成）
+模仿 `dco_build.py` / `dco_query.py`，将 `construct2.yaml` / `search_current2.yaml` 在 Python 层实现。
+
+- **构建脚本**：`examples/python/int8_rotate_build.py`
+  - 读取 `.zvec.vecs` 文件，创建 Collection（INT8 + enable_rotate=True + COSINE）
+  - 触发 CosineInt8Converter + FhtKacRotator
+  - 插入 → optimize → flush
+- **查询脚本**：`examples/python/int8_rotate_query.py`
+  - 打开已构建的 Collection，加载 Reformer（自动从 storage 检测 rotator）
+  - 执行 search + recall 评估
+
+#### 额外修复
+`src/core/interface/index.cc` `Index::Open()` 新增 L310-314：DB 构建路径（`create_new=true`）下，先将 Converter 的 rotator dump 到 storage，再让 Reformer load。修复前 DB optimize 阶段会因 Reformer 找不到 rotator segment 而失败。
+
+```cpp
+// When building a new index, dump converter state (e.g., rotator) to
+// storage so the reformer can load it.
+if (storage_options.create_new && converter_ != nullptr) {
+  converter_->dump_to_storage(storage_);
+}
+```
+
+#### 测试结果（Cohere 1M, dim=768, Cosine, INT8+rotate, m=15, ef_construction=500）
+
+| 指标 | 数值 |
+|------|------|
+| 插入速度 | ~20k docs/s |
+| HNSW 构建 | 111.5s |
+| QPS (ef=180) | ~1344 |
+| recall@100 | 94.03% |
 
 ## 对接 VectorDBBench
 1. 环境：
@@ -254,15 +296,23 @@ vectordbbench zvec \
 --quantize-type int8 \
 --m 15 \
 --ef-search 180 \
---enable_rotate \
+--enable-rotate  \
 --skip-drop-old \
 --skip-load
 ```
-从而开启随机旋转方式，然后测试
-4. 修改/root/code/VectorDBBench完成对接，
-```
-cd /root/code/VectorDBBench
-pip install -e .
-```
-进行安装
-5. 进行测试，没有--skip-drop-old --skip-load为构建，有则为搜索
+4. 修改 `/root/code/VectorDBBench` 完成对接（已完成）：
+   - `vectordb_bench/backend/clients/zvec/cli.py`：新增 `--enable-rotate` CLI flag
+   - `vectordb_bench/backend/clients/zvec/config.py`：`ZvecHNSWIndexConfig` 新增 `enable_rotate: bool = False`
+   - `vectordb_bench/backend/clients/zvec/zvec.py`：`_parse_index_param()` 传递 `enable_rotate` 到 `HnswIndexParam`
+   - `pip install -e .` 安装
+5. 测试结果（已完成，Cohere 1M, 768D, Cosine, INT8+rotate, m=15, ef_search=180）
+
+| 指标 | 数值 |
+|------|------|
+| 插入耗时 | 33.6s |
+| 优化耗时 | 109.8s |
+| 并发 QPS (16线程) | **13,989** |
+| recall@100 | **93.97%** |
+| NDCG | 94.91% |
+| 串行延迟 p99 | 1.4ms |
+| 串行延迟 p95 | 0.8ms |
