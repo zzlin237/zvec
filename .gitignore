@@ -56,3 +56,4 @@ allure-*
 doc/
 config/
 examples/python/
+logs/
