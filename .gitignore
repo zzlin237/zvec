@@ -53,6 +53,6 @@ allure-*
 !build_ios.sh
 
 # congfig
-doc
-config
-example/python
+doc/
+config/
+example/python/
