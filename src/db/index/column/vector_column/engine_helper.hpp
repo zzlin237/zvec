@@ -336,6 +336,7 @@ class ProximaEngineHelper {
       return tl::make_unexpected(
           Status::InvalidArgument("unsupported quantize type"));
     }
+    index_param_builder->WithEnableRotate(db_index_params->enable_rotate());
     return index_param_builder;
   }
 
@@ -380,8 +381,6 @@ class ProximaEngineHelper {
             db_index_params->ef_construction());
         index_param_builder->WithUseContiguousMemory(
             db_index_params->use_contiguous_memory());
-        index_param_builder->WithEnableRotate(
-            db_index_params->enable_rotate());
 
         return index_param_builder->Build();
       }

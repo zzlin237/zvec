@@ -182,7 +182,7 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
   }
 
   // Pass enable_rotate to converter_params (only effective for INT8)
-  if (index_param.enable_rotate) {
+  if (param.enable_rotate) {
     if (param.type == QuantizerType::kInt8) {
       if (index_param.metric_type == MetricType::kCosine) {
         converter_params.set("cosine.converter.enable_rotate", true);

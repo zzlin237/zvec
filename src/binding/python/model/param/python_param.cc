@@ -363,6 +363,14 @@ Attributes:
             return self.quantize_type();
           },
           "QuantizeType: Vector quantization type (e.g., FP16, INT8).")
+      .def_property_readonly(
+          "enable_rotate",
+          [](const VectorIndexParams &self) -> bool {
+            return self.enable_rotate();
+          },
+          "bool: Whether to apply random rotation before INT8 quantization "
+          "to reduce quantization error. Only effective with "
+          "quantize_type=INT8. Defaults to False.")
       .def(
           "to_dict",
           [](const VectorIndexParams &self) -> py::dict {
@@ -371,6 +379,7 @@ Attributes:
             dict["metric_type"] = metric_type_to_string(self.metric_type());
             dict["quantize_type"] =
                 quantize_type_to_string(self.quantize_type());
+            dict["enable_rotate"] = self.enable_rotate();
             return dict;
           },
           "Convert to dictionary with all fields")
@@ -440,11 +449,6 @@ Examples:
           "bool: Whether to allocate a single contiguous memory arena for "
           "all HNSW graph nodes. Improves cache locality and search "
           "throughput at the cost of peak memory usage. Defaults to False.")
-      .def_property_readonly(
-          "enable_rotate", &HnswIndexParams::enable_rotate,
-          "bool: Whether to apply random rotation before INT8 quantization "
-          "to reduce quantization error. Only effective with "
-          "quantize_type=INT8. Defaults to False.")
       .def(
           "to_dict",
           [](const HnswIndexParams &self) -> py::dict {
@@ -639,7 +643,7 @@ Examples:
 )pbdoc");
   vamana_params
       .def(py::init<MetricType, int, int, float, bool, bool, bool,
-                    QuantizeType>(),
+                    QuantizeType, bool>(),
            py::arg("metric_type") = MetricType::IP,
            py::arg("max_degree") = core_interface::kDefaultVamanaMaxDegree,
            py::arg("search_list_size") =
@@ -649,7 +653,8 @@ Examples:
                core_interface::kDefaultVamanaSaturateGraph,
            py::arg("use_contiguous_memory") = false,
            py::arg("use_id_map") = false,
-           py::arg("quantize_type") = QuantizeType::UNDEFINED)
+           py::arg("quantize_type") = QuantizeType::UNDEFINED,
+           py::arg("enable_rotate") = false)
       .def_property_readonly(
           "max_degree", &VamanaIndexParams::max_degree,
           "int: Maximum out-degree (R) of every node in the Vamana graph.")
@@ -685,6 +690,7 @@ Examples:
             dict["use_id_map"] = self.use_id_map();
             dict["quantize_type"] =
                 quantize_type_to_string(self.quantize_type());
+            dict["enable_rotate"] = self.enable_rotate();
             return dict;
           },
           "Convert to dictionary with all fields")
@@ -707,7 +713,9 @@ Examples:
                     ", \"use_id_map\":" +
                     std::string(self.use_id_map() ? "true" : "false") +
                     ", \"quantize_type\":\"" +
-                    quantize_type_to_string(self.quantize_type()) + "\"}";
+                    quantize_type_to_string(self.quantize_type()) +
+                    "\", \"enable_rotate\":" +
+                    std::string(self.enable_rotate() ? "true" : "false") + "}";
            })
       .def(py::pickle(
           [](const VamanaIndexParams &self) {
@@ -715,15 +723,18 @@ Examples:
                                   self.search_list_size(), self.alpha(),
                                   self.saturate_graph(),
                                   self.use_contiguous_memory(),
-                                  self.use_id_map(), self.quantize_type());
+                                  self.use_id_map(), self.quantize_type(),
+                                  self.enable_rotate());
           },
           [](py::tuple t) {
-            if (t.size() != 8)
+            if (t.size() != 8 && t.size() != 9)
               throw std::runtime_error("Invalid state for VamanaIndexParams");
+            bool enable_rotate = t.size() >= 9 ? t[8].cast<bool>() : false;
             return std::make_shared<VamanaIndexParams>(
                 t[0].cast<MetricType>(), t[1].cast<int>(), t[2].cast<int>(),
                 t[3].cast<float>(), t[4].cast<bool>(), t[5].cast<bool>(),
-                t[6].cast<bool>(), t[7].cast<QuantizeType>());
+                t[6].cast<bool>(), t[7].cast<QuantizeType>(),
+                enable_rotate);
           }));
 
   // FlatIndexParams
@@ -753,9 +764,10 @@ Examples:
     {'metric_type': 'L2', 'quantize_type': 'FP16'}
 )pbdoc");
   flat_params
-      .def(py::init<MetricType, QuantizeType>(),
+      .def(py::init<MetricType, QuantizeType, bool>(),
            py::arg("metric_type") = MetricType::IP,
            py::arg("quantize_type") = QuantizeType::UNDEFINED,
+           py::arg("enable_rotate") = false,
            R"pbdoc(
 Constructs a FlatIndexParam instance.
 
@@ -763,6 +775,9 @@ Args:
     metric_type (MetricType, optional): Distance metric. Defaults to MetricType.IP.
     quantize_type (QuantizeType, optional): Vector quantization type.
         Defaults to QuantizeType.UNDEFINED (no quantization).
+    enable_rotate (bool, optional): Whether to apply random rotation before
+        INT8 quantization. Only effective with quantize_type=INT8.
+        Defaults to False.
 )pbdoc")
       .def(
           "to_dict",
@@ -771,6 +786,7 @@ Args:
             dict["metric_type"] = metric_type_to_string(self.metric_type());
             dict["quantize_type"] =
                 quantize_type_to_string(self.quantize_type());
+            dict["enable_rotate"] = self.enable_rotate();
             return dict;
           },
           "Convert to dictionary with all fields")
@@ -780,17 +796,22 @@ Args:
                     "\"metric_type\":" +
                     metric_type_to_string(self.metric_type()) +
                     ", \"quantize_type\":" +
-                    quantize_type_to_string(self.quantize_type()) + "}";
+                    quantize_type_to_string(self.quantize_type()) +
+                    ", \"enable_rotate\":" +
+                    (self.enable_rotate() ? "true" : "false") + "}";
            })
       .def(py::pickle(
           [](const FlatIndexParams &self) {
-            return py::make_tuple(self.metric_type(), self.quantize_type());
+            return py::make_tuple(self.metric_type(), self.quantize_type(),
+                                  self.enable_rotate());
           },
           [](py::tuple t) {
-            if (t.size() != 2)
+            if (t.size() != 2 && t.size() != 3)
               throw std::runtime_error("Invalid state for FlatIndexParams");
+            bool enable_rotate = t.size() >= 3 ? t[2].cast<bool>() : false;
             return std::make_shared<FlatIndexParams>(t[0].cast<MetricType>(),
-                                                     t[1].cast<QuantizeType>());
+                                                     t[1].cast<QuantizeType>(),
+                                                     enable_rotate);
           }));
 
   // IVFIndexParams
@@ -827,10 +848,11 @@ Examples:
     100
 )pbdoc");
   ivf_params
-      .def(py::init<MetricType, int, int, bool, QuantizeType>(),
+      .def(py::init<MetricType, int, int, bool, QuantizeType, bool>(),
            py::arg("metric_type") = MetricType::IP, py::arg("n_list") = 10,
            py::arg("n_iters") = 10, py::arg("use_soar") = false,
            py::arg("quantize_type") = QuantizeType::UNDEFINED,
+           py::arg("enable_rotate") = false,
            R"pbdoc(
 Constructs an IVFIndexParam instance.
 
@@ -843,6 +865,9 @@ Args:
     use_soar (bool, optional): Enable SOAR optimization. Defaults to False.
     quantize_type (QuantizeType, optional): Vector quantization type.
         Defaults to QuantizeType.UNDEFINED.
+    enable_rotate (bool, optional): Whether to apply random rotation before
+        INT8 quantization. Only effective with quantize_type=INT8.
+        Defaults to False.
 )pbdoc")
       .def_property_readonly("n_list", &IVFIndexParams::n_list,
                              "int: Number of inverted lists.")
@@ -862,6 +887,7 @@ Args:
             dict["use_soar"] = self.use_soar();
             dict["quantize_type"] =
                 quantize_type_to_string(self.quantize_type());
+            dict["enable_rotate"] = self.enable_rotate();
             return dict;
           },
           "Convert to dictionary with all fields")
@@ -874,20 +900,24 @@ Args:
                     ", \"n_iters\":" + std::to_string(self.n_iters()) +
                     ", \"use_soar\":" + std::to_string(self.use_soar()) +
                     ", \"quantize_type\":" +
-                    quantize_type_to_string(self.quantize_type()) + "}";
+                    quantize_type_to_string(self.quantize_type()) +
+                    ", \"enable_rotate\":" +
+                    (self.enable_rotate() ? "true" : "false") + "}";
            })
       .def(py::pickle(
           [](const IVFIndexParams &self) {
             return py::make_tuple(self.metric_type(), self.n_list(),
                                   self.n_iters(), self.use_soar(),
-                                  self.quantize_type());
+                                  self.quantize_type(), self.enable_rotate());
           },
           [](py::tuple t) {
-            if (t.size() != 5)
+            if (t.size() != 5 && t.size() != 6)
               throw std::runtime_error("Invalid state for IVFIndexParams");
+            bool enable_rotate = t.size() >= 6 ? t[5].cast<bool>() : false;
             return std::make_shared<IVFIndexParams>(
                 t[0].cast<MetricType>(), t[1].cast<int>(), t[2].cast<int>(),
-                t[3].cast<bool>(), t[4].cast<QuantizeType>());
+                t[3].cast<bool>(), t[4].cast<QuantizeType>(),
+                enable_rotate);
           }));
 
   // DiskAnnIndexParams
@@ -927,10 +957,11 @@ Examples:
     100
 )pbdoc");
   diskann_params
-      .def(py::init<MetricType, int, int, int, QuantizeType>(),
+      .def(py::init<MetricType, int, int, int, QuantizeType, bool>(),
            py::arg("metric_type") = MetricType::IP, py::arg("max_degree") = 100,
            py::arg("list_size") = 50, py::arg("pq_chunk_num") = 0,
            py::arg("quantize_type") = QuantizeType::UNDEFINED,
+           py::arg("enable_rotate") = false,
            R"pbdoc(
 Constructs an DiskAnnIndexParams instance.
 
@@ -945,6 +976,9 @@ Args:
         Clamped to [1, 1024]. Defaults to 0.
     quantize_type (QuantizeType, optional): Vector quantization type.
         Defaults to QuantizeType.UNDEFINED.
+    enable_rotate (bool, optional): Whether to apply random rotation before
+        INT8 quantization. Only effective with quantize_type=INT8.
+        Defaults to False.
 )pbdoc")
       .def_property_readonly("max_degree", &DiskAnnIndexParams::max_degree,
                              "int: max node degree.")
@@ -967,6 +1001,7 @@ Args:
             dict["pq_chunk_num"] = self.pq_chunk_num();
             dict["quantize_type"] =
                 quantize_type_to_string(self.quantize_type());
+            dict["enable_rotate"] = self.enable_rotate();
             return dict;
           },
           "Convert to dictionary with all fields")
@@ -980,20 +1015,24 @@ Args:
                    ", \"list_size\":" + std::to_string(self.list_size()) +
                    ", \"pq_chunk_num\":" + std::to_string(self.pq_chunk_num()) +
                    ", \"quantize_type\":" +
-                   quantize_type_to_string(self.quantize_type()) + "}";
+                   quantize_type_to_string(self.quantize_type()) +
+                   ", \"enable_rotate\":" +
+                   (self.enable_rotate() ? "true" : "false") + "}";
           })
       .def(py::pickle(
           [](const DiskAnnIndexParams &self) {
             return py::make_tuple(self.metric_type(), self.max_degree(),
                                   self.list_size(), self.pq_chunk_num(),
-                                  self.quantize_type());
+                                  self.quantize_type(), self.enable_rotate());
           },
           [](py::tuple t) {
-            if (t.size() != 5)
+            if (t.size() != 5 && t.size() != 6)
               throw std::runtime_error("Invalid state for DiskAnnIndexParams");
+            bool enable_rotate = t.size() >= 6 ? t[5].cast<bool>() : false;
             return std::make_shared<DiskAnnIndexParams>(
                 t[0].cast<MetricType>(), t[1].cast<int>(), t[2].cast<int>(),
-                t[3].cast<int>(), t[4].cast<QuantizeType>());
+                t[3].cast<int>(), t[4].cast<QuantizeType>(),
+                enable_rotate);
           }));
 }
 

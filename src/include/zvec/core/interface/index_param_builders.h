@@ -89,7 +89,7 @@ class BaseIndexParamBuilder {  //  : public
   }
 
   ActualIndexParamBuilderType &WithEnableRotate(bool enable_rotate) {
-    param->enable_rotate = enable_rotate;
+    param->quantizer_param.enable_rotate = enable_rotate;
     return static_cast<ActualIndexParamBuilderType &>(*this);
   }
 
