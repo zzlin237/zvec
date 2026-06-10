@@ -867,6 +867,7 @@ Status SegmentHelper::PrepareQuantizeField(
   }
 
 #if !RABITQ_SUPPORTED
+  (void)raw_vector_provider;
   return Status::NotSupported(
       "RabitQ is not supported on this platform (Linux x86_64 only)");
 #else

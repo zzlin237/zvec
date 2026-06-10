@@ -106,7 +106,7 @@ class IndexSegmentStorage : public IndexStorage {
     }
 
     //! Retrieve offset of data
-    virtual size_t data_offset(void) const {
+    size_t data_offset(void) const override {
       return 0;
     }
 

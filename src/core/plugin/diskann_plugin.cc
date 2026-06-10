@@ -42,10 +42,12 @@ constexpr const char *kLibAioSoNames[] = {
 };
 constexpr bool kPlatformSupportsDiskAnnPlugin = true;
 #elif defined(__APPLE__)
-constexpr const char *kPluginFileName = "libzvec_diskann_plugin.dylib";
+[[maybe_unused]] constexpr const char *kPluginFileName =
+    "libzvec_diskann_plugin.dylib";
 constexpr bool kPlatformSupportsDiskAnnPlugin = false;
 #else
-constexpr const char *kPluginFileName = "zvec_diskann_plugin.dll";
+[[maybe_unused]] constexpr const char *kPluginFileName =
+    "zvec_diskann_plugin.dll";
 constexpr bool kPlatformSupportsDiskAnnPlugin = false;
 #endif
 

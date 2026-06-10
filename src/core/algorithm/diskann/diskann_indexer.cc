@@ -402,8 +402,6 @@ int DiskAnnIndexer::linear_search(DiskAnnContext *ctx) {
   ailego::ElapsedTime query_timer;
   ailego::ElapsedTime cpu_timer;
 
-  uint32_t num_ios = 0;
-
   std::vector<diskann_id_t> frontier;
   frontier.reserve(2 * beam_width_);
 
@@ -462,7 +460,6 @@ int DiskAnnIndexer::linear_search(DiskAnnContext *ctx) {
 
         stats.disk_page_reads++;
         stats.io_num++;
-        num_ios++;
       }
 
       io_timer.reset();
@@ -540,8 +537,6 @@ int DiskAnnIndexer::keys_search(const std::vector<uint64_t> &keys,
   ailego::ElapsedTime io_timer;
   ailego::ElapsedTime cpu_timer;
 
-  uint32_t num_ios = 0;
-
   std::vector<diskann_id_t> frontier;
   frontier.reserve(2 * beam_width_);
 
@@ -602,7 +597,6 @@ int DiskAnnIndexer::keys_search(const std::vector<uint64_t> &keys,
 
         stats.disk_page_reads++;
         stats.io_num++;
-        num_ios++;
       }
 
       io_timer.reset();
@@ -675,8 +669,6 @@ int DiskAnnIndexer::get_vector(diskann_id_t id, IndexContext::Pointer &context,
   ailego::ElapsedTime io_timer;
   ailego::ElapsedTime cpu_timer;
 
-  uint32_t num_ios = 0;
-
   std::vector<diskann_id_t> frontier;
   frontier.reserve(2 * beam_width_);
 
@@ -714,7 +706,6 @@ int DiskAnnIndexer::get_vector(diskann_id_t id, IndexContext::Pointer &context,
 
     stats.disk_page_reads++;
     stats.io_num++;
-    num_ios++;
 
     io_timer.reset();
 
@@ -798,8 +789,6 @@ int DiskAnnIndexer::cached_beam_search(DiskAnnContext *ctx) {
   candidates.insert(Neighbor(best_medoid, dist));
   visit_filter.set_visited(best_medoid);
 
-  uint32_t cmps = 0;
-  uint32_t hops = 0;
   uint32_t num_ios = 0;
 
   std::vector<diskann_id_t> frontier;
@@ -896,10 +885,10 @@ int DiskAnnIndexer::cached_beam_search(DiskAnnContext *ctx) {
 
       cpu_timer.reset();
 
-      float distances[neighbor_num];
+      std::vector<float> distances(neighbor_num);
       pq_table_->compute_dists(neighbor_num, node_neighbors, pq_chunk_num_,
                                ctx->pq_table_dist_buffer(),
-                               ctx->pq_coord_buffer(), distances);
+                               ctx->pq_coord_buffer(), distances.data());
 
       stats.dist_num += neighbor_num;
       stats.cpu_us += cpu_timer.micro_seconds();
@@ -907,7 +896,6 @@ int DiskAnnIndexer::cached_beam_search(DiskAnnContext *ctx) {
       for (uint64_t m = 0; m < neighbor_num; ++m) {
         diskann_id_t id = node_neighbors[m];
         visit_filter.set_visited(id);
-        cmps++;
 
         Neighbor nn(id, distances[m]);
         candidates.insert(nn);
@@ -937,10 +925,10 @@ int DiskAnnIndexer::cached_beam_search(DiskAnnContext *ctx) {
           reinterpret_cast<diskann_id_t *>(node_buf + 1);
 
       cpu_timer.reset();
-      float distances[neighbor_num];
+      std::vector<float> distances(neighbor_num);
       pq_table_->compute_dists(neighbor_num, node_neighbors, pq_chunk_num_,
                                ctx->pq_table_dist_buffer(),
-                               ctx->pq_coord_buffer(), distances);
+                               ctx->pq_coord_buffer(), distances.data());
 
       stats.dist_num += neighbor_num;
       stats.cpu_us += cpu_timer.micro_seconds();
@@ -949,7 +937,6 @@ int DiskAnnIndexer::cached_beam_search(DiskAnnContext *ctx) {
       for (uint64_t m = 0; m < neighbor_num; ++m) {
         diskann_id_t id = node_neighbors[m];
         visit_filter.set_visited(id);
-        cmps++;
         stats.dist_num++;
 
         Neighbor nn(id, distances[m]);
@@ -958,8 +945,6 @@ int DiskAnnIndexer::cached_beam_search(DiskAnnContext *ctx) {
 
       stats.cpu_us += cpu_timer.micro_seconds();
     }
-
-    hops++;
   }
 
   stats.total_us += query_timer.micro_seconds();
@@ -1034,8 +1019,6 @@ int DiskAnnIndexer::cached_beam_search_by_group(DiskAnnContext *ctx) {
     pq_table_->preprocess_pq_dist_table(ctx->query_rotated(),
                                         ctx->pq_table_dist_buffer());
 
-    uint32_t cmps = 0;
-    uint32_t hops = 0;
     uint32_t num_ios = 0;
 
     std::vector<diskann_id_t> frontier;
@@ -1138,10 +1121,10 @@ int DiskAnnIndexer::cached_beam_search_by_group(DiskAnnContext *ctx) {
 
         cpu_timer.reset();
 
-        float distances[neighbor_num];
+        std::vector<float> distances(neighbor_num);
         pq_table_->compute_dists(neighbor_num, node_neighbors, pq_chunk_num_,
                                  ctx->pq_table_dist_buffer(),
-                                 ctx->pq_coord_buffer(), distances);
+                                 ctx->pq_coord_buffer(), distances.data());
 
         stats.dist_num += neighbor_num;
         stats.cpu_us += cpu_timer.micro_seconds();
@@ -1149,7 +1132,6 @@ int DiskAnnIndexer::cached_beam_search_by_group(DiskAnnContext *ctx) {
         for (uint64_t m = 0; m < neighbor_num; ++m) {
           diskann_id_t id = node_neighbors[m];
           visit_filter.set_visited(id);
-          cmps++;
 
           Neighbor nn(id, distances[m]);
           candidates.insert(nn);
@@ -1189,12 +1171,12 @@ int DiskAnnIndexer::cached_beam_search_by_group(DiskAnnContext *ctx) {
 
         cpu_timer.reset();
 
-        float distances[neighbor_num];
+        std::vector<float> distances(neighbor_num);
         diskann_id_t *node_neighbors =
             reinterpret_cast<diskann_id_t *>(node_buf + 1);
         pq_table_->compute_dists(neighbor_num, node_neighbors, pq_chunk_num_,
                                  ctx->pq_table_dist_buffer(),
-                                 ctx->pq_coord_buffer(), distances);
+                                 ctx->pq_coord_buffer(), distances.data());
 
         stats.dist_num += neighbor_num;
         stats.cpu_us += cpu_timer.micro_seconds();
@@ -1203,7 +1185,6 @@ int DiskAnnIndexer::cached_beam_search_by_group(DiskAnnContext *ctx) {
         for (uint64_t m = 0; m < neighbor_num; ++m) {
           diskann_id_t id = node_neighbors[m];
           visit_filter.set_visited(id);
-          cmps++;
           stats.dist_num++;
 
           Neighbor nn(id, distances[m]);
@@ -1212,8 +1193,6 @@ int DiskAnnIndexer::cached_beam_search_by_group(DiskAnnContext *ctx) {
 
         stats.cpu_us += cpu_timer.micro_seconds();
       }
-
-      hops++;
     }
 
     stats.total_us += query_timer.micro_seconds();

@@ -164,9 +164,11 @@ Status FieldSchema::validate() const {
               "RabitQ requires AVX2/AVX512F to be supported");
         }
 
-        if (kRabitqCompiledAvx512 && !flags.AVX512F) {
-          return Status::NotSupported(
-              "RabitQ compiled with AVX512F while runtime does not support");
+        if constexpr (kRabitqCompiledAvx512) {
+          if (!flags.AVX512F) {
+            return Status::NotSupported(
+                "RabitQ compiled with AVX512F while runtime does not support");
+          }
         }
       }
 

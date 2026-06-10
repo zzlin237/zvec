@@ -272,7 +272,7 @@ int DiskAnnStreamer::get_vector(uint64_t key, Context::Pointer &context,
   return diskann_indexer_->get_vector(key, context, vector);
 }
 
-const void *DiskAnnStreamer::get_vector_by_id(uint32_t id) const {
+const void *DiskAnnStreamer::get_vector_by_id(uint32_t /*id*/) const {
   // DiskAnn vectors are stored on disk in sector format;
   // a const void* access requires sector I/O via create_context
   // Return nullptr to indicate this path is not supported.

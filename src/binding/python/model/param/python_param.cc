@@ -806,8 +806,7 @@ Attributes:
     metric_type (MetricType): Distance metric used for similarity computation.
         Default is ``MetricType.IP`` (inner product).
     n_list (int): Number of clusters (inverted lists) to partition the dataset into.
-        If set to 0, the system will auto-select a reasonable value based on data size.
-        Default is 0 (auto).
+        Default is 10.
     n_iters (int): Number of iterations for k-means clustering during index training.
         Higher values yield more stable centroids. Default is 10.
     use_soar (bool): Whether to enable SOAR (Scalable Optimized Adaptive Routing)
@@ -829,7 +828,7 @@ Examples:
 )pbdoc");
   ivf_params
       .def(py::init<MetricType, int, int, bool, QuantizeType>(),
-           py::arg("metric_type") = MetricType::IP, py::arg("n_list") = 0,
+           py::arg("metric_type") = MetricType::IP, py::arg("n_list") = 10,
            py::arg("n_iters") = 10, py::arg("use_soar") = false,
            py::arg("quantize_type") = QuantizeType::UNDEFINED,
            R"pbdoc(
@@ -837,8 +836,8 @@ Constructs an IVFIndexParam instance.
 
 Args:
     metric_type (MetricType, optional): Distance metric. Defaults to MetricType.IP.
-    n_list (int, optional): Number of inverted lists (clusters). Set to 0 for auto.
-        Defaults to 0.
+    n_list (int, optional): Number of inverted lists (clusters).
+        Defaults to 10.
     n_iters (int, optional): Number of k-means iterations during training.
         Defaults to 10.
     use_soar (bool, optional): Enable SOAR optimization. Defaults to False.
@@ -846,7 +845,7 @@ Args:
         Defaults to QuantizeType.UNDEFINED.
 )pbdoc")
       .def_property_readonly("n_list", &IVFIndexParams::n_list,
-                             "int: Number of inverted lists (0 = auto).")
+                             "int: Number of inverted lists.")
       .def_property_readonly(
           "n_iters", &IVFIndexParams::n_iters,
           "int: Number of k-means iterations during training.")
@@ -930,7 +929,7 @@ Examples:
   diskann_params
       .def(py::init<MetricType, int, int, int, QuantizeType>(),
            py::arg("metric_type") = MetricType::IP, py::arg("max_degree") = 100,
-           py::arg("list_size") = 100, py::arg("pq_chunk_num") = 0,
+           py::arg("list_size") = 50, py::arg("pq_chunk_num") = 0,
            py::arg("quantize_type") = QuantizeType::UNDEFINED,
            R"pbdoc(
 Constructs an DiskAnnIndexParams instance.
