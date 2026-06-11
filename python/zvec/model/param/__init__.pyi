@@ -145,6 +145,9 @@ class FlatIndexParam(VectorIndexParam):
         quantize_type (QuantizeType): Optional quantization type for vector
             compression (e.g., FP16, INT8). Use ``QuantizeType.UNDEFINED`` to
             disable quantization. Default is ``QuantizeType.UNDEFINED``.
+        enable_rotate (bool): Whether to apply random rotation before INT8
+            quantization. Only effective with quantize_type=INT8.
+            Default is ``False``.
 
     Examples:
         >>> from zvec.typing import MetricType, QuantizeType
@@ -161,6 +164,7 @@ class FlatIndexParam(VectorIndexParam):
         self,
         metric_type: _zvec.typing.MetricType = ...,
         quantize_type: _zvec.typing.QuantizeType = ...,
+        enable_rotate: bool = ...,
     ) -> None:
         """
         Constructs a FlatIndexParam instance.
@@ -169,6 +173,9 @@ class FlatIndexParam(VectorIndexParam):
             metric_type (MetricType, optional): Distance metric. Defaults to MetricType.IP.
             quantize_type (QuantizeType, optional): Vector quantization type.
                 Defaults to QuantizeType.UNDEFINED (no quantization).
+            enable_rotate (bool, optional): Whether to apply random rotation before
+                INT8 quantization. Only effective with quantize_type=INT8.
+                Defaults to False.
         """
 
     def __repr__(self) -> str: ...

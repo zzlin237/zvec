@@ -409,8 +409,9 @@ inline FlatIndexParams MakeDefaultVectorIndexParams(MetricType metric_type) {
 }
 
 inline FlatIndexParams MakeDefaultQuantVectorIndexParams(
-    MetricType metric_type, QuantizeType quantize_type) {
-  return FlatIndexParams(metric_type, quantize_type);
+    MetricType metric_type, QuantizeType quantize_type,
+    bool enable_rotate = false) {
+  return FlatIndexParams(metric_type, quantize_type, enable_rotate);
 }
 
 class IVFIndexParams : public VectorIndexParams {
