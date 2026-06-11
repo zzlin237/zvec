@@ -453,8 +453,13 @@ class IntegerStreamingConverter : public IndexConverter {
     return 0;
   }
 
-  //! Dump index into storage (no-op: DumpPath removed, use dump_to_storage instead)
-  int dump(const IndexDumper::Pointer & /*dumper*/) override { return 0; }
+  //! Dump index into storage (writes rotator segment if rotate enabled)
+  int dump(const IndexDumper::Pointer &dumper) override {
+    if (enable_rotate_ && rotator_) {
+      return rotator_->dump(dumper);
+    }
+    return 0;
+  }
 
   //! Dump converter state to IndexStorage for streaming build
   int dump_to_storage(const IndexStorage::Pointer &storage) override {

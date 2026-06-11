@@ -62,6 +62,8 @@ static const std::string PARAM_IVF_BUILDER_BLOCK_VECTOR_COUNT(
 // searcher params
 static const std::string PARAM_IVF_SEARCHER_SCAN_RATIO(
     "proxima.ivf.searcher.scan_ratio");
+static const std::string PARAM_IVF_SEARCHER_NPROBE(
+    "proxima.ivf.searcher.nprobe");
 static const std::string PARAM_IVF_SEARCHER_BRUTE_FORCE_THRESHOLD(
     "proxima.ivf.searcher.brute_force_threshold");
 static const std::string PARAM_IVF_SEARCHER_OPTIMIZER(

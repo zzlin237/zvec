@@ -140,6 +140,53 @@ int RecordRotator::dump(const IndexStorage::Pointer &storage,
   return 0;
 }
 
+int RecordRotator::dump(const IndexDumper::Pointer &dumper,
+                        const std::string &seg_id) const {
+  if (!dumper) {
+    LOG_ERROR("RecordRotator::dump(dumper): null dumper");
+    return IndexError_InvalidArgument;
+  }
+  if (!impl_->rotator) {
+    LOG_ERROR("RecordRotator::dump(dumper): rotator not initialized");
+    return IndexError_NoReady;
+  }
+
+  // Serialize: [Header: type|origin_dim|padded_dim] [rabitqlib blob]
+  const size_t blob_size = impl_->rotator->dump_bytes();
+  const size_t data_size = Impl::kHeaderSize + blob_size;
+  const size_t total_size = (data_size + 0x1F) & (~0x1F);
+
+  std::vector<char> buffer(total_size, 0);
+  Impl::Header header;
+  header.type = static_cast<uint8_t>(impl_->type);
+  header.origin_dim = static_cast<uint32_t>(impl_->dimension);
+  header.padded_dim = static_cast<uint32_t>(impl_->padded_dim);
+  std::memcpy(buffer.data(), &header, Impl::kHeaderSize);
+  impl_->rotator->save(buffer.data() + Impl::kHeaderSize);
+
+  const uint32_t crc = ailego::Crc32c::Hash(buffer.data(), data_size, 0);
+  const size_t padding_size = total_size - data_size;
+
+  // Write data + padding to dumper
+  if (dumper->write(buffer.data(), total_size) != total_size) {
+    LOG_ERROR("RecordRotator::dump(dumper): write failed, seg=%s", seg_id.c_str());
+    return IndexError_WriteData;
+  }
+
+  // Register segment
+  int ret = dumper->append(seg_id, data_size, padding_size, crc);
+  if (ret != 0) {
+    LOG_ERROR("RecordRotator::dump(dumper): append failed, seg=%s, ret=%d",
+              seg_id.c_str(), ret);
+    return ret;
+  }
+
+  LOG_DEBUG(
+      "RecordRotator::dump(dumper) done: seg=%s, data_size=%zu, padding=%zu",
+      seg_id.c_str(), data_size, padding_size);
+  return 0;
+}
+
 int RecordRotator::open(IndexStorage::Pointer storage,
                         const std::string &seg_id) {
   if (!storage) {

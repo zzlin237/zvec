@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "zvec/core/framework/index_dumper.h"
 #include "zvec/core/framework/index_storage.h"
 
 namespace zvec {
@@ -74,6 +75,12 @@ class RecordRotator {
   //! Dump the rotator to an IndexStorage as a named segment.
   //! Same self-describing format as the dumper variant.
   int dump(const IndexStorage::Pointer &storage,
+           const std::string &seg_id = RECORD_ROTATOR_SEG_ID) const;
+
+  //! Dump the rotator to an IndexDumper as a named segment.
+  //! Format: [Header: type(1B)|origin_dim(4B)|padded_dim(4B)] [rabitqlib blob]
+  //! Appends padding for 32-byte alignment.
+  int dump(const IndexDumper::Pointer &dumper,
            const std::string &seg_id = RECORD_ROTATOR_SEG_ID) const;
 
   //! Open the rotator from an IndexStorage segment (self-describing, no init needed).

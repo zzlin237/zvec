@@ -71,6 +71,16 @@ int IVFEntity::IVFReformerWrapper::init(const IndexMeta &imeta) {
   return 0;
 }
 
+//! Load reformer state (e.g. rotation matrix) from storage
+int IVFEntity::IVFReformerWrapper::load(const IndexStorage::Pointer &storage) {
+  if (!reformer_) {
+    return 0;
+  }
+  int ret = reformer_->load(storage);
+  ivf_check_with_msg(ret, "Failed to load reformer state");
+  return 0;
+}
+
 //! Update the params, Called by gpu searcher only
 int IVFEntity::IVFReformerWrapper::update(const IndexMeta &meta) {
   auto &name = meta.reformer_name();
@@ -503,6 +513,12 @@ int IVFEntity::load(const IndexStorage::Pointer &container) {
 
   //! Load the remaining segments
   container_ = container;
+
+  //! Load reformer state (e.g. rotation matrix) from the main container,
+  //! which holds the rotator segment dumped at build time.
+  ret = reformer_.load(container);
+  ivf_check_error_code(ret);
+
   size_t expect_size = header_.inverted_body_size;
   inverted_ = load_segment(IVF_INVERTED_BODY_SEG_ID, expect_size);
   if (!inverted_) {
@@ -581,6 +597,35 @@ int IVFEntity::load(const IndexStorage::Pointer &container) {
       header_.total_vector_count, header_.inverted_list_count,
       meta_.element_size(), meta_.metric_name().c_str(),
       meta_.reformer_name().c_str());
+  {
+    size_t nlist = header_.inverted_list_count;
+    size_t maxc = 0, minc = SIZE_MAX, nonzero = 0;
+    size_t top1 = 0, top2 = 0, top3 = 0;
+    for (size_t i = 0; i < nlist; ++i) {
+      auto m = this->inverted_list_meta(i);
+      size_t c = m ? m->vector_count : 0;
+      if (c > 0) ++nonzero;
+      if (c > maxc) maxc = c;
+      if (c < minc) minc = c;
+      if (c > top1) {
+        top3 = top2;
+        top2 = top1;
+        top1 = c;
+      } else if (c > top2) {
+        top3 = top2;
+        top2 = c;
+      } else if (c > top3) {
+        top3 = c;
+      }
+    }
+    double total = static_cast<double>(header_.total_vector_count);
+    LOG_INFO(
+        "[IVF_DIST_DBG] nlist=%zu total=%u nonzero=%zu max=%zu min=%zu "
+        "avg=%.1f top3=[%zu,%zu,%zu] top1_ratio=%.2f%%",
+        nlist, header_.total_vector_count, nonzero, maxc,
+        (minc == SIZE_MAX ? 0 : minc), total / static_cast<double>(nlist),
+        top1, top2, top3, 100.0 * static_cast<double>(top1) / total);
+  }
   return 0;
 }
 

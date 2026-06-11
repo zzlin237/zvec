@@ -375,8 +375,11 @@ class CosineConverter : public IndexConverter {
     return 0;
   }
 
-  //! Dump index into storage
-  int dump(const IndexDumper::Pointer & /*dumper*/) override {
+  //! Dump index into storage (writes rotator segment if present)
+  int dump(const IndexDumper::Pointer &dumper) override {
+    if (rotator_) {
+      return rotator_->dump(dumper);
+    }
     return 0;
   }
 
