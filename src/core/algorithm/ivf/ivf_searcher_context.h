@@ -84,13 +84,6 @@ class IVFSearcherContext : public IndexSearcher::Context {
     }
     centroid_searcher_ctx_->set_topk(static_cast<uint32_t>(topk_val));
     max_scan_count_ = std::max(bruteforce_threshold_, max_scan_count_);
-    static thread_local int kNprobeDbgCnt = 0;
-    if (kNprobeDbgCnt++ < 6) {
-      LOG_INFO(
-          "[NPROBE_DBG] nprobe_=%d scan_ratio_=%f nlist=%zu topk_val=%zu "
-          "max_scan_count_=%u",
-          nprobe_, scan_ratio_, nlist, topk_val, max_scan_count_);
-    }
     return 0;
   }
 
