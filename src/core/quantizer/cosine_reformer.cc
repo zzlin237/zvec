@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include <memory>
+#include <vector>
 #include <ailego/algorithm/integer_quantizer.h>
 #include <ailego/math/norm2_matrix.h>
 #include <ailego/math/normalizer.h>
@@ -225,6 +226,11 @@ class CosineReformer : public IndexReformer {
                  NORM_SIZE,
              NORM_SIZE);
 
+    // For FP32 input type, rotation may have been applied during transform.
+    // For FP16 input type, rotation was NOT applied — skip inverse rotation.
+    const bool need_inv_rotate =
+        (type == IndexMeta::DataType::DT_FP32 && enable_rotate_ && rotator_);
+
     if (type == IndexMeta::DataType::DT_FP32) {
       if (dst_type_ != IndexMeta::DataType::DT_FP32) {
         return IndexError_Unsupported;
@@ -234,6 +240,11 @@ class CosineReformer : public IndexReformer {
       const float *in_buf = reinterpret_cast<const float *>(in);
 
       this->denormalize(in_buf, out_buf, qmeta, norm);
+      if (need_inv_rotate) {
+        std::vector<float> tmp(dimension);
+        rotator_->unrotate(out_buf, tmp.data());
+        std::memcpy(out_buf, tmp.data(), dimension * sizeof(float));
+      }
     } else if (type == IndexMeta::DataType::DT_FP16) {
       if (dst_type_ != IndexMeta::DataType::DT_FP16) {
         return IndexError_Unsupported;
@@ -249,6 +260,7 @@ class CosineReformer : public IndexReformer {
         RecordQuantizer::unquantize_record(in, dimension, dst_type_, out_buf);
 
         this->denormalize(out_buf, out_buf, qmeta, norm);
+        // FP16 type path: no rotation was applied, skip inverse
       } else {
         ailego::Float16 *out_buf =
             reinterpret_cast<ailego::Float16 *>(&(*out)[0]);
@@ -267,6 +279,11 @@ class CosineReformer : public IndexReformer {
       RecordQuantizer::unquantize_record(in, dimension, dst_type_, out_buf);
 
       this->denormalize(out_buf, out_buf, qmeta, norm);
+      if (need_inv_rotate) {
+        std::vector<float> tmp(dimension);
+        rotator_->unrotate(out_buf, tmp.data());
+        std::memcpy(out_buf, tmp.data(), dimension * sizeof(float));
+      }
     }
 
     return 0;

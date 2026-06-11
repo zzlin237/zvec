@@ -37,6 +37,10 @@ struct RecordRotator::Impl {
   size_t padded_dim{0};
   RecordRotatorType type{RecordRotatorType::FhtKac};
   std::unique_ptr<rabitqlib::Rotator<float>> rotator;
+  //! Inverse rotation matrix, column-major: dim x padded_dim
+  //! Element [col][row] = inv_matrix_[col * dimension + row]
+  //! where col in [0, padded_dim), row in [0, dimension)
+  std::vector<float> inv_matrix;
 
   static rabitqlib::RotatorType to_rabitq(RecordRotatorType t) {
     return t == RecordRotatorType::Matrix
@@ -65,6 +69,8 @@ void RecordRotator::init(size_t dimension, size_t padded_dim,
   impl_->type = rotator_type;
   impl_->rotator.reset(rabitqlib::choose_rotator<float>(
       dimension, Impl::to_rabitq(rotator_type), padded_dim));
+  // Build inverse rotation data for unrotate support
+  build_inverse();
 }
 
 void RecordRotator::rotate(const float *in, float *out) const {
@@ -74,6 +80,68 @@ void RecordRotator::rotate(const float *in, float *out) const {
 std::vector<float> RecordRotator::rotate(const float *in) const {
   std::vector<float> out(impl_->padded_dim);
   impl_->rotator->rotate(in, out.data());
+  return out;
+}
+
+void RecordRotator::build_inverse() {
+  if (!impl_->rotator) {
+    LOG_ERROR("RecordRotator::build_inverse: rotator not initialized");
+    return;
+  }
+
+  const size_t dim = impl_->dimension;
+  const size_t pdim = impl_->padded_dim;
+
+  // Allocate column-major storage: padded_dim columns, each dim floats
+  impl_->inv_matrix.resize(pdim * dim, 0.0f);
+
+  // Compute rotation matrix by rotating each standard basis vector e_i.
+  // R * e_i = i-th column of R, which we store as inv_matrix[i * dim + j].
+  std::vector<float> basis(dim, 0.0f);
+  std::vector<float> rotated(pdim, 0.0f);
+
+  for (size_t i = 0; i < pdim; ++i) {
+    std::fill(basis.begin(), basis.end(), 0.0f);
+    if (i < dim) {
+      basis[i] = 1.0f;
+    }
+    impl_->rotator->rotate(basis.data(), rotated.data());
+    // Store as column i of the rotation matrix
+    for (size_t j = 0; j < dim; ++j) {
+      impl_->inv_matrix[i * dim + j] = rotated[j];
+    }
+  }
+
+  LOG_DEBUG("RecordRotator::build_inverse done: dim=%zu, padded_dim=%zu",
+            dim, pdim);
+}
+
+void RecordRotator::unrotate(const float *in, float *out) const {
+  if (impl_->inv_matrix.empty()) {
+    LOG_ERROR("RecordRotator::unrotate: build_inverse() not called");
+    return;
+  }
+
+  const size_t dim = impl_->dimension;
+  const size_t pdim = impl_->padded_dim;
+
+  // Compute x = R^T * y, where y is the dim-dimensional input (padded with zeros).
+  // x[j] = sum_{i=0}^{pdim-1} R[j][i] * y[i]
+  //       = sum_{i=0}^{dim-1} inv_matrix_[i * dim + j] * in[i]
+  // (since y[i] = 0 for i >= dim)
+  std::vector<float> tmp(dim, 0.0f);
+  for (size_t i = 0; i < dim; ++i) {
+    const float yi = in[i];
+    for (size_t j = 0; j < dim; ++j) {
+      tmp[j] += impl_->inv_matrix[i * dim + j] * yi;
+    }
+  }
+  std::memcpy(out, tmp.data(), dim * sizeof(float));
+}
+
+std::vector<float> RecordRotator::unrotate(const float *in) const {
+  std::vector<float> out(impl_->dimension);
+  unrotate(in, out.data());
   return out;
 }
 
@@ -245,6 +313,10 @@ int RecordRotator::open(IndexStorage::Pointer storage,
       "RecordRotator::open done: seg=%s, dim=%zu, padded_dim=%zu, "
       "data_size=%zu",
       seg_id.c_str(), impl_->dimension, impl_->padded_dim, data_size);
+
+  // Build inverse rotation data for unrotate support
+  build_inverse();
+
   return 0;
 }
 
@@ -269,6 +341,10 @@ int RecordRotator::load(const float *matrix, size_t dimension,
 
   LOG_DEBUG("RecordRotator::load done: dim=%zu, padded_dim=%zu",
             dimension, padded_dim);
+
+  // Build inverse rotation data for unrotate support
+  build_inverse();
+
   return 0;
 }
 

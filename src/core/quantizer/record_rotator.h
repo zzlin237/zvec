@@ -69,6 +69,21 @@ class RecordRotator {
   //! @return    vector<float> of size padded_dim containing rotated result
   std::vector<float> rotate(const float *in) const;
 
+  //! Inverse-rotate a single vector (from rotated space back to original)
+  //! @param in   input vector of size >= dimension (rotated, truncated)
+  //! @param out  output buffer of size >= dimension (original space)
+  void unrotate(const float *in, float *out) const;
+
+  //! Inverse-rotate a single vector into a managed buffer
+  //! @param in  input vector of size >= dimension (rotated, truncated)
+  //! @return    vector<float> of size dimension containing inverse-rotated result
+  std::vector<float> unrotate(const float *in) const;
+
+  //! Prepare internal data structures for inverse rotation.
+  //! Computes the rotation matrix by rotating basis vectors.
+  //! Must be called after init() or open() before using unrotate().
+  void build_inverse();
+
   //! Return the serialized size of the rotator in bytes (header + blob)
   size_t dump_bytes() const;
 

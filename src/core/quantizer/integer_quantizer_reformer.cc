@@ -18,6 +18,7 @@
 #include <ailego/pattern/defer.h>
 #include <core/quantizer/quantizer_params.h>
 #include <zvec/core/framework/index_factory.h>
+#include <vector>
 #include "record_quantizer.h"
 #include "record_rotator.h"
 
@@ -500,21 +501,24 @@ class IntegerStreamingReformer : public IndexReformer {
 
   int revert(const void *in, const IndexQueryMeta &qmeta,
              std::string *out) const override {
-    if (enable_rotate_) {
-      LOG_ERROR("Unsupported revert for rotated value");
-      return IndexError_Unsupported;
-    }
     if (enable_normalize_) {
       LOG_ERROR("Unsupported revert for normalized value");
-
       return IndexError_Unsupported;
     }
 
-    out->resize((qmeta.dimension() - extra_dimension_) * sizeof(float));
+    const size_t origin_dim = qmeta.dimension() - extra_dimension_;
+    out->resize(origin_dim * sizeof(float));
     float *out_buf = reinterpret_cast<float *>(out->data());
 
-    RecordQuantizer::unquantize_record(in, qmeta.dimension() - extra_dimension_,
-                                       data_type_, out_buf);
+    if (enable_rotate_ && rotator_) {
+      // First unquantize into a temporary buffer, then inverse rotate
+      std::vector<float> unq_buf(origin_dim);
+      RecordQuantizer::unquantize_record(in, origin_dim, data_type_,
+                                         unq_buf.data());
+      rotator_->unrotate(unq_buf.data(), out_buf);
+    } else {
+      RecordQuantizer::unquantize_record(in, origin_dim, data_type_, out_buf);
+    }
 
     return 0;
   }
