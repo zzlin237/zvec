@@ -24,6 +24,7 @@ __all__: list[str] = [
     "IndexParam",
     "InvertIndexParam",
     "OptimizeOption",
+    "QuantizerParam",
     "QueryParam",
     "SegmentOption",
     "VectorIndexParam",
@@ -145,9 +146,8 @@ class FlatIndexParam(VectorIndexParam):
         quantize_type (QuantizeType): Optional quantization type for vector
             compression (e.g., FP16, INT8). Use ``QuantizeType.UNDEFINED`` to
             disable quantization. Default is ``QuantizeType.UNDEFINED``.
-        enable_rotate (bool): Whether to apply random rotation before INT8
-            quantization. Only effective with quantize_type=INT8.
-            Default is ``False``.
+        quantizer_param (QuantizerParam): Quantizer configuration (e.g., enable_rotate).
+            Default is ``QuantizerParam()``.
 
     Examples:
         >>> from zvec.typing import MetricType, QuantizeType
@@ -164,7 +164,7 @@ class FlatIndexParam(VectorIndexParam):
         self,
         metric_type: _zvec.typing.MetricType = ...,
         quantize_type: _zvec.typing.QuantizeType = ...,
-        enable_rotate: bool = ...,
+        quantizer_param: QuantizerParam = ...,
     ) -> None:
         """
         Constructs a FlatIndexParam instance.
@@ -173,9 +173,8 @@ class FlatIndexParam(VectorIndexParam):
             metric_type (MetricType, optional): Distance metric. Defaults to MetricType.IP.
             quantize_type (QuantizeType, optional): Vector quantization type.
                 Defaults to QuantizeType.UNDEFINED (no quantization).
-            enable_rotate (bool, optional): Whether to apply random rotation before
-                INT8 quantization. Only effective with quantize_type=INT8.
-                Defaults to False.
+            quantizer_param (QuantizerParam, optional): Quantizer configuration.
+                Defaults to QuantizerParam().
         """
 
     def __repr__(self) -> str: ...
@@ -231,6 +230,7 @@ class HnswIndexParam(VectorIndexParam):
         ef_construction: typing.SupportsInt = 500,
         quantize_type: _zvec.typing.QuantizeType = ...,
         use_contiguous_memory: bool = False,
+        quantizer_param: QuantizerParam = ...,
     ) -> None: ...
     def __repr__(self) -> str: ...
     def __setstate__(self, arg0: tuple) -> None: ...
@@ -479,6 +479,7 @@ class IVFIndexParam(VectorIndexParam):
         n_iters: typing.SupportsInt = 10,
         use_soar: bool = False,
         quantize_type: _zvec.typing.QuantizeType = ...,
+        quantizer_param: QuantizerParam = ...,
     ) -> None:
         """
         Constructs an IVFIndexParam instance.
@@ -492,6 +493,8 @@ class IVFIndexParam(VectorIndexParam):
             use_soar (bool, optional): Enable SOAR optimization. Defaults to False.
             quantize_type (QuantizeType, optional): Vector quantization type.
                 Defaults to QuantizeType.UNDEFINED.
+            quantizer_param (QuantizerParam, optional): Quantizer configuration.
+                Defaults to QuantizerParam().
         """
 
     def __repr__(self) -> str: ...
@@ -791,6 +794,49 @@ class SegmentOption:
         bool: Whether the segment is read-only.
         """
 
+class QuantizerParam:
+    """
+
+    Parameters for quantizer configuration.
+
+    Encapsulates quantization-related settings such as enable_rotate.
+    Designed for future extensibility.
+
+    Attributes:
+        enable_rotate (bool): Whether to apply random rotation before INT8
+            quantization to reduce quantization error.
+            Only effective with quantize_type=INT8. Defaults to False.
+
+    Examples:
+        >>> qp = QuantizerParam(enable_rotate=True)
+        >>> print(qp.enable_rotate)
+        True
+    """
+
+    def __getstate__(self) -> tuple: ...
+    def __init__(self, enable_rotate: bool = False) -> None:
+        """
+        Constructs a QuantizerParam instance.
+
+        Args:
+            enable_rotate (bool, optional): Whether to apply random rotation
+                before INT8 quantization. Defaults to False.
+        """
+
+    def __repr__(self) -> str: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
+    def __eq__(self, arg0: typing.Any) -> bool: ...
+    def to_dict(self) -> dict:
+        """
+        Convert to dictionary with all fields
+        """
+
+    @property
+    def enable_rotate(self) -> bool:
+        """
+        bool: Whether random rotation is enabled before INT8 quantization.
+        """
+
 class VectorIndexParam(IndexParam):
     """
 
@@ -802,6 +848,7 @@ class VectorIndexParam(IndexParam):
         type (IndexType): The specific vector index type (e.g., HNSW, FLAT).
         metric_type (MetricType): Distance metric used for similarity search.
         quantize_type (QuantizeType): Optional vector quantization type.
+        quantizer_param (QuantizerParam): Quantizer configuration (e.g., enable_rotate).
     """
 
     def __getstate__(self) -> tuple: ...
@@ -821,6 +868,12 @@ class VectorIndexParam(IndexParam):
     def quantize_type(self) -> _zvec.typing.QuantizeType:
         """
         QuantizeType: Vector quantization type (e.g., FP16, INT8).
+        """
+
+    @property
+    def quantizer_param(self) -> QuantizerParam:
+        """
+        QuantizerParam: Quantizer configuration including enable_rotate.
         """
 
 class _SearchQuery:
