@@ -112,37 +112,41 @@ void PqInt8Quantizer::train_subquantizer(const float *data, size_t num,
   std::vector<float> new_centroids(k * d);
   std::vector<uint32_t> counts(k);
 
+  // Pre-build centroid pointer array for SIMD batch distance.
+  std::vector<const void *> centroid_ptrs(k);
+  for (size_t c = 0; c < k; ++c) {
+    centroid_ptrs[c] = centroids_m + c * d;
+  }
+  std::vector<float> dists(k);
+
   for (uint32_t iter = 0; iter < kMaxKmeansIters; ++iter) {
     bool changed = false;
 
-    // Assignment step.
+    // Assignment step — use SIMD-accelerated fp32_batch_fn_ instead of
+    // scalar L2 loop.  Each call computes distances from one sub-vector
+    // to all k centroids in one batch.
     for (size_t i = 0; i < num; ++i) {
       const float *sub_vec =
           reinterpret_cast<const float *>(
               reinterpret_cast<const uint8_t *>(data) + i * stride) +
           sub_idx * d;
 
-      float best_dist = std::numeric_limits<float>::max();
-      uint32_t best_idx = 0;
-      for (size_t c = 0; c < k; ++c) {
-        float dist = 0.0f;
-        const float *cent = centroids_m + c * d;
-        for (size_t j = 0; j < d; ++j) {
-          float diff = sub_vec[j] - cent[j];
-          dist += diff * diff;
-        }
-        if (dist < best_dist) {
-          best_dist = dist;
-          best_idx = static_cast<uint32_t>(c);
-        }
-      }
+      fp32_batch_fn_(centroid_ptrs.data(),
+                     reinterpret_cast<const void *>(sub_vec),
+                     k, d, dists.data());
+      uint32_t best_idx = static_cast<uint32_t>(
+          std::min_element(dists.begin(), dists.end()) - dists.begin());
+
       if (assignments[i] != best_idx) {
         changed = true;
         assignments[i] = best_idx;
       }
     }
 
-    if (!changed) break;
+    if (!changed) {
+      LOG_INFO("  sub[%u] converged at iter %u", sub_idx, iter + 1);
+      break;
+    }
 
     // Update step.
     std::fill(new_centroids.begin(), new_centroids.end(), 0.0f);
@@ -200,13 +204,21 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder) {
   size_t data_stride = original_dim_ * sizeof(float);
 
   // Train each sub-quantizer independently.
+  LOG_INFO("PQ training: %zu vectors, dim=%u, nsq=%u, sub_dim=%u, "
+           "max_iters=%u",
+           num, original_dim_, num_subquantizers_, sub_dim_, kMaxKmeansIters);
+
   for (uint32_t m = 0; m < num_subquantizers_; ++m) {
     train_subquantizer(all_data.data(), num, data_stride, m);
+    LOG_INFO("  sub-quantizer [%u/%u] done",
+             m + 1, num_subquantizers_);
   }
 
   // Pre-compute SDC dist_table.
+  LOG_INFO("Computing SDC dist_table ...");
   compute_dist_table();
 
+  LOG_INFO("PQ training complete.");
   return 0;
 }
 

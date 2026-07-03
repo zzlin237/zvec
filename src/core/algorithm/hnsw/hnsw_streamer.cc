@@ -180,9 +180,24 @@ int HnswStreamer::init(const IndexMeta &imeta, const ailego::Params &params) {
   return 0;
 }
 
+static std::string QuantizerClassName(const turbo::Quantizer::Pointer &q) {
+  if (!q) return {};
+  switch (q->type()) {
+    case turbo::QuantizeType::kFp32:
+      return "Fp32Quantizer";
+    case turbo::QuantizeType::kPQ:
+      return "PqInt8Quantizer";
+    default:
+      return {};
+  }
+}
+
 int HnswStreamer::init_quantizer(turbo::Quantizer::Pointer quantizer) {
   add_quantizer_ = quantizer;
   search_quantizer_ = quantizer;
+  if (turbo_quantizer_class_.empty()) {
+    turbo_quantizer_class_ = QuantizerClassName(quantizer);
+  }
   return 0;
 }
 
@@ -190,6 +205,9 @@ int HnswStreamer::init_quantizer(turbo::Quantizer::Pointer add_quantizer,
                                  turbo::Quantizer::Pointer search_quantizer) {
   add_quantizer_ = add_quantizer;
   search_quantizer_ = search_quantizer;
+  if (turbo_quantizer_class_.empty()) {
+    turbo_quantizer_class_ = QuantizerClassName(add_quantizer);
+  }
   return 0;
 }
 
@@ -369,35 +387,60 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
     search_metric_ = metric_;
   }
 
-  // Auto-create quantizer from turbo_quantizer_class_ when not set externally.
-  if (!add_quantizer_ && !turbo_quantizer_class_.empty()) {
-    add_quantizer_ = IndexFactory::CreateQuantizer(turbo_quantizer_class_);
-    if (add_quantizer_) {
-      ailego::Params quantizer_params;
-      // Forward any quantizer-specific params from streamer params
-      auto &streamer_params = meta_.streamer_params();
-      int nsq = 0;
-      if (streamer_params.get("num_subquantizers", &nsq)) {
-        quantizer_params.set("num_subquantizers", nsq);
+  // Restore turbo quantizer from persisted IndexMeta (existing index),
+  // or auto-create a fresh one for new indexes.
+  if (!add_quantizer_) {
+    std::string quantizer_class;
+    std::string quantizer_data;
+    auto &sp = meta_.streamer_params();
+    bool has_persisted = sp.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
+                                &quantizer_class) &&
+                         sp.get("turbo_quantizer_data", &quantizer_data);
+
+    if (has_persisted && !quantizer_class.empty() && !quantizer_data.empty()) {
+      // Restore quantizer from serialized state in IndexMeta.
+      add_quantizer_ = IndexFactory::CreateQuantizer(quantizer_class);
+      if (add_quantizer_) {
+        ret = add_quantizer_->deserialize(quantizer_data);
+        if (ret != 0) {
+          LOG_ERROR("Failed to deserialize turbo quantizer '%s', ret=%d",
+                    quantizer_class.c_str(), ret);
+          add_quantizer_.reset();
+        } else {
+          turbo_quantizer_class_ = quantizer_class;
+          search_quantizer_ = add_quantizer_;
+          LOG_INFO("HnswStreamer: restored turbo quantizer '%s' from index",
+                   quantizer_class.c_str());
+        }
       }
-      ret = add_quantizer_->init(meta_, quantizer_params);
-      if (ret != 0) {
-        LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
-                  turbo_quantizer_class_.c_str(), ret);
-        add_quantizer_.reset();
+    } else if (!turbo_quantizer_class_.empty()) {
+      // New index: create and init a fresh quantizer.
+      add_quantizer_ = IndexFactory::CreateQuantizer(turbo_quantizer_class_);
+      if (add_quantizer_) {
+        ailego::Params quantizer_params;
+        int nsq = 0;
+        if (sp.get("num_subquantizers", &nsq)) {
+          quantizer_params.set("num_subquantizers", nsq);
+        }
+        ret = add_quantizer_->init(meta_, quantizer_params);
+        if (ret != 0) {
+          LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
+                    turbo_quantizer_class_.c_str(), ret);
+          add_quantizer_.reset();
+        } else {
+          search_quantizer_ = add_quantizer_;
+          LOG_INFO("HnswStreamer: using turbo quantizer '%s'",
+                   turbo_quantizer_class_.c_str());
+        }
       } else {
-        search_quantizer_ = add_quantizer_;
-        LOG_INFO("HnswStreamer: using turbo quantizer '%s'",
+        LOG_WARN("HnswStreamer: failed to create quantizer '%s', "
+                 "falling back to metric distance",
                  turbo_quantizer_class_.c_str());
       }
     } else {
-      LOG_WARN("HnswStreamer: failed to create quantizer '%s', "
-               "falling back to metric distance",
-               turbo_quantizer_class_.c_str());
+      LOG_INFO("HnswStreamer: no turbo quantizer configured, "
+               "using legacy metric distance path");
     }
-  } else if (!add_quantizer_) {
-    LOG_INFO("HnswStreamer: no turbo quantizer configured, "
-             "using legacy metric distance path");
   }
 
   // Create algorithm based on entity storage mode
@@ -446,6 +489,22 @@ int HnswStreamer::close(void) {
 
   stats_.clear();
   meta_.set_metric(metric_->name(), 0, metric_->params());
+
+  // Persist turbo quantizer state into streamer params so it survives
+  // across close/open cycles via the IndexMeta serialization.
+  if (add_quantizer_) {
+    std::string quantizer_data;
+    int qret = add_quantizer_->serialize(&quantizer_data);
+    if (qret == 0) {
+      meta_.mutable_streamer_params()->set(
+          PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, turbo_quantizer_class_);
+      meta_.mutable_streamer_params()->set("turbo_quantizer_data",
+                                           std::move(quantizer_data));
+    } else {
+      LOG_ERROR("Failed to serialize turbo quantizer, ret=%d", qret);
+    }
+  }
+
   entity_->set_index_meta(meta_);
   int ret = entity_->close();
   if (ret != 0) {
@@ -460,6 +519,19 @@ int HnswStreamer::flush(uint64_t checkpoint) {
   LOG_INFO("HnswStreamer flush checkpoint=%zu", (size_t)checkpoint);
 
   meta_.set_metric(metric_->name(), 0, metric_->params());
+
+  // Persist turbo quantizer state on flush as well.
+  if (add_quantizer_) {
+    std::string quantizer_data;
+    int qret = add_quantizer_->serialize(&quantizer_data);
+    if (qret == 0) {
+      meta_.mutable_streamer_params()->set(
+          PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, turbo_quantizer_class_);
+      meta_.mutable_streamer_params()->set("turbo_quantizer_data",
+                                           std::move(quantizer_data));
+    }
+  }
+
   entity_->set_index_meta(meta_);
   return entity_->flush(checkpoint);
 }

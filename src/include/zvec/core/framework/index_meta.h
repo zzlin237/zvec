@@ -417,6 +417,11 @@ class IndexMeta {
     return streamer_params_;
   }
 
+  //! Retrieve mutable streamer params
+  ailego::Params *mutable_streamer_params(void) {
+    return &streamer_params_;
+  }
+
   //! Retrieve attributes
   const ailego::Params &attributes(void) const {
     return attributes_;
