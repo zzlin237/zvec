@@ -64,6 +64,8 @@ class PqInt8Quantizer : public Quantizer {
 
   int train(IndexHolder::Pointer holder) override;
 
+  int train(IndexHolder::Pointer holder, int thread_count) override;
+
   size_t quantized_datapoint_vector_length() const override {
     return num_subquantizers_;
   }

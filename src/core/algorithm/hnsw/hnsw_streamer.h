@@ -178,6 +178,10 @@ class HnswStreamer : public IndexStreamer {
   //! Configure and initialize the entity with saved parameters
   int setup_entity();
 
+  //! Serialize turbo quantizer state into meta_.streamer_params_
+  //! so it is included in dump/close/flush persistence.
+  void persist_quantizer_to_meta();
+
   //! To share ctx across streamer/searcher, we need to update the context for
   //! current streamer/searcher
   int update_context(HnswContext *ctx) const;

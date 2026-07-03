@@ -17,6 +17,7 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <thread>
 #include <vector>
 #include <zvec/core/framework/index_factory.h>
 #include <zvec/core/framework/index_logger.h>
@@ -144,7 +145,7 @@ void PqInt8Quantizer::train_subquantizer(const float *data, size_t num,
     }
 
     if (!changed) {
-      LOG_INFO("  sub[%u] converged at iter %u", sub_idx, iter + 1);
+      LOG_INFO("  sub[%zu] converged at iter %u", sub_idx, iter + 1);
       break;
     }
 
@@ -185,6 +186,10 @@ void PqInt8Quantizer::train_subquantizer(const float *data, size_t num,
 }
 
 int PqInt8Quantizer::train(IndexHolder::Pointer holder) {
+  return train(holder, 1);
+}
+
+int PqInt8Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
   if (!holder) {
     return kErrUnsupported;
   }
@@ -203,15 +208,49 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder) {
 
   size_t data_stride = original_dim_ * sizeof(float);
 
-  // Train each sub-quantizer independently.
-  LOG_INFO("PQ training: %zu vectors, dim=%u, nsq=%u, sub_dim=%u, "
-           "max_iters=%u",
-           num, original_dim_, num_subquantizers_, sub_dim_, kMaxKmeansIters);
+  // Clamp thread count to [1, num_subquantizers_].
+  thread_count = std::max(1, std::min(thread_count,
+                                       static_cast<int>(num_subquantizers_)));
 
-  for (uint32_t m = 0; m < num_subquantizers_; ++m) {
-    train_subquantizer(all_data.data(), num, data_stride, m);
-    LOG_INFO("  sub-quantizer [%u/%u] done",
-             m + 1, num_subquantizers_);
+  LOG_INFO("PQ training: %zu vectors, dim=%u, nsq=%u, sub_dim=%u, "
+           "max_iters=%u, threads=%d",
+           num, original_dim_, num_subquantizers_, sub_dim_,
+           kMaxKmeansIters, thread_count);
+
+  if (thread_count == 1) {
+    // Single-threaded path.
+    for (uint32_t m = 0; m < num_subquantizers_; ++m) {
+      train_subquantizer(all_data.data(), num, data_stride, m);
+      LOG_INFO("  sub-quantizer [%u/%u] done",
+               m + 1, num_subquantizers_);
+    }
+  } else {
+    // Multi-threaded path: each thread handles a contiguous range of
+    // sub-quantizers.  Sub-quantizers are fully independent — no
+    // synchronization needed.
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+
+    for (int t = 0; t < thread_count; ++t) {
+      uint32_t m_begin = static_cast<uint32_t>(
+          (static_cast<size_t>(t) * num_subquantizers_) / thread_count);
+      uint32_t m_end = static_cast<uint32_t>(
+          (static_cast<size_t>(t + 1) * num_subquantizers_) / thread_count);
+
+      threads.emplace_back([this, &all_data, num, data_stride,
+                            m_begin, m_end]() {
+        for (uint32_t m = m_begin; m < m_end; ++m) {
+          train_subquantizer(all_data.data(), num, data_stride, m);
+        }
+      });
+    }
+
+    for (auto &th : threads) {
+      th.join();
+    }
+
+    LOG_INFO("  all %u sub-quantizers trained (%d threads)",
+             num_subquantizers_, thread_count);
   }
 
   // Pre-compute SDC dist_table.

@@ -1239,7 +1239,12 @@ int do_build(YAML::Node &config_root, YAML::Node &config_common) {
       cout << "Training turbo quantizer '" << turbo_quantizer_class
            << "'..." << endl;
       ailego::ElapsedTime qtimer;
-      ret = quantizer->train(train_holder);
+      int train_thread_count = 1;
+      if (config_common["ThreadCount"]) {
+        train_thread_count = static_cast<int>(
+            config_common["ThreadCount"].as<uint64_t>());
+      }
+      ret = quantizer->train(train_holder, train_thread_count);
       if (ret != 0) {
         LOG_ERROR("Failed to train turbo quantizer '%s', ret=%d",
                   turbo_quantizer_class.c_str(), ret);

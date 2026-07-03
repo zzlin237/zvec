@@ -25,6 +25,53 @@
 namespace zvec {
 namespace core {
 
+// ---------------------------------------------------------------------------
+// Minimal base64 encode/decode for safe binary-to-JSON transport.
+// ---------------------------------------------------------------------------
+static std::string Base64Encode(const void *data, size_t len) {
+  static const char kTable[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const uint8_t *src = static_cast<const uint8_t *>(data);
+  std::string out;
+  out.reserve(((len + 2) / 3) * 4);
+  for (size_t i = 0; i < len; i += 3) {
+    uint32_t n = static_cast<uint32_t>(src[i]) << 16;
+    if (i + 1 < len) n |= static_cast<uint32_t>(src[i + 1]) << 8;
+    if (i + 2 < len) n |= static_cast<uint32_t>(src[i + 2]);
+    out.push_back(kTable[(n >> 18) & 0x3F]);
+    out.push_back(kTable[(n >> 12) & 0x3F]);
+    out.push_back((i + 1 < len) ? kTable[(n >> 6) & 0x3F] : '=');
+    out.push_back((i + 2 < len) ? kTable[n & 0x3F] : '=');
+  }
+  return out;
+}
+
+static std::string Base64Decode(const std::string &in) {
+  static const int8_t kLookup[128] = {
+      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63,
+      52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
+      -1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
+      15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1,
+      -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+      41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1};
+  std::string out;
+  out.reserve((in.size() / 4) * 3);
+  uint32_t buf = 0;
+  int bits = 0;
+  for (char c : in) {
+    if (c == '=' || c < 0 || kLookup[static_cast<uint8_t>(c)] < 0) continue;
+    buf = (buf << 6) | static_cast<uint32_t>(kLookup[static_cast<uint8_t>(c)]);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push_back(static_cast<char>((buf >> bits) & 0xFF));
+    }
+  }
+  return out;
+}
+
 HnswStreamer::HnswStreamer() = default;
 
 HnswStreamer::~HnswStreamer() {
@@ -316,12 +363,11 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
   IndexMeta index_meta;
   ret = entity_->get_index_meta(&index_meta);
   if (ret == IndexError_NoExist) {
-    // Set IndexMeta for the new index
-    ret = entity_->set_index_meta(meta_);
-    if (ret != 0) {
-      LOG_ERROR("Failed to set index meta for %s", IndexError::What(ret));
-      return ret;
-    }
+    // New index: defer writing meta to storage until close(), when the
+    // quantizer data has been serialized into meta_.  Writing a small meta
+    // here would allocate a small segment (16 KB) that cannot hold the
+    // much larger meta at close time (~200 KB with base64 PQ codebook).
+    // The in-memory meta_ is sufficient for the entity during build.
   } else if (ret != 0) {
     LOG_ERROR("Failed to get index meta for %s", IndexError::What(ret));
     return ret;
@@ -348,6 +394,12 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       meta_.set_converter(index_meta.converter_name(),
                           index_meta.converter_revision(),
                           index_meta.converter_params());
+    }
+    // Restore streamer_params (contains persisted quantizer data, etc.)
+    if (!index_meta.streamer_name().empty()) {
+      meta_.set_streamer(index_meta.streamer_name(),
+                         index_meta.streamer_revision(),
+                         index_meta.streamer_params());
     }
   }
 
@@ -391,13 +443,17 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
   // or auto-create a fresh one for new indexes.
   if (!add_quantizer_) {
     std::string quantizer_class;
-    std::string quantizer_data;
+    std::string quantizer_data_b64;
     auto &sp = meta_.streamer_params();
-    bool has_persisted = sp.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
-                                &quantizer_class) &&
-                         sp.get("turbo_quantizer_data", &quantizer_data);
+    bool has_class = sp.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
+                            &quantizer_class);
+    bool has_data = sp.get("turbo_quantizer_data_b64", &quantizer_data_b64);
+    bool has_persisted = has_class && has_data;
 
-    if (has_persisted && !quantizer_class.empty() && !quantizer_data.empty()) {
+    if (has_persisted && !quantizer_class.empty() &&
+        !quantizer_data_b64.empty()) {
+      // Base64-decode the binary quantizer data.
+      std::string quantizer_data = Base64Decode(quantizer_data_b64);
       // Restore quantizer from serialized state in IndexMeta.
       add_quantizer_ = IndexFactory::CreateQuantizer(quantizer_class);
       if (add_quantizer_) {
@@ -484,29 +540,35 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
   return 0;
 }
 
+void HnswStreamer::persist_quantizer_to_meta() {
+  if (!add_quantizer_) {
+    return;
+  }
+  std::string quantizer_data;
+  int qret = add_quantizer_->serialize(&quantizer_data);
+  if (qret == 0) {
+    // Base64-encode binary data so it survives JSON serialization in Params.
+    std::string encoded = Base64Encode(quantizer_data.data(),
+                                       quantizer_data.size());
+    meta_.mutable_streamer_params()->set(
+        PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, turbo_quantizer_class_);
+    meta_.mutable_streamer_params()->set("turbo_quantizer_data_b64",
+                                         std::move(encoded));
+  } else {
+    LOG_ERROR("Failed to serialize turbo quantizer, ret=%d", qret);
+  }
+}
+
 int HnswStreamer::close(void) {
   LOG_INFO("HnswStreamer close");
 
   stats_.clear();
   meta_.set_metric(metric_->name(), 0, metric_->params());
 
-  // Persist turbo quantizer state into streamer params so it survives
-  // across close/open cycles via the IndexMeta serialization.
-  if (add_quantizer_) {
-    std::string quantizer_data;
-    int qret = add_quantizer_->serialize(&quantizer_data);
-    if (qret == 0) {
-      meta_.mutable_streamer_params()->set(
-          PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, turbo_quantizer_class_);
-      meta_.mutable_streamer_params()->set("turbo_quantizer_data",
-                                           std::move(quantizer_data));
-    } else {
-      LOG_ERROR("Failed to serialize turbo quantizer, ret=%d", qret);
-    }
-  }
+  persist_quantizer_to_meta();
 
-  entity_->set_index_meta(meta_);
-  int ret = entity_->close();
+  int ret = entity_->set_index_meta(meta_);
+  ret = entity_->close();
   if (ret != 0) {
     return ret;
   }
@@ -520,17 +582,7 @@ int HnswStreamer::flush(uint64_t checkpoint) {
 
   meta_.set_metric(metric_->name(), 0, metric_->params());
 
-  // Persist turbo quantizer state on flush as well.
-  if (add_quantizer_) {
-    std::string quantizer_data;
-    int qret = add_quantizer_->serialize(&quantizer_data);
-    if (qret == 0) {
-      meta_.mutable_streamer_params()->set(
-          PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, turbo_quantizer_class_);
-      meta_.mutable_streamer_params()->set("turbo_quantizer_data",
-                                           std::move(quantizer_data));
-    }
-  }
+  persist_quantizer_to_meta();
 
   entity_->set_index_meta(meta_);
   return entity_->flush(checkpoint);
@@ -541,6 +593,10 @@ int HnswStreamer::dump(const IndexDumper::Pointer &dumper) {
 
   shared_mutex_.lock();
   AILEGO_DEFER([&]() { shared_mutex_.unlock(); });
+
+  // Serialize quantizer into meta_ BEFORE writing meta to dumper,
+  // so the codebook is included in the persisted index.
+  persist_quantizer_to_meta();
 
   int ret = IndexHelper::SerializeToDumper(meta_, dumper.get());
   if (ret != 0) {
