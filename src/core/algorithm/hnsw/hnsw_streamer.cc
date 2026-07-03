@@ -74,6 +74,9 @@ int HnswStreamer::init(const IndexMeta &imeta, const ailego::Params &params) {
              &use_contiguous_memory_);
   params.get(PARAM_HNSW_STREAMER_USE_EXTERNAL_VECTOR, &use_external_vector_);
 
+  params.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
+             &turbo_quantizer_class_);
+
   params.get(PARAM_HNSW_STREAMER_DOCS_SOFT_LIMIT, &docs_soft_limit_);
   if (docs_soft_limit_ > 0 && docs_soft_limit_ > docs_hard_limit_) {
     LOG_ERROR("[%s] must be >= [%s]",
@@ -177,6 +180,19 @@ int HnswStreamer::init(const IndexMeta &imeta, const ailego::Params &params) {
   return 0;
 }
 
+int HnswStreamer::init_quantizer(turbo::Quantizer::Pointer quantizer) {
+  add_quantizer_ = quantizer;
+  search_quantizer_ = quantizer;
+  return 0;
+}
+
+int HnswStreamer::init_quantizer(turbo::Quantizer::Pointer add_quantizer,
+                                 turbo::Quantizer::Pointer search_quantizer) {
+  add_quantizer_ = add_quantizer;
+  search_quantizer_ = search_quantizer;
+  return 0;
+}
+
 int HnswStreamer::cleanup(void) {
   if (state_ == STATE_OPENED) {
     this->close();
@@ -186,6 +202,9 @@ int HnswStreamer::cleanup(void) {
 
   meta_.clear();
   metric_.reset();
+  search_metric_.reset();
+  add_quantizer_.reset();
+  search_quantizer_.reset();
   stats_.clear();
   if (entity_) {
     entity_->cleanup();
@@ -345,6 +364,40 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       metric_->query_metric()->batch_distance()) {
     search_distance_ = metric_->query_metric()->distance();
     search_batch_distance_ = metric_->query_metric()->batch_distance();
+    search_metric_ = metric_->query_metric();
+  } else {
+    search_metric_ = metric_;
+  }
+
+  // Auto-create quantizer from turbo_quantizer_class_ when not set externally.
+  if (!add_quantizer_ && !turbo_quantizer_class_.empty()) {
+    add_quantizer_ = IndexFactory::CreateQuantizer(turbo_quantizer_class_);
+    if (add_quantizer_) {
+      ailego::Params quantizer_params;
+      // Forward any quantizer-specific params from streamer params
+      auto &streamer_params = meta_.streamer_params();
+      int nsq = 0;
+      if (streamer_params.get("num_subquantizers", &nsq)) {
+        quantizer_params.set("num_subquantizers", nsq);
+      }
+      ret = add_quantizer_->init(meta_, quantizer_params);
+      if (ret != 0) {
+        LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
+                  turbo_quantizer_class_.c_str(), ret);
+        add_quantizer_.reset();
+      } else {
+        search_quantizer_ = add_quantizer_;
+        LOG_INFO("HnswStreamer: using turbo quantizer '%s'",
+                 turbo_quantizer_class_.c_str());
+      }
+    } else {
+      LOG_WARN("HnswStreamer: failed to create quantizer '%s', "
+               "falling back to metric distance",
+               turbo_quantizer_class_.c_str());
+    }
+  } else if (!add_quantizer_) {
+    LOG_INFO("HnswStreamer: no turbo quantizer configured, "
+             "using legacy metric distance path");
   }
 
   // Create algorithm based on entity storage mode
@@ -437,7 +490,8 @@ IndexStreamer::Context::Pointer HnswStreamer::create_context(void) const {
     return Context::Pointer();
   }
   HnswContext *ctx =
-      new (std::nothrow) HnswContext(meta_.dimension(), metric_, entity);
+      new (std::nothrow) HnswContext(meta_.dimension(), add_quantizer_,
+                                     meta_.data_type(), metric_, entity);
   if (ailego_unlikely(ctx == nullptr)) {
     LOG_ERROR("Failed to new HnswContext");
     return Context::Pointer();
@@ -460,6 +514,8 @@ IndexStreamer::Context::Pointer HnswStreamer::create_context(void) const {
     delete ctx;
     return Context::Pointer();
   }
+  ctx->init_search_calculator(entity.get(), search_quantizer_, search_metric_,
+                              meta_.dimension(), meta_.data_type());
   uint32_t estimate_doc_count = 0;
   if (meta_.streamer_params().get(PARAM_HNSW_STREAMER_ESTIMATE_DOC_COUNT,
                                   &estimate_doc_count)) {
@@ -493,8 +549,9 @@ int HnswStreamer::update_context(HnswContext *ctx) const {
   ctx->set_min_scan_limit(min_scan_limit_);
   ctx->set_max_scan_ratio(max_scan_ratio_);
   ctx->set_bruteforce_threshold(bruteforce_threshold_);
-  return ctx->update_context(HnswContext::kStreamerContext, meta_, metric_,
-                             entity, magic_);
+  return ctx->update_context(HnswContext::kStreamerContext, meta_,
+                             add_quantizer_, search_quantizer_, metric_,
+                             search_metric_, entity, magic_);
 }
 
 //! Add a vector with id into index
@@ -539,7 +596,9 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
   AILEGO_DEFER([&]() { shared_mutex_.unlock_shared(); });
 
   ctx->clear();
-  ctx->update_dist_caculator_distance(add_distance_, add_batch_distance_);
+  ctx->set_mode(HnswContext::kBuildMode);
+  ctx->update_dist_caculator_quantizer(add_quantizer_);
+  ctx->update_dist_caculator_metric(metric_);
   ctx->reset_query(query);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
@@ -619,7 +678,9 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
   AILEGO_DEFER([&]() { shared_mutex_.unlock_shared(); });
 
   ctx->clear();
-  ctx->update_dist_caculator_distance(add_distance_, add_batch_distance_);
+  ctx->set_mode(HnswContext::kBuildMode);
+  ctx->update_dist_caculator_quantizer(add_quantizer_);
+  ctx->update_dist_caculator_metric(metric_);
   ctx->reset_query(query);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
@@ -691,7 +752,9 @@ int HnswStreamer::search_impl(const void *query, const IndexQueryMeta &qmeta,
   }
 
   ctx->clear();
-  ctx->update_dist_caculator_distance(search_distance_, search_batch_distance_);
+  ctx->set_mode(HnswContext::kSearchMode);
+  ctx->update_dist_caculator_quantizer(search_quantizer_);
+  ctx->update_dist_caculator_metric(search_metric_);
   ctx->resize_results(count);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
   for (size_t q = 0; q < count; ++q) {
@@ -761,7 +824,9 @@ int HnswStreamer::search_bf_impl(
   }
 
   ctx->clear();
-  ctx->update_dist_caculator_distance(search_distance_, search_batch_distance_);
+  ctx->set_mode(HnswContext::kSearchMode);
+  ctx->update_dist_caculator_quantizer(search_quantizer_);
+  ctx->update_dist_caculator_metric(search_metric_);
   ctx->resize_results(count);
 
   if (ctx->group_by_search()) {
@@ -855,7 +920,9 @@ int HnswStreamer::search_bf_by_p_keys_impl(
   }
 
   ctx->clear();
-  ctx->update_dist_caculator_distance(search_distance_, search_batch_distance_);
+  ctx->set_mode(HnswContext::kSearchMode);
+  ctx->update_dist_caculator_quantizer(search_quantizer_);
+  ctx->update_dist_caculator_metric(search_metric_);
   ctx->resize_results(count);
 
   if (ctx->group_by_search()) {

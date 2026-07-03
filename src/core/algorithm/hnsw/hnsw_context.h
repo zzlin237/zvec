@@ -36,12 +36,29 @@ class HnswContext : public IndexContext {
     kStreamerContext = 3
   };
 
+  enum CalcMode {
+    kBuildMode = 0,
+    kSearchMode = 1
+  };
+
   //! Construct
   HnswContext(size_t dimension, const IndexMetric::Pointer &metric,
               const HnswEntity::Pointer &entity);
 
   //! Construct
   HnswContext(const IndexMetric::Pointer &metric,
+              const HnswEntity::Pointer &entity);
+
+  //! Construct with a turbo quantizer (used for building the
+  //! internal HnswDistCalculator).
+  HnswContext(size_t dimension, zvec::turbo::Quantizer::Pointer quantizer,
+              IndexMeta::DataType qmeta_data_type,
+              const IndexMetric::Pointer &metric,
+              const HnswEntity::Pointer &entity);
+
+  //! Construct with quantizer, without dimension (lazy init).
+  HnswContext(zvec::turbo::Quantizer::Pointer quantizer,
+              const IndexMetric::Pointer &metric,
               const HnswEntity::Pointer &entity);
 
   //! Destructor
@@ -115,6 +132,14 @@ class HnswContext : public IndexContext {
   //! Update context, the context may be shared by different searcher/streamer
   int update_context(ContextType type, const IndexMeta &meta,
                      const IndexMetric::Pointer &metric,
+                     const HnswEntity::Pointer &entity, uint32_t magic_num);
+
+  //! Update context with dual quantizers (add + search).
+  int update_context(ContextType type, const IndexMeta &meta,
+                     zvec::turbo::Quantizer::Pointer add_quantizer,
+                     zvec::turbo::Quantizer::Pointer search_quantizer,
+                     const IndexMetric::Pointer &add_metric,
+                     const IndexMetric::Pointer &search_metric,
                      const HnswEntity::Pointer &entity, uint32_t magic_num);
 
   inline const HnswEntity &get_entity() const {
@@ -268,20 +293,32 @@ class HnswContext : public IndexContext {
   inline void reset_query(const void *query) {
     if (auto query_preprocess_func = index_metric_->get_query_preprocess_func();
         query_preprocess_func != nullptr) {
-      size_t dim = dc_.dimension();
+      size_t dim = active_dc().dimension();
       preprocess_buffer_.resize(dim);
       memcpy(preprocess_buffer_.data(), query, dim);
       query_preprocess_func(preprocess_buffer_.data(), dim);
       query = preprocess_buffer_.data();
     }
 
-    dc_.reset_query(query);
-    dc_.clear_compare_cnt();
+    active_dc().reset_query(query);
+    active_dc().clear_compare_cnt();
   }
 
   inline HnswDistCalculator &dist_calculator() {
-    return dc_;
+    return active_dc();
   }
+
+  //! Return the currently active distance calculator.
+  inline HnswDistCalculator &active_dc() {
+    return (mode_ == kSearchMode) ? search_dc_ : dc_;
+  }
+
+  inline const HnswDistCalculator &active_dc() const {
+    return (mode_ == kSearchMode) ? search_dc_ : dc_;
+  }
+
+  //! Switch between build and search mode.
+  inline void set_mode(CalcMode mode) { mode_ = mode; }
 
   inline TopkHeap &topk_heap() {
     return topk_heap_;
@@ -449,19 +486,19 @@ class HnswContext : public IndexContext {
   }
 
   inline size_t get_scan_num() const {
-    return dc_.compare_cnt();
+    return active_dc().compare_cnt();
   }
 
   inline uint64_t reach_scan_limit() const {
-    return dc_.compare_cnt() >= max_scan_num_;
+    return active_dc().compare_cnt() >= max_scan_num_;
   }
 
   inline bool error() const {
-    return dc_.error();
+    return active_dc().error();
   }
 
   inline void clear() {
-    dc_.clear();
+    active_dc().clear();
     if (ailego_unlikely(this->debugging())) {
       stats_get_neighbors_cnt_ = 0u;
       stats_get_vector_cnt_ = 0u;
@@ -495,7 +532,27 @@ class HnswContext : public IndexContext {
   inline void update_dist_caculator_distance(
       const IndexMetric::MatrixDistance &distance,
       const IndexMetric::MatrixBatchDistance &batch_distance) {
-    dc_.update_distance(distance, batch_distance);
+    active_dc().update_distance(distance, batch_distance);
+  }
+
+  //! Swap the turbo quantizer used by the active dist calculator.
+  inline void update_dist_caculator_quantizer(
+      zvec::turbo::Quantizer::Pointer quantizer) {
+    active_dc().update_quantizer(std::move(quantizer));
+  }
+
+  //! Swap the IndexMetric fallback used by the active dist calculator.
+  inline void update_dist_caculator_metric(IndexMetric::Pointer metric) {
+    active_dc().update_metric(std::move(metric));
+  }
+
+  //! Initialize the search-side distance calculator.
+  void init_search_calculator(const HnswEntity *entity,
+                              zvec::turbo::Quantizer::Pointer quantizer,
+                              IndexMetric::Pointer metric, uint32_t dim,
+                              IndexMeta::DataType qmeta_data_type) {
+    search_dc_.update(entity, std::move(quantizer), std::move(metric), dim,
+                      qmeta_data_type);
   }
 
   //! Get topk
@@ -541,7 +598,9 @@ class HnswContext : public IndexContext {
 
  private:
   HnswEntity::Pointer entity_;
-  HnswDistCalculator dc_;
+  HnswDistCalculator dc_;       // build-side (add) distance calculator
+  HnswDistCalculator search_dc_;  // search-side distance calculator
+  CalcMode mode_{kBuildMode};
   IndexMetric::Pointer metric_;
   const VectorSource *vector_source_{nullptr};
 

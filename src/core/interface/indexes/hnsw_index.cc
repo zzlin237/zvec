@@ -80,6 +80,25 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
   param_.ef_construction = std::max(1, std::min(2048, param_.ef_construction));
   param_.m = std::max(5, std::min(1024, param_.m));
 
+  // Map quantizer_param.type to turbo quantizer class name
+  const auto &quantizer_param = param_.quantizer_param;
+  switch (quantizer_param.type) {
+    case QuantizerType::kFp32:
+      proxima_index_params_.set(core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
+                                "Fp32Quantizer");
+      break;
+    case QuantizerType::kPQ:
+      proxima_index_params_.set(core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
+                                "PqInt8Quantizer");
+      proxima_index_params_.set("num_subquantizers",
+                                quantizer_param.num_subquantizers);
+      break;
+    default:
+      // kNone or unsupported type -> leave turbo_quantizer_class_ empty
+      // (streamer will use legacy metric distance path)
+      break;
+  }
+
   if (is_sparse_) {
     proxima_index_params_.set(core::PARAM_HNSW_SPARSE_STREAMER_EFCONSTRUCTION,
                               param_.ef_construction);

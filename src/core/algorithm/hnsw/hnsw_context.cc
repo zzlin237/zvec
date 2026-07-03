@@ -28,6 +28,27 @@ HnswContext::HnswContext(const IndexMetric::Pointer &metric,
                          const HnswEntity::Pointer &entity)
     : IndexContext(metric), entity_(entity), dc_(entity_.get(), metric) {}
 
+HnswContext::HnswContext(size_t dimension,
+                         zvec::turbo::Quantizer::Pointer quantizer,
+                         IndexMeta::DataType qmeta_data_type,
+                         const IndexMetric::Pointer &metric,
+                         const HnswEntity::Pointer &entity)
+    : IndexContext(metric),
+      entity_(entity),
+      dc_(entity_.get(), std::move(quantizer), metric, dimension,
+          qmeta_data_type) {
+  metric_ = metric;
+}
+
+HnswContext::HnswContext(zvec::turbo::Quantizer::Pointer quantizer,
+                         const IndexMetric::Pointer &metric,
+                         const HnswEntity::Pointer &entity)
+    : IndexContext(metric),
+      entity_(entity),
+      dc_(entity_.get(), std::move(quantizer), metric) {
+  metric_ = metric;
+}
+
 HnswContext::~HnswContext() {
   visit_filter_.destroy();
 }
@@ -262,9 +283,76 @@ int HnswContext::update_context(ContextType type, const IndexMeta &meta,
 
   entity_ = entity;
   dc_.update(entity_.get(), metric, meta.dimension());
+  search_dc_.update(entity_.get(), metric, meta.dimension());
   if (vector_source_) {
     entity_->set_vector_source(vector_source_);
   }
+  magic_ = magic_num;
+  level_topks_.clear();
+
+  return 0;
+}
+
+int HnswContext::update_context(
+    ContextType type, const IndexMeta &meta,
+    zvec::turbo::Quantizer::Pointer add_quantizer,
+    zvec::turbo::Quantizer::Pointer search_quantizer,
+    const IndexMetric::Pointer &add_metric,
+    const IndexMetric::Pointer &search_metric,
+    const HnswEntity::Pointer &entity, uint32_t magic_num) {
+  uint32_t doc_cnt;
+
+  if (ailego_unlikely(static_cast<uint32_t>(type) != type_)) {
+    LOG_ERROR(
+        "HnswContext doesn't support shared by different type, "
+        "src=%u dst=%u",
+        type_, type);
+    return IndexError_Unsupported;
+  }
+
+  magic_ = kInvalidMgic;
+
+  switch (type) {
+    case kBuilderContext:
+      LOG_ERROR("BuildContext doesn't support update");
+      return IndexError_NotImplemented;
+
+    case kSearcherContext:
+      if (!visit_filter_.reset(entity->doc_cnt(), max_scan_num_)) {
+        LOG_ERROR("Reset filter failed, mode %d", visit_filter_.get_mode());
+        return IndexError_Runtime;
+      }
+      candidates_.limit(max_scan_num_);
+      topk_heap_.limit(std::max(topk_, ef_));
+      break;
+
+    case kStreamerContext:
+      doc_cnt = entity->doc_cnt();
+      max_scan_num_ = compute_max_scan_num(doc_cnt);
+      reserve_max_doc_cnt_ = doc_cnt + compute_reserve_cnt(doc_cnt);
+      if (!visit_filter_.reset(reserve_max_doc_cnt_, max_scan_num_)) {
+        LOG_ERROR("Reset filter failed, mode %d", visit_filter_.get_mode());
+        return IndexError_Runtime;
+      }
+      update_heap_.limit(entity->l0_neighbor_cnt() + 1);
+      candidates_.limit(max_scan_num_);
+      topk_heap_.limit(std::max(topk_, ef_));
+      break;
+
+    default:
+      LOG_ERROR("update context failed");
+      return IndexError_Runtime;
+  }
+
+  entity_ = entity;
+  dc_.update(entity_.get(), std::move(add_quantizer), add_metric,
+             meta.dimension(), meta.data_type());
+  search_dc_.update(entity_.get(), std::move(search_quantizer), search_metric,
+                    meta.dimension(), meta.data_type());
+  if (vector_source_) {
+    entity_->set_vector_source(vector_source_);
+  }
+  metric_ = add_metric;
   magic_ = magic_num;
   level_topks_.clear();
 

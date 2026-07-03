@@ -118,5 +118,8 @@ static const std::string PARAM_HNSW_STREAMER_USE_CONTIGUOUS_MEMORY(
 static const std::string PARAM_HNSW_STREAMER_USE_EXTERNAL_VECTOR(
     "proxima.hnsw.streamer.use_external_vector");
 
+static const std::string PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS(
+    "proxima.hnsw.streamer.turbo_quantizer_class");
+
 }  // namespace core
 }  // namespace zvec

@@ -1050,6 +1050,11 @@ int do_build(YAML::Node &config_root, YAML::Node &config_common) {
     params.set(param, !g_disable_id_map);
   }
 
+  // Read turbo quantizer class before init() consumes the params
+  std::string turbo_quantizer_class;
+  params.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
+             &turbo_quantizer_class);
+
   // INIT
   int ret =
       builder ? builder->init(meta, params) : streamer->init(meta, params);
@@ -1200,6 +1205,56 @@ int do_build(YAML::Node &config_root, YAML::Node &config_common) {
                                    converter_name, &cv_build_holder) != 0) {
       return -1;
     }
+  }
+
+  // Setup turbo quantizer if configured
+  if (streamer && !turbo_quantizer_class.empty()) {
+    auto quantizer = IndexFactory::CreateQuantizer(turbo_quantizer_class);
+    if (!quantizer) {
+      LOG_ERROR("Failed to create turbo quantizer '%s'",
+                turbo_quantizer_class.c_str());
+      return -1;
+    }
+    ailego::Params quantizer_params;
+    int nsq = 0;
+    if (params.get("num_subquantizers", &nsq)) {
+      quantizer_params.set("num_subquantizers", nsq);
+    }
+    ret = quantizer->init(meta, quantizer_params);
+    if (ret != 0) {
+      LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
+                turbo_quantizer_class.c_str(), ret);
+      return -1;
+    }
+    if (quantizer->require_train()) {
+      IndexHolder::Pointer train_holder =
+          cv_build_holder
+              ? std::dynamic_pointer_cast<IndexHolder>(cv_build_holder)
+              : std::dynamic_pointer_cast<IndexHolder>(build_holder);
+      if (!train_holder) {
+        LOG_ERROR("No training data available for quantizer '%s'",
+                  turbo_quantizer_class.c_str());
+        return -1;
+      }
+      cout << "Training turbo quantizer '" << turbo_quantizer_class
+           << "'..." << endl;
+      ailego::ElapsedTime qtimer;
+      ret = quantizer->train(train_holder);
+      if (ret != 0) {
+        LOG_ERROR("Failed to train turbo quantizer '%s', ret=%d",
+                  turbo_quantizer_class.c_str(), ret);
+        return -1;
+      }
+      cout << "Turbo quantizer trained, consume " << qtimer.milli_seconds()
+           << "ms." << endl;
+    }
+    ret = streamer->init_quantizer(quantizer);
+    if (ret != 0) {
+      LOG_ERROR("Failed to init quantizer on streamer, ret=%d", ret);
+      return -1;
+    }
+    cout << "Turbo quantizer '" << turbo_quantizer_class
+         << "' initialized on streamer." << endl;
   }
 
   // BUILD

@@ -14,6 +14,7 @@
 #pragma once
 
 #include <ailego/parallel/lock.h>
+#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_framework.h>
 #include "hnsw_algorithm.h"
 #include "hnsw_streamer_entity.h"
@@ -30,6 +31,13 @@ class HnswStreamer : public IndexStreamer {
 
   HnswStreamer(const HnswStreamer &streamer) = delete;
   HnswStreamer &operator=(const HnswStreamer &streamer) = delete;
+
+  //! Initialize quantizer used for both add and search
+  int init_quantizer(turbo::Quantizer::Pointer quantizer) override;
+
+  //! Initialize separate quantizers for add and search
+  int init_quantizer(turbo::Quantizer::Pointer add_quantizer,
+                     turbo::Quantizer::Pointer search_quantizer) override;
 
  public:
   //! Retrieve the storage mode of the underlying entity. Returns
@@ -202,6 +210,11 @@ class HnswStreamer : public IndexStreamer {
 
   IndexMetric::MatrixBatchDistance add_batch_distance_{};
   IndexMetric::MatrixBatchDistance search_batch_distance_{};
+
+  IndexMetric::Pointer search_metric_{};
+  zvec::turbo::Quantizer::Pointer add_quantizer_{};
+  zvec::turbo::Quantizer::Pointer search_quantizer_{};
+  std::string turbo_quantizer_class_{};
 
   Stats stats_{};
   std::mutex mutex_{};

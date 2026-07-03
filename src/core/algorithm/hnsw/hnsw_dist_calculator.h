@@ -13,24 +13,28 @@
 // limitations under the License.
 #pragma once
 
+#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_meta.h>
+#include <zvec/core/framework/index_metric.h>
 #include "hnsw_entity.h"
-
-// TODO(HNSW+PQ): Adapt this file to the origin architecture:
-//   1. Integrate turbo::Quantizer + turbo::DistanceImpl (see distance.h)
-//   2. Use dist_impl_.sym_func() for zero-branch dist(void*,void*) dispatch
-//   3. HnswContext needs dual calculators: add_dc_ + search_dc_ with mode_
-//   4. reset_query() should call quantizer_->distance() to build DistanceImpl
-// Reference: origin/turbo/src/core/algorithm/hnsw/hnsw_dist_calculator.h
 
 namespace zvec {
 namespace core {
 
+//! Dist calculator used by HNSW. Prefers the turbo Quantizer's
+//! DistanceImpl when it is available for the current metric/dtype;
+//! otherwise falls back to IndexMetric's distance / batch_distance
+//! handles. This keeps HNSW functional for metric/dtype combos that
+//! turbo does not yet implement.
 class HnswDistCalculator {
  public:
   typedef std::shared_ptr<HnswDistCalculator> Pointer;
 
  public:
+  //! Default constructor (for lazy init via update()).
+  HnswDistCalculator()
+      : entity_(nullptr), query_(nullptr), dim_(0), compare_cnt_(0) {}
+
   enum DistType {
     DIST_NONE = 0,
     DIST_DENSE = 1,
@@ -39,51 +43,155 @@ class HnswDistCalculator {
   };
 
  public:
-  //! Constructor
+  //! Constructor with a turbo quantizer and an IndexMetric fallback.
+  //! `dim` is the dimension of the stored vectors. `qmeta_data_type`
+  //! is the data type of the raw query accepted by `reset_query`.
+  HnswDistCalculator(const HnswEntity *entity,
+                     zvec::turbo::Quantizer::Pointer quantizer,
+                     IndexMetric::Pointer metric, uint32_t dim,
+                     IndexMeta::DataType qmeta_data_type)
+      : entity_(entity),
+        quantizer_(std::move(quantizer)),
+        metric_(std::move(metric)),
+        query_(nullptr),
+        dim_(dim),
+        compare_cnt_(0) {
+    qmeta_.set_meta(qmeta_data_type, dim);
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    }
+  }
+
+  //! Constructor without dimension (for lazy init via update()).
+  HnswDistCalculator(const HnswEntity *entity,
+                     zvec::turbo::Quantizer::Pointer quantizer,
+                     IndexMetric::Pointer metric)
+      : entity_(entity),
+        quantizer_(std::move(quantizer)),
+        metric_(std::move(metric)),
+        query_(nullptr),
+        dim_(0),
+        compare_cnt_(0) {
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    }
+  }
+
+  //! Legacy constructor (no quantizer, metric-only fallback).
   HnswDistCalculator(const HnswEntity *entity,
                      const IndexMetric::Pointer &metric, uint32_t dim)
       : entity_(entity),
-        distance_(metric->distance()),
-        batch_distance_(metric->batch_distance()),
+        metric_(metric),
         query_(nullptr),
         dim_(dim),
-        compare_cnt_(0) {}
+        compare_cnt_(0) {
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    }
+  }
 
-  //! Constructor
-  HnswDistCalculator(const HnswEntity *entity,
-                     const IndexMetric::Pointer &metric, uint32_t dim,
-                     const void *query)
-      : entity_(entity),
-        distance_(metric->distance()),
-        batch_distance_(metric->batch_distance()),
-        query_(query),
-        dim_(dim),
-        compare_cnt_(0) {}
-
-  //! Constructor
+  //! Legacy constructor (no quantizer, metric-only fallback).
   HnswDistCalculator(const HnswEntity *entity,
                      const IndexMetric::Pointer &metric)
       : entity_(entity),
-        distance_(metric->distance()),
-        batch_distance_(metric->batch_distance()),
+        metric_(metric),
         query_(nullptr),
         dim_(0),
-        compare_cnt_(0) {}
-
-  void update(const HnswEntity *entity, const IndexMetric::Pointer &metric) {
-    entity_ = entity;
-    distance_ = metric->distance();
-    batch_distance_ = metric->batch_distance();
+        compare_cnt_(0) {
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    }
   }
 
+  void update(const HnswEntity *entity,
+              zvec::turbo::Quantizer::Pointer quantizer,
+              IndexMetric::Pointer metric) {
+    entity_ = entity;
+    quantizer_ = std::move(quantizer);
+    metric_ = std::move(metric);
+    dist_impl_ = zvec::turbo::DistanceImpl{};
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    } else {
+      distance_ = nullptr;
+      batch_distance_ = nullptr;
+    }
+  }
+
+  void update(const HnswEntity *entity,
+              zvec::turbo::Quantizer::Pointer quantizer,
+              IndexMetric::Pointer metric, uint32_t dim,
+              IndexMeta::DataType qmeta_data_type) {
+    entity_ = entity;
+    quantizer_ = std::move(quantizer);
+    metric_ = std::move(metric);
+    dim_ = dim;
+    qmeta_.set_meta(qmeta_data_type, dim);
+    dist_impl_ = zvec::turbo::DistanceImpl{};
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    } else {
+      distance_ = nullptr;
+      batch_distance_ = nullptr;
+    }
+  }
+
+  //! Legacy update (no quantizer).
+  void update(const HnswEntity *entity, const IndexMetric::Pointer &metric) {
+    entity_ = entity;
+    metric_ = metric;
+    dist_impl_ = zvec::turbo::DistanceImpl{};
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    } else {
+      distance_ = nullptr;
+      batch_distance_ = nullptr;
+    }
+  }
+
+  //! Legacy update (no quantizer).
   void update(const HnswEntity *entity, const IndexMetric::Pointer &metric,
               uint32_t dim) {
     entity_ = entity;
-    distance_ = metric->distance();
-    batch_distance_ = metric->batch_distance();
+    metric_ = metric;
     dim_ = dim;
+    dist_impl_ = zvec::turbo::DistanceImpl{};
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    } else {
+      distance_ = nullptr;
+      batch_distance_ = nullptr;
+    }
   }
 
+  //! Replace the quantizer used by this calculator. Invalidates the
+  //! cached DistanceImpl; caller should follow up with reset_query.
+  inline void update_quantizer(zvec::turbo::Quantizer::Pointer quantizer) {
+    quantizer_ = std::move(quantizer);
+    dist_impl_ = zvec::turbo::DistanceImpl{};
+  }
+
+  //! Replace the IndexMetric fallback.
+  inline void update_metric(IndexMetric::Pointer metric) {
+    metric_ = std::move(metric);
+    if (metric_) {
+      distance_ = metric_->distance();
+      batch_distance_ = metric_->batch_distance();
+    } else {
+      distance_ = nullptr;
+      batch_distance_ = nullptr;
+    }
+  }
+
+  //! Legacy: update raw distance function pointers.
   inline void update_distance(
       const IndexMetric::MatrixDistance &distance,
       const IndexMetric::MatrixBatchDistance &batch_distance) {
@@ -91,23 +199,22 @@ class HnswDistCalculator {
     batch_distance_ = batch_distance;
   }
 
-  //! Set the pairwise (SDC) distance function used for node-vs-node
-  //! comparisons (e.g. HNSW neighbor pruning).  When set, dist(lhs, rhs)
-  //! will use this function instead of the ADC distance_.  For non-PQ
-  //! quantizers this is left unset (nullptr) and dist(lhs, rhs) falls
-  //! back to distance_ as before.
-  inline void set_pairwise_distance(
-      const IndexMetric::MatrixDistance &pairwise_distance) {
-    pairwise_distance_ = pairwise_distance;
-  }
-
-  //! Reset query vector data
+  //! Reset query vector data. Quantizes the query via the turbo
+  //! quantizer and caches a DistanceImpl for subsequent `dist(...)`
+  //! calls. Falls back to IndexMetric's raw query when turbo does not
+  //! support this metric/dtype combination.
   inline void reset_query(const void *query) {
     error_ = false;
     query_ = query;
+    if (quantizer_) {
+      dist_impl_ = quantizer_->distance(query, qmeta_);
+    } else {
+      dist_impl_ = zvec::turbo::DistanceImpl{};
+    }
   }
 
-  //! Returns distance
+  //! Returns distance between two already-quantized vectors (pairwise).
+  //! Uses dist_impl_.sym_func() for PQ SDC; falls back to metric distance_.
   inline dist_t dist(const void *vec_lhs, const void *vec_rhs) {
     if (ailego_unlikely(vec_lhs == nullptr || vec_rhs == nullptr)) {
       LOG_ERROR("Nullptr of dense vector");
@@ -115,24 +222,40 @@ class HnswDistCalculator {
       return 0.0f;
     }
 
-    float score{0.0f};
-
-    // Use pairwise (SDC) distance when available (PQ node-vs-node path);
-    // otherwise fall back to the standard ADC distance_.
-    if (pairwise_distance_) {
-      pairwise_distance_(vec_lhs, vec_rhs, dim_, &score);
-    } else {
-      distance_(vec_lhs, vec_rhs, dim_, &score);
+    float score = 0.0f;
+    const auto &sym = dist_impl_.sym_func();
+    if (sym) {
+      sym(vec_lhs, vec_rhs, dist_impl_.dim(), &score);
+      return score;
     }
-
+    if (ailego_unlikely(!distance_)) {
+      LOG_ERROR("No distance handle available");
+      error_ = true;
+      return 0.0f;
+    }
+    distance_(vec_lhs, vec_rhs, dim_, &score);
     return score;
   }
 
   //! Returns distance between query and vec.
   inline dist_t dist(const void *vec) {
     compare_cnt_++;
-
-    return dist(vec, query_);
+    if (ailego_unlikely(vec == nullptr)) {
+      LOG_ERROR("Nullptr of dense vector");
+      error_ = true;
+      return 0.0f;
+    }
+    if (dist_impl_.valid()) {
+      return dist_impl_(vec);
+    }
+    if (ailego_unlikely(!distance_ || query_ == nullptr)) {
+      LOG_ERROR("No distance handle or query available");
+      error_ = true;
+      return 0.0f;
+    }
+    float score = 0.0f;
+    distance_(vec, query_, dim_, &score);
+    return score;
   }
 
   //! Return distance between query and node id.
@@ -151,14 +274,22 @@ class HnswDistCalculator {
       error_ = true;
       return 0.0f;
     }
-
-    return dist(feat, query_);
+    if (dist_impl_.valid()) {
+      return dist_impl_(feat);
+    }
+    if (ailego_unlikely(!distance_ || query_ == nullptr)) {
+      LOG_ERROR("No distance handle or query available");
+      error_ = true;
+      return 0.0f;
+    }
+    float score = 0.0f;
+    distance_(feat, query_, dim_, &score);
+    return score;
   }
 
   //! Return dist node lhs between node rhs
   inline dist_t dist(node_id_t lhs, node_id_t rhs) {
     compare_cnt_++;
-
 
     IndexStorage::MemoryBlock vec_block_feat;
     int ret = entity_->get_vector(lhs, vec_block_feat);
@@ -200,8 +331,17 @@ class HnswDistCalculator {
 
   void batch_dist(const void **vecs, size_t num, dist_t *distances) {
     compare_cnt_++;
-
-    batch_distance_(vecs, query_, num, dim_, distances);
+    if (dist_impl_.batch_valid()) {
+      dist_impl_.batch(vecs, num, distances);
+      return;
+    }
+    if (batch_distance_ && query_ != nullptr) {
+      batch_distance_(vecs, query_, num, dim_, distances);
+      return;
+    }
+    for (size_t i = 0; i < num; ++i) {
+      distances[i] = dist(vecs[i]);
+    }
   }
 
   inline dist_t batch_dist(node_id_t id) {
@@ -220,10 +360,19 @@ class HnswDistCalculator {
       error_ = true;
       return 0.0f;
     }
-    dist_t score = 0;
-    batch_distance_(&feat, query_, 1, dim_, &score);
-
-    return score;
+    if (dist_impl_.batch_valid()) {
+      dist_t score = 0;
+      const void *feats[1] = {feat};
+      dist_impl_.batch(feats, 1, &score);
+      return score;
+    }
+    if (batch_distance_ && query_ != nullptr) {
+      dist_t score = 0;
+      const void *feats[1] = {feat};
+      batch_distance_(feats, query_, 1, dim_, &score);
+      return score;
+    }
+    return dist(feat);
   }
 
   inline void clear() {
@@ -248,6 +397,11 @@ class HnswDistCalculator {
     return dim_;
   }
 
+  //! Expose the underlying turbo quantizer.
+  inline const zvec::turbo::Quantizer::Pointer &quantizer() const {
+    return quantizer_;
+  }
+
  private:
   HnswDistCalculator(const HnswDistCalculator &) = delete;
   HnswDistCalculator &operator=(const HnswDistCalculator &) = delete;
@@ -255,15 +409,18 @@ class HnswDistCalculator {
  private:
   const HnswEntity *entity_;
 
-  IndexMetric::MatrixDistance distance_;
-  IndexMetric::MatrixDistance pairwise_distance_;  // SDC for PQ (optional)
-  IndexMetric::MatrixBatchDistance batch_distance_;
+  zvec::turbo::Quantizer::Pointer quantizer_{};
+  IndexMetric::Pointer metric_{};
+  zvec::turbo::DistanceImpl dist_impl_{};
+  IndexQueryMeta qmeta_{};
+
+  IndexMetric::MatrixDistance distance_{nullptr};
+  IndexMetric::MatrixBatchDistance batch_distance_{nullptr};
 
   const void *query_;
   uint32_t dim_;
 
-  uint32_t compare_cnt_;  // record distance compute times
-  // uint32_t compare_cnt_batch_;  // record batch distance compute time
+  uint32_t compare_cnt_;
   bool error_{false};
 };
 
