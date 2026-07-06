@@ -22,6 +22,7 @@
 #include <vector>
 #include <zvec/core/framework/index_factory.h>
 #include <zvec/core/framework/index_logger.h>
+#include <ailego/math/normalizer.h>
 
 namespace zvec {
 namespace turbo {
@@ -252,6 +253,30 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
                 original_dim_ * sizeof(float));
   }
 
+  // Subsample if the dataset exceeds the training limit (aligned with
+  // faiss/vsag: 256 centroids * 256 max_points_per_centroid ≈ 65535).
+  if (num > kMaxTrainVectors) {
+    LOG_INFO("PQ training: subsampling %zu -> %zu vectors", num,
+             kMaxTrainVectors);
+    std::mt19937 rng(42);
+    // Fisher-Yates partial shuffle: randomly place kMaxTrainVectors vectors
+    // at the front of the buffer.
+    for (size_t i = 0; i < kMaxTrainVectors; ++i) {
+      std::uniform_int_distribution<size_t> dist(i, num - 1);
+      size_t j = dist(rng);
+      if (i != j) {
+        // Swap full vectors (dim-sized chunks).
+        for (uint32_t d = 0; d < original_dim_; ++d) {
+          std::swap(all_data[i * original_dim_ + d],
+                    all_data[j * original_dim_ + d]);
+        }
+      }
+    }
+    num = kMaxTrainVectors;
+    all_data.resize(num * original_dim_);
+    all_data.shrink_to_fit();
+  }
+
   size_t data_stride = original_dim_ * sizeof(float);
 
   // For Cosine: normalize training data to unit length so that KMeans
@@ -260,16 +285,8 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
   if (meta_.metric_name() == "Cosine") {
     for (size_t i = 0; i < num; ++i) {
       float *v = all_data.data() + i * original_dim_;
-      float norm_sq = 0.0f;
-      for (uint32_t j = 0; j < original_dim_; ++j) {
-        norm_sq += v[j] * v[j];
-      }
-      if (norm_sq > 0.0f) {
-        const float inv_norm = 1.0f / std::sqrt(norm_sq);
-        for (uint32_t j = 0; j < original_dim_; ++j) {
-          v[j] *= inv_norm;
-        }
-      }
+      float norm = 0.0f;
+      ailego::Normalizer<float>::L2(v, original_dim_, &norm);
     }
   }
 
@@ -367,17 +384,8 @@ void PqInt8Quantizer::quantize_data(const void *input, void *output) const {
   float vec_norm = 0.0f;
   if (meta_.metric_name() == "Cosine") {
     norm_vec_storage.assign(vec, vec + original_dim_);
-    float norm_sq = 0.0f;
-    for (uint32_t j = 0; j < original_dim_; ++j) {
-      norm_sq += norm_vec_storage[j] * norm_vec_storage[j];
-    }
-    vec_norm = (norm_sq > 0.0f) ? std::sqrt(norm_sq) : 0.0f;
-    if (vec_norm > 0.0f) {
-      const float inv_norm = 1.0f / vec_norm;
-      for (uint32_t j = 0; j < original_dim_; ++j) {
-        norm_vec_storage[j] *= inv_norm;
-      }
-    }
+    ailego::Normalizer<float>::L2(norm_vec_storage.data(), original_dim_,
+                                  &vec_norm);
     vec = norm_vec_storage.data();
   }
 
@@ -426,16 +434,9 @@ void PqInt8Quantizer::quantize_query(const void *input, void *output) const {
   std::vector<float> norm_query_storage;
   if (meta_.metric_name() == "Cosine") {
     norm_query_storage.assign(query, query + original_dim_);
-    float norm_sq = 0.0f;
-    for (uint32_t i = 0; i < original_dim_; ++i) {
-      norm_sq += norm_query_storage[i] * norm_query_storage[i];
-    }
-    const float inv_norm = (norm_sq > 0.0f)
-                               ? 1.0f / std::sqrt(norm_sq)
-                               : 0.0f;
-    for (uint32_t i = 0; i < original_dim_; ++i) {
-      norm_query_storage[i] *= inv_norm;
-    }
+    float norm = 0.0f;
+    ailego::Normalizer<float>::L2(norm_query_storage.data(), original_dim_,
+                                  &norm);
     query = norm_query_storage.data();
   }
 
