@@ -199,15 +199,21 @@ class HnswDistCalculator {
     batch_distance_ = batch_distance;
   }
 
-  //! Reset query vector data. Quantizes the query via the turbo
-  //! quantizer and caches a DistanceImpl for subsequent `dist(...)`
-  //! calls. Falls back to IndexMetric's raw query when turbo does not
+  //! Reset query vector data. First quantizes the raw query via the
+  //! turbo quantizer, then builds a DistanceImpl from the quantized
+  //! form. Falls back to IndexMetric's raw query when turbo does not
   //! support this metric/dtype combination.
   inline void reset_query(const void *query) {
     error_ = false;
     query_ = query;
     if (quantizer_) {
-      dist_impl_ = quantizer_->distance(query, qmeta_);
+      std::string quantized;
+      zvec::core::IndexQueryMeta ometa;
+      if (quantizer_->quantize(query, qmeta_, &quantized, &ometa) == 0) {
+        dist_impl_ = quantizer_->distance(quantized.data(), ometa);
+      } else {
+        dist_impl_ = zvec::turbo::DistanceImpl{};
+      }
     } else {
       dist_impl_ = zvec::turbo::DistanceImpl{};
     }
