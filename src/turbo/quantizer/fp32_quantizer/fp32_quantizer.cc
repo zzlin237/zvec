@@ -121,11 +121,11 @@ DistanceImpl Fp32Quantizer::distance(const void *query,
   auto batch_func = get_batch_distance_func(
       metric, DataType::kFp32, QuantizeType::kDefault, CpuArchType::kAuto);
 
-  // The query is already quantized by the caller (reset_query) — copy it.
+  // The query is assumed to be already quantized — copy it directly.
   std::string quantized_query(static_cast<const char *>(query),
                               qmeta.element_size());
   return DistanceImpl(std::move(func), std::move(batch_func),
-                      std::move(quantized_query), qmeta.dimension());
+                      std::move(quantized_query), original_dim_);
 }
 
 void Fp32Quantizer::quantize_one(const void *input, void *output) const {
