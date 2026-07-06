@@ -409,11 +409,6 @@ int PqInt8Quantizer::quantize(const void *query, const IndexQueryMeta &qmeta,
 
 DistanceImpl PqInt8Quantizer::distance(const void *query,
                                        const IndexQueryMeta &qmeta) const {
-  (void)qmeta;  // reserved for future use (e.g. data-type dispatch)
-  // Build the LUT from the (already quantized) query.
-  size_t lut_bytes = quantized_query_vector_length();
-  std::string lut_storage(static_cast<const char *>(query), lut_bytes);
-
   // ADC function: DistanceFunc signature
   //   (const void *candidate_pq_code, const void *lut, size_t dim, float *out)
   // dim here is num_subquantizers (passed through DistanceImpl::dim()).
@@ -443,6 +438,20 @@ DistanceImpl PqInt8Quantizer::distance(const void *query,
               reinterpret_cast<const float *>(lut), nsq, out + i);
         }
       };
+
+  // Build the LUT storage.
+  // When qmeta indicates a raw FP32 query, compute the LUT via
+  // quantize_query().  Otherwise treat the query bytes as a
+  // pre-computed LUT (backward compatibility).
+  std::string lut_storage;
+  if (qmeta.data_type() == IndexMeta::DataType::DT_FP32) {
+    size_t lut_bytes = quantized_query_vector_length();
+    lut_storage.resize(lut_bytes);
+    quantize_query(query, &lut_storage[0]);
+  } else {
+    size_t lut_bytes = quantized_query_vector_length();
+    lut_storage.assign(static_cast<const char *>(query), lut_bytes);
+  }
 
   return DistanceImpl(std::move(adc_func), std::move(sdc_func),
                       std::move(batch_func), std::move(lut_storage),

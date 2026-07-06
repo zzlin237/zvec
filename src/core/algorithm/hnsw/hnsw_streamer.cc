@@ -16,6 +16,7 @@
 #include <ailego/internal/cpu_features.h>
 #include <ailego/pattern/defer.h>
 #include <ailego/utility/memory_helper.h>
+#include <zvec/core/framework/index_helper.h>
 #include "utility/sparse_utility.h"
 #include "hnsw_algorithm.h"
 #include "hnsw_context.h"
@@ -309,11 +310,28 @@ int HnswStreamer::setup_entity() {
   entity_->set_l0_neighbor_cnt(l0_max_neighbor_cnt_);
   entity_->set_scaling_factor(scaling_factor_);
   entity_->set_prune_cnt(prune_cnt_);
-  // For external-vector entities the per-node vector prefix is removed; set
-  // vector_size to 0 so all inherited offset computations (key / neighbors /
-  // node_size) are correct and add_vector writes no vector bytes. The distance
-  // dimension is taken from meta.dimension(), not from vector_size().
-  entity_->set_vector_size(use_external_vector_ ? 0 : meta_.element_size());
+  // Determine the per-node vector storage size.
+  // Priority: persisted value from a previous build > live quantizer > meta.
+  // The persisted value (entity_vector_size) bridges the gap between the
+  // external IndexMeta contract (raw FP32 element_size) and the actual
+  // internal storage format (e.g. PQ codes) when no converter/reformer
+  // layer is present.
+  size_t vec_size = 0;
+  auto &sp = meta_.streamer_params();
+  uint64_t persisted_vs = 0;
+  if (sp.get("entity_vector_size", &persisted_vs) && persisted_vs > 0) {
+    vec_size = static_cast<size_t>(persisted_vs);
+  } else if (!use_external_vector_ && add_quantizer_) {
+    vec_size = add_quantizer_->quantized_datapoint_vector_length();
+  } else if (use_external_vector_) {
+    vec_size = 0;
+  } else {
+    vec_size = meta_.element_size();
+  }
+  // Persist so the next open() can read it before the quantizer is restored.
+  meta_.mutable_streamer_params()->set("entity_vector_size",
+                                       static_cast<uint64_t>(vec_size));
+  entity_->set_vector_size(vec_size);
   entity_->set_chunk_size(chunk_size_);
   entity_->set_filter_same_key(filter_same_key_);
   entity_->set_get_vector(get_vector_enabled_);
@@ -351,6 +369,25 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       break;
     }
   }
+  // For an existing index, read the persisted entity_vector_size from
+  // IndexMeta BEFORE setup_entity() so the correct internal storage
+  // vector size is used from the start (even when the turbo quantizer
+  // has not been restored yet).
+  {
+    IndexMeta stored_meta;
+    int meta_ret =
+        IndexHelper::DeserializeFromStorage(stg.get(), &stored_meta);
+    if (meta_ret == 0 && !stored_meta.streamer_name().empty()) {
+      uint64_t persisted_vs = 0;
+      if (stored_meta.streamer_params().get("entity_vector_size",
+                                            &persisted_vs) &&
+          persisted_vs > 0) {
+        meta_.mutable_streamer_params()->set("entity_vector_size",
+                                             persisted_vs);
+      }
+    }
+  }
+
   int ret = setup_entity();
   if (ret != 0) {
     return ret;
@@ -740,8 +777,18 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
     }
   }
 
+  // Encode raw vector to PQ code for storage when turbo quantizer is active.
+  const void *store_data = query;
+  std::string pq_code_buf;
+  if (add_quantizer_ &&
+      add_quantizer_->type() == turbo::QuantizeType::kPQ) {
+    pq_code_buf.resize(add_quantizer_->quantized_datapoint_vector_length());
+    add_quantizer_->quantize_data(query, &pq_code_buf[0]);
+    store_data = pq_code_buf.data();
+  }
+
   level_t level = alg_->get_random_level();
-  ret = entity_->add_vector_with_id(level, id, query);
+  ret = entity_->add_vector_with_id(level, id, store_data);
   if (ailego_unlikely(ret != 0)) {
     LOG_ERROR("Hnsw streamer add vector failed");
     (*stats_.mutable_discarded_count())++;
@@ -822,9 +869,19 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
     }
   }
 
+  // Encode raw vector to PQ code for storage when turbo quantizer is active.
+  const void *store_data = query;
+  std::string pq_code_buf;
+  if (add_quantizer_ &&
+      add_quantizer_->type() == turbo::QuantizeType::kPQ) {
+    pq_code_buf.resize(add_quantizer_->quantized_datapoint_vector_length());
+    add_quantizer_->quantize_data(query, &pq_code_buf[0]);
+    store_data = pq_code_buf.data();
+  }
+
   level_t level = alg_->get_random_level();
   node_id_t id;
-  ret = entity_->add_vector(level, pkey, query, &id);
+  ret = entity_->add_vector(level, pkey, store_data, &id);
   if (ailego_unlikely(ret != 0)) {
     LOG_ERROR("Hnsw streamer add vector failed");
     (*stats_.mutable_discarded_count())++;
