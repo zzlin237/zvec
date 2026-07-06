@@ -136,25 +136,15 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
           }
           break;
         case QuantizerType::kFp32:
-          // Fp32 is handled by turbo quantizer in streamer,
-          // Cosine normalization still needed for metric correctness
-          if (index_param.data_type == DataType::DT_FP32) {
-            converter_name = "CosineNormalizeConverter";
-          } else {
-            LOG_ERROR("Unsupported data type for kFp32: ");
-            return core::IndexError_Unsupported;
-          }
-          break;
+          // Fp32 is handled by turbo Fp32Quantizer in streamer,
+          // no converter needed.
+          return core::IndexError_Success;
         case QuantizerType::kPQ:
-          // PQ is handled by turbo quantizer in streamer,
-          // Cosine normalization still needed for metric correctness
-          if (index_param.data_type == DataType::DT_FP32) {
-            converter_name = "CosineNormalizeConverter";
-          } else {
-            LOG_ERROR("Unsupported data type for kPQ: ");
-            return core::IndexError_Unsupported;
-          }
-          break;
+          // PQ is handled by turbo quantizer in streamer.
+          // Cosine normalization is done inside PqInt8Quantizer,
+          // no converter needed — creating CosineNormalizeConverter would
+          // add an extra dimension (norm) and cause open() mismatch.
+          return core::IndexError_Success;
         case QuantizerType::kRabitq:
           if (index_param.data_type == DataType::DT_FP32) {
             converter_name = "CosineNormalizeConverter";
