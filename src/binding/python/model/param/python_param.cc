@@ -70,6 +70,8 @@ static std::string quantize_type_to_string(const QuantizeType type) {
       return "FP16";
     case QuantizeType::RABITQ:
       return "RABITQ";
+    case QuantizeType::PQ:
+      return "PQ";
     default:
       return "UNDEFINED";
   }
@@ -348,20 +350,27 @@ Args:
       m, "QuantizerParam", R"pbdoc(
 Parameters for quantizer configuration.
 
-Encapsulates quantization-related settings such as enable_rotate.
-Designed for future extensibility.
+Encapsulates quantization-related settings such as enable_rotate and
+num_subquantizers. Designed for future extensibility.
 
 Attributes:
     enable_rotate (bool): Whether to apply random rotation before INT8/INT4
         quantization to reduce quantization error.
         Only effective with quantize_type=INT8 or INT4. Defaults to False.
+    num_subquantizers (int): Number of PQ sub-quantizers (codebooks).
+        Only effective with quantize_type=PQ. The vector dimension must be
+        divisible by this value. Defaults to 8.
 
 Examples:
     >>> qp = QuantizerParam(enable_rotate=True)
     >>> print(qp.enable_rotate)
     True
+    >>> qp_pq = QuantizerParam(num_subquantizers=32)
+    >>> print(qp_pq.num_subquantizers)
+    32
 )pbdoc");
-  quantizer_param.def(py::init<bool>(), py::arg("enable_rotate") = false)
+  quantizer_param.def(py::init<bool, int>(), py::arg("enable_rotate") = false,
+                      py::arg("num_subquantizers") = 8)
       .def_property_readonly(
           "enable_rotate",
           [](const QuantizerParam &self) -> bool {
@@ -369,18 +378,28 @@ Examples:
           },
           "bool: Whether random rotation is enabled before INT8/INT4 "
           "quantization.")
+      .def_property_readonly(
+          "num_subquantizers",
+          [](const QuantizerParam &self) -> int {
+            return self.num_subquantizers();
+          },
+          "int: Number of PQ sub-quantizers. Only effective with "
+          "quantize_type=PQ.")
       .def(
           "to_dict",
           [](const QuantizerParam &self) -> py::dict {
             py::dict dict;
             dict["enable_rotate"] = self.enable_rotate();
+            dict["num_subquantizers"] = self.num_subquantizers();
             return dict;
           },
           "Convert to dictionary with all fields")
       .def("__repr__",
            [](const QuantizerParam &self) -> std::string {
              return "{\"enable_rotate\":" +
-                    std::string(self.enable_rotate() ? "true" : "false") + "}";
+                    std::string(self.enable_rotate() ? "true" : "false") +
+                    ", \"num_subquantizers\":" +
+                    std::to_string(self.num_subquantizers()) + "}";
            })
       .def(
           "__eq__",
@@ -391,12 +410,14 @@ Examples:
           py::is_operator())
       .def(py::pickle(
           [](const QuantizerParam &self) {
-            return py::make_tuple(self.enable_rotate());
+            return py::make_tuple(self.enable_rotate(),
+                                  self.num_subquantizers());
           },
           [](py::tuple t) {
-            if (t.size() != 1)
+            if (t.size() != 1 && t.size() != 2)
               throw std::runtime_error("Invalid state for QuantizerParam");
-            return std::make_shared<QuantizerParam>(t[0].cast<bool>());
+            int nsq = (t.size() >= 2) ? t[1].cast<int>() : 8;
+            return std::make_shared<QuantizerParam>(t[0].cast<bool>(), nsq);
           }));
 
   // binding base vector index params
@@ -476,8 +497,9 @@ Attributes:
         neighbors during index construction. Larger values yield better
         graph quality at the cost of slower build time. Default is 500.
     quantize_type (QuantizeType): Optional quantization type for vector
-        compression (e.g., FP16, INT8). Default is `QuantizeType.UNDEFINED` to
-        disable quantization.
+        compression (e.g., FP16, INT8, PQ). Default is `QuantizeType.UNDEFINED`
+        to disable quantization. When using PQ, configure num_subquantizers
+        via ``quantizer_param``.
 
 Examples:
     >>> from zvec.typing import MetricType, QuantizeType
@@ -490,6 +512,15 @@ Examples:
     ... )
     >>> print(params)
     {'metric_type': 'IP', 'm': 16, 'ef_construction': 200, 'quantize_type': 'INT8', 'use_contiguous_memory': True}
+
+    >>> # HNSW + PQ example
+    >>> pq_params = HnswIndexParam(
+    ...     metric_type=MetricType.L2,
+    ...     m=15,
+    ...     ef_construction=500,
+    ...     quantize_type=QuantizeType.PQ,
+    ...     quantizer_param=QuantizerParam(num_subquantizers=32),
+    ... )
 )pbdoc");
   hnsw_params
       .def(py::init([](MetricType metric_type, int m, int ef_construction,
@@ -530,6 +561,8 @@ Examples:
             dict["use_contiguous_memory"] = self.use_contiguous_memory();
             py::dict qp_dict;
             qp_dict["enable_rotate"] = self.quantizer_param().enable_rotate();
+            qp_dict["num_subquantizers"] =
+                self.quantizer_param().num_subquantizers();
             dict["quantizer_param"] = qp_dict;
             return dict;
           },
@@ -549,19 +582,24 @@ Examples:
                    (self.use_contiguous_memory() ? "true" : "false") +
                    ", \"quantizer_param\":{" + "\"enable_rotate\":" +
                    (self.quantizer_param().enable_rotate() ? "true" : "false") +
+                   ", \"num_subquantizers\":" +
+                   std::to_string(self.quantizer_param().num_subquantizers()) +
                    "}}";
           })
       .def(py::pickle(
           [](const HnswIndexParams &self) {
-            return py::make_tuple(self.metric_type(), self.m(),
-                                  self.ef_construction(), self.quantize_type(),
-                                  self.use_contiguous_memory(),
-                                  self.quantizer_param().enable_rotate());
+            return py::make_tuple(
+                self.metric_type(), self.m(), self.ef_construction(),
+                self.quantize_type(), self.use_contiguous_memory(),
+                self.quantizer_param().enable_rotate(),
+                self.quantizer_param().num_subquantizers());
           },
           [](py::tuple t) {
-            if (t.size() != 5 && t.size() != 6)
+            if (t.size() != 5 && t.size() != 6 && t.size() != 7)
               throw std::runtime_error("Invalid state for HnswIndexParams");
-            QuantizerParam qp(t.size() >= 6 ? t[5].cast<bool>() : false);
+            bool er = (t.size() >= 6) ? t[5].cast<bool>() : false;
+            int nsq = (t.size() >= 7) ? t[6].cast<int>() : 8;
+            QuantizerParam qp(er, nsq);
             return std::make_shared<HnswIndexParams>(
                 t[0].cast<MetricType>(), t[1].cast<int>(), t[2].cast<int>(),
                 t[3].cast<QuantizeType>(), t[4].cast<bool>(), qp);

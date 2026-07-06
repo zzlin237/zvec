@@ -126,7 +126,9 @@ class InvertIndexParams : public IndexParams {
 class QuantizerParam {
  public:
   QuantizerParam() = default;
-  explicit QuantizerParam(bool enable_rotate) : enable_rotate_(enable_rotate) {}
+  explicit QuantizerParam(bool enable_rotate, int num_subquantizers = 8)
+      : enable_rotate_(enable_rotate),
+        num_subquantizers_(num_subquantizers) {}
 
   bool enable_rotate() const {
     return enable_rotate_;
@@ -136,8 +138,17 @@ class QuantizerParam {
     enable_rotate_ = v;
   }
 
+  int num_subquantizers() const {
+    return num_subquantizers_;
+  }
+
+  void set_num_subquantizers(int v) {
+    num_subquantizers_ = v;
+  }
+
   bool operator==(const QuantizerParam &other) const {
-    return enable_rotate_ == other.enable_rotate_;
+    return enable_rotate_ == other.enable_rotate_ &&
+           num_subquantizers_ == other.num_subquantizers_;
   }
 
   bool operator!=(const QuantizerParam &other) const {
@@ -148,6 +159,9 @@ class QuantizerParam {
   // When enabled, vectors are rotated before INT8 quantization to reduce
   // quantization error. Only effective with quantize_type=INT8.
   bool enable_rotate_{false};
+  // Number of PQ sub-quantizers. Only effective with quantize_type=PQ.
+  // Dimension must be divisible by this value. Default: 8.
+  int num_subquantizers_{8};
 };
 
 /*

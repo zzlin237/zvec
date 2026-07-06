@@ -74,6 +74,7 @@ enum QuantizeType {
   QT_INT8 = 2;
   QT_INT4 = 3;
   QT_RABITQ = 4;
+  QT_PQ = 5;
 };
 
 enum MetricType {
@@ -90,9 +91,13 @@ message InvertIndexParams {
 // Quantizer-related parameters for vector indexes.
 // Designed for future extensibility.
 message QuantizerParam {
-  // When enabled, vectors are rotated before INT8 quantization to reduce
-  // quantization error. Only effective with quantize_type=INT8.
+  // When enabled, vectors are rotated before INT8/INT4 quantization to reduce
+  // quantization error. Only effective with quantize_type=INT8 or INT4.
   bool enable_rotate = 1;
+  // Number of PQ sub-quantizers (codebooks). Only effective with
+  // quantize_type=PQ. The vector dimension must be divisible by this value.
+  // Default: 8.
+  int32 num_subquantizers = 2;
 };
 
 message BaseIndexParams {

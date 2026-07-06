@@ -16,14 +16,31 @@
 
 namespace zvec {
 
+namespace {
+// Helper: read QuantizerParam from proto with backward-compat fallback.
+QuantizerParam ReadQuantizerParam(
+    const proto::QuantizerParam &pb) {
+  int nsq = pb.num_subquantizers();
+  if (nsq <= 0) nsq = 8;  // backward compat: old records have 0
+  return QuantizerParam(pb.enable_rotate(), nsq);
+}
+
+// Helper: write QuantizerParam to proto.
+void WriteQuantizerParam(const QuantizerParam &qp,
+                          proto::QuantizerParam *pb) {
+  pb->set_enable_rotate(qp.enable_rotate());
+  pb->set_num_subquantizers(qp.num_subquantizers());
+}
+}  // namespace
+
 HnswIndexParams::OPtr ProtoConverter::FromPb(
     const proto::HnswIndexParams &params_pb) {
-  bool enable_rotate = params_pb.base().quantizer_param().enable_rotate();
+  auto qp = ReadQuantizerParam(params_pb.base().quantizer_param());
   auto params = std::make_shared<HnswIndexParams>(
       MetricTypeCodeBook::Get(params_pb.base().metric_type()), params_pb.m(),
       params_pb.ef_construction(),
       QuantizeTypeCodeBook::Get(params_pb.base().quantize_type()),
-      params_pb.use_contiguous_memory(), QuantizerParam(enable_rotate));
+      params_pb.use_contiguous_memory(), qp);
 
   return params;
 }
@@ -34,8 +51,8 @@ proto::HnswIndexParams ProtoConverter::ToPb(const HnswIndexParams *params) {
       MetricTypeCodeBook::Get(params->metric_type()));
   params_pb.mutable_base()->set_quantize_type(
       QuantizeTypeCodeBook::Get(params->quantize_type()));
-  params_pb.mutable_base()->mutable_quantizer_param()->set_enable_rotate(
-      params->quantizer_param().enable_rotate());
+  WriteQuantizerParam(params->quantizer_param(),
+                      params_pb.mutable_base()->mutable_quantizer_param());
   params_pb.set_ef_construction(params->ef_construction());
   params_pb.set_m(params->m());
   params_pb.set_use_contiguous_memory(params->use_contiguous_memory());
@@ -71,11 +88,11 @@ proto::HnswRabitqIndexParams ProtoConverter::ToPb(
 // FlatIndexParams
 FlatIndexParams::OPtr ProtoConverter::FromPb(
     const proto::FlatIndexParams &params_pb) {
-  bool enable_rotate = params_pb.base().quantizer_param().enable_rotate();
+  auto qp = ReadQuantizerParam(params_pb.base().quantizer_param());
   return std::make_shared<FlatIndexParams>(
       MetricTypeCodeBook::Get(params_pb.base().metric_type()),
       QuantizeTypeCodeBook::Get(params_pb.base().quantize_type()),
-      QuantizerParam(enable_rotate));
+      qp);
 }
 
 proto::FlatIndexParams ProtoConverter::ToPb(const FlatIndexParams *params) {
@@ -84,20 +101,20 @@ proto::FlatIndexParams ProtoConverter::ToPb(const FlatIndexParams *params) {
       MetricTypeCodeBook::Get(params->metric_type()));
   params_pb.mutable_base()->set_quantize_type(
       QuantizeTypeCodeBook::Get(params->quantize_type()));
-  params_pb.mutable_base()->mutable_quantizer_param()->set_enable_rotate(
-      params->quantizer_param().enable_rotate());
+  WriteQuantizerParam(params->quantizer_param(),
+                      params_pb.mutable_base()->mutable_quantizer_param());
   return params_pb;
 }
 
 // IVFIndexParams
 IVFIndexParams::OPtr ProtoConverter::FromPb(
     const proto::IVFIndexParams &params_pb) {
-  bool enable_rotate = params_pb.base().quantizer_param().enable_rotate();
+  auto qp = ReadQuantizerParam(params_pb.base().quantizer_param());
   return std::make_shared<IVFIndexParams>(
       MetricTypeCodeBook::Get(params_pb.base().metric_type()),
       params_pb.n_list(), params_pb.n_iters(), params_pb.use_soar(),
       QuantizeTypeCodeBook::Get(params_pb.base().quantize_type()),
-      QuantizerParam(enable_rotate));
+      qp);
 }
 
 proto::IVFIndexParams ProtoConverter::ToPb(const IVFIndexParams *params) {
@@ -106,8 +123,8 @@ proto::IVFIndexParams ProtoConverter::ToPb(const IVFIndexParams *params) {
       MetricTypeCodeBook::Get(params->metric_type()));
   params_pb.mutable_base()->set_quantize_type(
       QuantizeTypeCodeBook::Get(params->quantize_type()));
-  params_pb.mutable_base()->mutable_quantizer_param()->set_enable_rotate(
-      params->quantizer_param().enable_rotate());
+  WriteQuantizerParam(params->quantizer_param(),
+                      params_pb.mutable_base()->mutable_quantizer_param());
   params_pb.set_n_list(params->n_list());
   params_pb.set_n_iters(params->n_iters());
   params_pb.set_use_soar(params->use_soar());
@@ -117,14 +134,14 @@ proto::IVFIndexParams ProtoConverter::ToPb(const IVFIndexParams *params) {
 // VamanaIndexParams
 VamanaIndexParams::OPtr ProtoConverter::FromPb(
     const proto::VamanaIndexParams &params_pb) {
-  bool enable_rotate = params_pb.base().quantizer_param().enable_rotate();
+  auto qp = ReadQuantizerParam(params_pb.base().quantizer_param());
   return std::make_shared<VamanaIndexParams>(
       MetricTypeCodeBook::Get(params_pb.base().metric_type()),
       params_pb.max_degree(), params_pb.search_list_size(), params_pb.alpha(),
       params_pb.saturate_graph(), params_pb.use_contiguous_memory(),
       params_pb.use_id_map(),
       QuantizeTypeCodeBook::Get(params_pb.base().quantize_type()),
-      QuantizerParam(enable_rotate));
+      qp);
 }
 
 proto::VamanaIndexParams ProtoConverter::ToPb(const VamanaIndexParams *params) {
@@ -133,8 +150,8 @@ proto::VamanaIndexParams ProtoConverter::ToPb(const VamanaIndexParams *params) {
       MetricTypeCodeBook::Get(params->metric_type()));
   params_pb.mutable_base()->set_quantize_type(
       QuantizeTypeCodeBook::Get(params->quantize_type()));
-  params_pb.mutable_base()->mutable_quantizer_param()->set_enable_rotate(
-      params->quantizer_param().enable_rotate());
+  WriteQuantizerParam(params->quantizer_param(),
+                      params_pb.mutable_base()->mutable_quantizer_param());
   params_pb.set_max_degree(params->max_degree());
   params_pb.set_search_list_size(params->search_list_size());
   params_pb.set_alpha(params->alpha());
