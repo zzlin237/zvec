@@ -144,7 +144,8 @@ UniformQuantizeFunc get_uniform_quantize_func(DataType data_type);
 FhtKernels get_fht_kernels();
 
 // Returns all PQ kernels dispatched for the given quantize_type and CPU arch.
-PqKernels get_pq_kernels(QuantizeType quantize_type,
+PqKernels get_pq_kernels(DataType data_type,
+                          QuantizeType quantize_type = QuantizeType::kPQ,
                           CpuArchType cpu_arch_type = CpuArchType::kAuto);
 
 }  // namespace zvec::turbo

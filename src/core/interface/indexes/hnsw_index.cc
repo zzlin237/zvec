@@ -87,12 +87,16 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
       proxima_index_params_.set(core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
                                 "Fp32Quantizer");
       break;
-    case QuantizerType::kPQ:
+    case QuantizerType::kPQ: {
+      const char *pq_class = (quantizer_param.num_bits == 4)
+                                 ? "PqInt4Quantizer"
+                                 : "PqInt8Quantizer";
       proxima_index_params_.set(core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
-                                "PqInt8Quantizer");
+                                pq_class);
       proxima_index_params_.set("num_subquantizers",
                                 quantizer_param.num_subquantizers);
       break;
+    }
     default:
       // kNone or unsupported type -> leave turbo_quantizer_class_ empty
       // (streamer will use legacy metric distance path)

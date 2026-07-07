@@ -233,8 +233,6 @@ static std::string QuantizerClassName(const turbo::Quantizer::Pointer &q) {
   switch (q->type()) {
     case turbo::QuantizeType::kFp32:
       return "Fp32Quantizer";
-    case turbo::QuantizeType::kPQ:
-      return "PqInt8Quantizer";
     default:
       return {};
   }
