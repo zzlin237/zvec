@@ -220,7 +220,8 @@ class HnswDistCalculator {
   }
 
   //! Returns distance between two already-quantized vectors (pairwise).
-  //! Uses dist_impl_.sym_func() for PQ SDC; falls back to metric distance_.
+  //! Uses quantizer_->sym_distance() for PQ SDC; falls back to metric
+  //! distance_.
   inline dist_t dist(const void *vec_lhs, const void *vec_rhs) {
     if (ailego_unlikely(vec_lhs == nullptr || vec_rhs == nullptr)) {
       LOG_ERROR("Nullptr of dense vector");
@@ -228,17 +229,20 @@ class HnswDistCalculator {
       return 0.0f;
     }
 
-    float score = 0.0f;
-    const auto &sym = dist_impl_.sym_func();
-    if (sym) {
-      sym(vec_lhs, vec_rhs, dist_impl_.dim(), &score);
-      return score;
+    if (quantizer_) {
+      // Build an SDC DistanceImpl with vec_rhs as the PQ code,
+      // then compute distance against vec_lhs.
+      auto sym_dist_impl = quantizer_->sym_distance(vec_rhs, qmeta_);
+      if (sym_dist_impl.valid()) {
+        return sym_dist_impl(vec_lhs);
+      }
     }
     if (ailego_unlikely(!distance_)) {
       LOG_ERROR("No distance handle available");
       error_ = true;
       return 0.0f;
     }
+    float score = 0.0f;
     distance_(vec_lhs, vec_rhs, dim_, &score);
     return score;
   }
