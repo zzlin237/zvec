@@ -445,7 +445,8 @@ class IndexMeta {
   //! Set dimension of feature
   void set_dimension(uint32_t dim) {
     dimension_ = dim;
-    element_size_ = IndexMeta::ElementSizeof(data_type_, unit_size_, dim);
+    element_size_ = IndexMeta::ElementSizeof(data_type_, unit_size_, dim) +
+                    extra_meta_size_;
   }
 
   //! Set meta information of feature
@@ -459,7 +460,7 @@ class IndexMeta {
     data_type_ = data_type;
     dimension_ = dim;
     unit_size_ = unit;
-    element_size_ = ElementSizeof(data_type, unit, dim);
+    element_size_ = ElementSizeof(data_type, unit, dim) + extra_meta_size_;
   }
 
   //! Set meta information of feature
@@ -470,6 +471,8 @@ class IndexMeta {
   //! Set extra meta size
   void set_extra_meta_size(uint32_t size) {
     extra_meta_size_ = size;
+    element_size_ =
+        ElementSizeof(data_type_, unit_size_, dimension_) + extra_meta_size_;
   }
 
   //! Set information of metric
@@ -708,6 +711,16 @@ class IndexQueryMeta {
     return element_size_;
   }
 
+  //! Retrieve quantize type
+  uint32_t quantize_type(void) const {
+    return quantize_type_;
+  }
+
+  //! Retrieve extra meta size in bytes
+  uint32_t extra_meta_size(void) const {
+    return extra_meta_size_;
+  }
+
   //! Set dimension of feature
   void set_dimension(uint32_t dim) {
     dimension_ = dim;
@@ -723,6 +736,14 @@ class IndexQueryMeta {
   //! Set data type
   void set_data_type(IndexMeta::DataType data_type) {
     data_type_ = data_type;
+  }
+
+  //! Set extra meta size
+  void set_extra_meta_size(uint32_t size) {
+    extra_meta_size_ = size;
+    element_size_ =
+        IndexMeta::ElementSizeof(data_type_, unit_size_, dimension_) +
+        extra_meta_size_;
   }
 
   //! Set meta information of feature

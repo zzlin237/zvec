@@ -48,15 +48,21 @@ using FhtVecRescaleFunc = void (*)(float *data, size_t n, float factor);
 //   lut:               [num_subquantizers * 256] float
 // Uses void* to match DistanceFunc signature for direct assignment.
 using PqAdcDistanceFunc = void (*)(const void *pq_code, const void *lut,
-                                    size_t num_subquantizers, float *out);
+                                   size_t num_subquantizers, float *out);
 
 // SDC kernel: centroid-to-centroid distance between two PQ codes.
 //   a, b:              [num_subquantizers] uint8_t
 //   dist_table:        [num_subquantizers * 256 * 256] float
 // Uses void* for consistency with DistanceFunc / PqAdcDistanceFunc.
 using PqSdcKernelFunc = void (*)(const void *a, const void *b,
-                                  const void *dist_table,
-                                  size_t num_subquantizers, float *out);
+                                 const void *dist_table,
+                                 size_t num_subquantizers, float *out);
+
+// Batch ADC: compute distances for multiple PQ codes against a shared LUT.
+// Signature matches BatchDistanceFunc for direct assignment (no lambda).
+using PqBatchAdcFunc = void (*)(const void **candidates, const void *lut,
+                                size_t num, size_t num_subquantizers,
+                                float *out);
 
 // Batch ADC: compute distances for multiple PQ codes against a shared LUT.
 // Signature matches BatchDistanceFunc for direct assignment (no lambda).
@@ -73,10 +79,8 @@ struct FhtKernels {
   FhtVecRescaleFunc rescale;
 };
 
-// Aggregate of all PQ-specific kernels needed by PqInt8Quantizer, dispatched
-// by ISA.  LUT computation (compute_distance_table) is NOT included here —
-// it reuses the existing fp32 BatchDistanceFunc from get_batch_distance_func()
-// which is metric-aware and already SIMD-optimized.
+// data_type selects the code packing layout:
+//   kInt8: one uint8 per sub-quantizer (256 centroids, stride=256)
 struct PqKernels {
   PqAdcDistanceFunc adc_distance;
   PqSdcKernelFunc sdc_distance;
@@ -112,12 +116,17 @@ enum class QuantizeType {
 enum class CpuArchType {
   kAuto,
   kScalar,
+  // x86 SIMD
   kSSE,
   kAVX,
   kAVX2,
   kAVX512,
   kAVX512VNNI,
-  kAVX512FP16
+  kAVX512FP16,
+  // ARM SIMD
+  kNEON,
+  kSVE,
+  kSVE2
 };
 
 DistanceFunc get_distance_func(MetricType metric_type, DataType data_type,
@@ -141,11 +150,12 @@ QueryPreprocessFunc get_query_preprocess_func(
 UniformQuantizeFunc get_uniform_quantize_func(DataType data_type);
 
 // Returns all FHT kernels dispatched for the current CPU.
-FhtKernels get_fht_kernels();
+FhtKernels get_fht_kernels(CpuArchType cpu_arch_type = CpuArchType::kAuto);
 
-// Returns all PQ kernels dispatched for the given quantize_type and CPU arch.
+// Returns all PQ kernels dispatched for the given data_type, quantize_type
+// and CPU arch.
 PqKernels get_pq_kernels(DataType data_type,
-                          QuantizeType quantize_type = QuantizeType::kPQ,
-                          CpuArchType cpu_arch_type = CpuArchType::kAuto);
+                         QuantizeType quantize_type = QuantizeType::kPQ,
+                         CpuArchType cpu_arch_type = CpuArchType::kAuto);
 
 }  // namespace zvec::turbo

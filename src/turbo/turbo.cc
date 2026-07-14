@@ -30,13 +30,14 @@
 #endif
 #if defined(__AVX2__)
 #include "avx2/fht/fht.h"
-#include "avx2/pq_quantizer_int4/pq_distance.h"
 #include "avx2/pq_quantizer_int8/pq_distance.h"
 #endif
 #if defined(__AVX512F__)
 #include "avx512/fht/fht.h"
-#include "avx512/pq_quantizer_int4/pq_distance.h"
 #include "avx512/pq_quantizer_int8/pq_distance.h"
+#endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+#include "neon/fht/fht.h"
 #endif
 
 namespace zvec::turbo {
@@ -160,7 +161,9 @@ UniformQuantizeFunc get_uniform_quantize_func(DataType data_type) {
   return nullptr;
 }
 
-FhtKernels get_fht_kernels() {
+FhtKernels get_fht_kernels(CpuArchType cpu_arch_type) {
+  // Suppress unused-parameter warning when no SIMD #if blocks are compiled in.
+  (void)cpu_arch_type;
   FhtKernels k;
   // Default: scalar fallback for all
   k.flip_sign = scalar::fht_flip_sign;
@@ -171,7 +174,9 @@ FhtKernels get_fht_kernels() {
 
 #if defined(__AVX512F__)
   if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
-      zvec::ailego::internal::CpuFeatures::static_flags_.AVX512DQ) {
+      zvec::ailego::internal::CpuFeatures::static_flags_.AVX512DQ &&
+      (cpu_arch_type == CpuArchType::kAuto ||
+       cpu_arch_type == CpuArchType::kAVX512)) {
     k.flip_sign = avx512::fht_flip_sign_avx512;
     k.kacs_walk = avx512::fht_kacs_walk_avx512;
     k.inv_kacs_walk = avx512::fht_inv_kacs_walk_avx512;
@@ -181,7 +186,9 @@ FhtKernels get_fht_kernels() {
   }
 #endif
 #if defined(__AVX2__)
-  if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2) {
+  if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+      (cpu_arch_type == CpuArchType::kAuto ||
+       cpu_arch_type == CpuArchType::kAVX2)) {
     k.flip_sign = avx2::fht_flip_sign_avx2;
     k.kacs_walk = avx2::fht_kacs_walk_avx2;
     k.inv_kacs_walk = avx2::fht_inv_kacs_walk_avx2;
@@ -191,7 +198,9 @@ FhtKernels get_fht_kernels() {
   }
 #endif
 #if defined(__SSE2__)
-  if (zvec::ailego::internal::CpuFeatures::static_flags_.SSE2) {
+  if (zvec::ailego::internal::CpuFeatures::static_flags_.SSE2 &&
+      (cpu_arch_type == CpuArchType::kAuto ||
+       cpu_arch_type == CpuArchType::kSSE)) {
     k.flip_sign = sse::fht_flip_sign_sse;
     k.kacs_walk = sse::fht_kacs_walk_sse;
     k.inv_kacs_walk = sse::fht_inv_kacs_walk_sse;
@@ -200,44 +209,35 @@ FhtKernels get_fht_kernels() {
     return k;
   }
 #endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+  if (cpu_arch_type == CpuArchType::kAuto ||
+      cpu_arch_type == CpuArchType::kNEON) {
+    k.flip_sign = neon::fht_flip_sign_neon;
+    k.kacs_walk = neon::fht_kacs_walk_neon;
+    k.inv_kacs_walk = neon::fht_inv_kacs_walk_neon;
+    k.rescale = neon::fht_vec_rescale_neon;
+    // inplace fallback to scalar (NEON has no fht_inplace)
+    return k;
+  }
+#endif
   return k;  // scalar
 }
 
 PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
                          CpuArchType cpu_arch_type) {
-  (void)cpu_arch_type;  // currently unused, reserved for future use
+  // Suppress unused-parameter warning when no SIMD #if blocks are compiled in.
+  (void)cpu_arch_type;
   PqKernels k{};
   if (quantize_type == QuantizeType::kPQ) {
-    if (data_type == DataType::kInt4) {
-      // int4 packed nibble path — scalar by default.
-      k.adc_distance = scalar::pq_adc_int4_distance;
-      k.sdc_distance = scalar::pq_sdc_int4_distance;
-      k.batch_adc_distance = scalar::pq_adc_int4_batch_distance;
-
-#if defined(__AVX512F__)
-      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F) {
-        k.adc_distance = avx512::pq_adc_int4_distance_avx512;
-        k.sdc_distance = avx512::pq_sdc_int4_distance_avx512;
-        k.batch_adc_distance = avx512::pq_adc_int4_batch_distance_avx512;
-        return k;
-      }
-#endif
-#if defined(__AVX2__)
-      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2) {
-        k.adc_distance = avx2::pq_adc_int4_distance_avx2;
-        k.sdc_distance = avx2::pq_sdc_int4_distance_avx2;
-        k.batch_adc_distance = avx2::pq_adc_int4_batch_distance_avx2;
-      }
-#endif
-      return k;
-    }
-    // Default (kInt8 / fallback): scalar int8 kernels.
+    // Default (kInt8): scalar int8 kernels.
     k.adc_distance = scalar::pq_adc_int8_distance;
     k.sdc_distance = scalar::pq_sdc_int8_distance;
     k.batch_adc_distance = scalar::pq_adc_int8_batch_distance;
 
 #if defined(__AVX512F__)
-    if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F) {
+    if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+        (cpu_arch_type == CpuArchType::kAuto ||
+         cpu_arch_type == CpuArchType::kAVX512)) {
       k.adc_distance = avx512::pq_adc_int8_distance_avx512;
       k.sdc_distance = avx512::pq_sdc_int8_distance_avx512;
       k.batch_adc_distance = avx512::pq_adc_int8_batch_distance_avx512;
@@ -245,7 +245,9 @@ PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
     }
 #endif
 #if defined(__AVX2__)
-    if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2) {
+    if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+        (cpu_arch_type == CpuArchType::kAuto ||
+         cpu_arch_type == CpuArchType::kAVX2)) {
       k.adc_distance = avx2::pq_adc_int8_distance_avx2;
       k.sdc_distance = avx2::pq_sdc_int8_distance_avx2;
       k.batch_adc_distance = avx2::pq_adc_int8_batch_distance_avx2;
