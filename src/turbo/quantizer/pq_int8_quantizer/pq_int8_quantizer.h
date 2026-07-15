@@ -129,7 +129,7 @@ class PqInt8Quantizer : public Quantizer {
 
   static constexpr uint32_t kNumCentroids = 256;
   static constexpr uint32_t kMaxKmeansIters = 25;
-  static constexpr size_t kMaxTrainVectors = 65536;
+  static constexpr size_t kMaxTrainVectors = 200000;
   static constexpr uint32_t kExtraMetaSizeCosine = sizeof(float);
 
   //! Thread count for KMeans training (0 = hardware_concurrency).
