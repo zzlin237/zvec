@@ -205,7 +205,7 @@ class HnswIndexParam(VectorIndexParam):
             graph quality at the cost of slower build time. Default is 500.
         quantize_type (QuantizeType): Optional quantization type for vector
             compression (e.g., FP16, INT8, PQ). Default is `QuantizeType.UNDEFINED`
-            to disable quantization. When using PQ, configure num_subquantizers
+            to disable quantization. When using PQ, configure num_chunk
             via ``quantizer_param``.
         use_contiguous_memory (bool): If True, the HNSW streamer allocates a
             single contiguous memory arena for all graph nodes, improving cache
@@ -230,7 +230,7 @@ class HnswIndexParam(VectorIndexParam):
         ...     m=15,
         ...     ef_construction=500,
         ...     quantize_type=QuantizeType.PQ,
-        ...     quantizer_param=QuantizerParam(num_subquantizers=32),
+        ...     quantizer_param=QuantizerParam(num_chunk=32),
         ... )
     """
 
@@ -1121,7 +1121,7 @@ class QuantizerParam:
         enable_rotate (bool): Whether to apply random rotation before INT8/INT4
             quantization to reduce quantization error.
             Only effective with quantize_type=INT8 or INT4. Defaults to False.
-        num_subquantizers (int): Number of PQ sub-quantizers (codebooks).
+        num_chunk (int): Number of PQ sub-quantizers (codebooks).
             Only effective with quantize_type=PQ. The vector dimension must be
             divisible by this value. Defaults to 8.
 
@@ -1129,20 +1129,20 @@ class QuantizerParam:
         >>> qp = QuantizerParam(enable_rotate=True)
         >>> print(qp.enable_rotate)
         True
-        >>> qp_pq = QuantizerParam(num_subquantizers=32)
-        >>> print(qp_pq.num_subquantizers)
+        >>> qp_pq = QuantizerParam(num_chunk=32)
+        >>> print(qp_pq.num_chunk)
         32
     """
 
     def __getstate__(self) -> tuple: ...
-    def __init__(self, enable_rotate: bool = False, num_subquantizers: int = 8) -> None:
+    def __init__(self, enable_rotate: bool = False, num_chunk: int = 8) -> None:
         """
         Constructs a QuantizerParam instance.
 
         Args:
             enable_rotate (bool, optional): Whether to apply random rotation
                 before INT8/INT4 quantization. Defaults to False.
-            num_subquantizers (int, optional): Number of PQ sub-quantizers.
+            num_chunk (int, optional): Number of PQ sub-quantizers.
                 Only effective with quantize_type=PQ. Defaults to 8.
         """
 
@@ -1161,7 +1161,7 @@ class QuantizerParam:
         """
 
     @property
-    def num_subquantizers(self) -> int:
+    def num_chunk(self) -> int:
         """
         int: Number of PQ sub-quantizers. Only effective with quantize_type=PQ.
         """

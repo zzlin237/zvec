@@ -30,9 +30,9 @@ using namespace zvec::core;
 //!
 //! Datapoints are encoded as packed nibbles: two 4-bit indices per byte.
 //!   byte[i] = (code[2*i+1] << 4) | code[2*i]
-//! num_subquantizers MUST be even for clean byte packing.
+//! num_chunk MUST be even for clean byte packing.
 //!
-//! Queries are encoded as a float LUT of size [num_subquantizers * 16]
+//! Queries are encoded as a float LUT of size [num_chunk * 16]
 //! via quantize_query().  Distance between a PQ code and a query uses
 //! ADC (LUT look-up); distance between two PQ codes uses SDC
 //! (centroid-to-centroid distance table of size [nsq * 16 * 16]).
@@ -70,14 +70,14 @@ class PqInt4Quantizer : public Quantizer {
 
   int train(IndexHolder::Pointer holder, int thread_count) override;
 
-  // Packed nibbles: num_subquantizers / 2 bytes + optional Cosine norm.
+  // Packed nibbles: num_chunk / 2 bytes + optional Cosine norm.
   size_t quantized_datapoint_vector_length() const override {
-    return static_cast<size_t>(num_subquantizers_) / 2 + extra_meta_size_;
+    return static_cast<size_t>(num_chunk_) / 2 + extra_meta_size_;
   }
 
-  // LUT: [num_subquantizers * 16] floats.
+  // LUT: [num_chunk * 16] floats.
   size_t quantized_query_vector_length() const override {
-    return static_cast<size_t>(num_subquantizers_) * kNumCentroids *
+    return static_cast<size_t>(num_chunk_) * kNumCentroids *
            sizeof(float);
   }
 
@@ -147,14 +147,14 @@ class PqInt4Quantizer : public Quantizer {
 
   IndexMeta meta_{};
   uint32_t original_dim_{0};
-  uint32_t num_subquantizers_{0};
+  uint32_t num_chunk_{0};
   uint32_t sub_dim_{0};
 
-  //! Centroids: [num_subquantizers * kNumCentroids * sub_dim]
+  //! Centroids: [num_chunk * kNumCentroids * sub_dim]
   std::vector<float> centroids_;
 
   //! Centroid-to-centroid distance table for SDC:
-  //! [num_subquantizers * kNumCentroids * kNumCentroids]
+  //! [num_chunk * kNumCentroids * kNumCentroids]
   std::vector<float> dist_table_;
 
   //! Pre-built centroid pointer arrays for each sub-quantizer.

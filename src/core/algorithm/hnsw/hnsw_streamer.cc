@@ -510,8 +510,8 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       if (add_quantizer_) {
         ailego::Params quantizer_params;
         int nsq = 0;
-        if (sp.get("num_subquantizers", &nsq)) {
-          quantizer_params.set("num_subquantizers", nsq);
+        if (sp.get("num_chunk", &nsq)) {
+          quantizer_params.set("num_chunk", nsq);
         }
         ret = add_quantizer_->init(meta_, quantizer_params);
         if (ret != 0) {

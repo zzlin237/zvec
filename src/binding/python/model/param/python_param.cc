@@ -389,13 +389,13 @@ Args:
 Parameters for quantizer configuration.
 
 Encapsulates quantization-related settings such as enable_rotate and
-num_subquantizers. Designed for future extensibility.
+num_chunk. Designed for future extensibility.
 
 Attributes:
     enable_rotate (bool): Whether to apply random rotation before INT8/INT4
         quantization to reduce quantization error.
         Only effective with quantize_type=INT8 or INT4. Defaults to False.
-    num_subquantizers (int): Number of PQ sub-quantizers (codebooks).
+    num_chunk (int): Number of PQ sub-quantizers (codebooks).
         Only effective with quantize_type=PQ. The vector dimension must be
         divisible by this value. Defaults to 8.
 
@@ -403,12 +403,12 @@ Examples:
     >>> qp = QuantizerParam(enable_rotate=True)
     >>> print(qp.enable_rotate)
     True
-    >>> qp_pq = QuantizerParam(num_subquantizers=32)
-    >>> print(qp_pq.num_subquantizers)
+    >>> qp_pq = QuantizerParam(num_chunk=32)
+    >>> print(qp_pq.num_chunk)
     32
 )pbdoc");
   quantizer_param.def(py::init<bool, int>(), py::arg("enable_rotate") = false,
-                      py::arg("num_subquantizers") = 8)
+                      py::arg("num_chunk") = 8)
       .def_property_readonly(
           "enable_rotate",
           [](const QuantizerParam &self) -> bool {
@@ -417,9 +417,9 @@ Examples:
           "bool: Whether random rotation is enabled before INT8/INT4 "
           "quantization.")
       .def_property_readonly(
-          "num_subquantizers",
+          "num_chunk",
           [](const QuantizerParam &self) -> int {
-            return self.num_subquantizers();
+            return self.num_chunk();
           },
           "int: Number of PQ sub-quantizers. Only effective with "
           "quantize_type=PQ.")
@@ -428,7 +428,7 @@ Examples:
           [](const QuantizerParam &self) -> py::dict {
             py::dict dict;
             dict["enable_rotate"] = self.enable_rotate();
-            dict["num_subquantizers"] = self.num_subquantizers();
+            dict["num_chunk"] = self.num_chunk();
             return dict;
           },
           "Convert to dictionary with all fields")
@@ -436,8 +436,8 @@ Examples:
            [](const QuantizerParam &self) -> std::string {
              return "{\"enable_rotate\":" +
                     std::string(self.enable_rotate() ? "true" : "false") +
-                    ", \"num_subquantizers\":" +
-                    std::to_string(self.num_subquantizers()) + "}";
+                    ", \"num_chunk\":" +
+                    std::to_string(self.num_chunk()) + "}";
            })
       .def(
           "__eq__",
@@ -449,7 +449,7 @@ Examples:
       .def(py::pickle(
           [](const QuantizerParam &self) {
             return py::make_tuple(self.enable_rotate(),
-                                  self.num_subquantizers());
+                                  self.num_chunk());
           },
           [](py::tuple t) {
             if (t.size() != 1 && t.size() != 2)
@@ -536,7 +536,7 @@ Attributes:
         graph quality at the cost of slower build time. Default is 500.
     quantize_type (QuantizeType): Optional quantization type for vector
         compression (e.g., FP16, INT8, PQ). Default is `QuantizeType.UNDEFINED`
-        to disable quantization. When using PQ, configure num_subquantizers
+        to disable quantization. When using PQ, configure num_chunk
         via ``quantizer_param``.
 
 Examples:
@@ -557,7 +557,7 @@ Examples:
     ...     m=15,
     ...     ef_construction=500,
     ...     quantize_type=QuantizeType.PQ,
-    ...     quantizer_param=QuantizerParam(num_subquantizers=32),
+    ...     quantizer_param=QuantizerParam(num_chunk=32),
     ... )
 )pbdoc");
   hnsw_params
@@ -599,8 +599,8 @@ Examples:
             dict["use_contiguous_memory"] = self.use_contiguous_memory();
             py::dict qp_dict;
             qp_dict["enable_rotate"] = self.quantizer_param().enable_rotate();
-            qp_dict["num_subquantizers"] =
-                self.quantizer_param().num_subquantizers();
+            qp_dict["num_chunk"] =
+                self.quantizer_param().num_chunk();
             dict["quantizer_param"] = qp_dict;
             return dict;
           },
@@ -620,8 +620,8 @@ Examples:
                    (self.use_contiguous_memory() ? "true" : "false") +
                    ", \"quantizer_param\":{" + "\"enable_rotate\":" +
                    (self.quantizer_param().enable_rotate() ? "true" : "false") +
-                   ", \"num_subquantizers\":" +
-                   std::to_string(self.quantizer_param().num_subquantizers()) +
+                   ", \"num_chunk\":" +
+                   std::to_string(self.quantizer_param().num_chunk()) +
                    "}}";
           })
       .def(py::pickle(
@@ -630,7 +630,7 @@ Examples:
                 self.metric_type(), self.m(), self.ef_construction(),
                 self.quantize_type(), self.use_contiguous_memory(),
                 self.quantizer_param().enable_rotate(),
-                self.quantizer_param().num_subquantizers());
+                self.quantizer_param().num_chunk());
           },
           [](py::tuple t) {
             if (t.size() != 5 && t.size() != 6 && t.size() != 7)

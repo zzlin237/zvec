@@ -126,9 +126,9 @@ class InvertIndexParams : public IndexParams {
 class QuantizerParam {
  public:
   QuantizerParam() = default;
-  explicit QuantizerParam(bool enable_rotate, int num_subquantizers = 8)
+  explicit QuantizerParam(bool enable_rotate, int num_chunk = 8)
       : enable_rotate_(enable_rotate),
-        num_subquantizers_(num_subquantizers) {}
+        num_chunk_(num_chunk) {}
 
   bool enable_rotate() const {
     return enable_rotate_;
@@ -138,17 +138,17 @@ class QuantizerParam {
     enable_rotate_ = v;
   }
 
-  int num_subquantizers() const {
-    return num_subquantizers_;
+  int num_chunk() const {
+    return num_chunk_;
   }
 
-  void set_num_subquantizers(int v) {
-    num_subquantizers_ = v;
+  void set_num_chunk(int v) {
+    num_chunk_ = v;
   }
 
   bool operator==(const QuantizerParam &other) const {
     return enable_rotate_ == other.enable_rotate_ &&
-           num_subquantizers_ == other.num_subquantizers_;
+           num_chunk_ == other.num_chunk_;
   }
 
   bool operator!=(const QuantizerParam &other) const {
@@ -161,7 +161,7 @@ class QuantizerParam {
   bool enable_rotate_{false};
   // Number of PQ sub-quantizers. Only effective with quantize_type=PQ.
   // Dimension must be divisible by this value. Default: 8.
-  int num_subquantizers_{8};
+  int num_chunk_{8};
 };
 
 /*

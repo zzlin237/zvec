@@ -20,7 +20,7 @@ namespace {
 // Helper: read QuantizerParam from proto with backward-compat fallback.
 QuantizerParam ReadQuantizerParam(
     const proto::QuantizerParam &pb) {
-  int nsq = pb.num_subquantizers();
+  int nsq = pb.num_chunk();
   if (nsq <= 0) nsq = 8;  // backward compat: old records have 0
   return QuantizerParam(pb.enable_rotate(), nsq);
 }
@@ -29,7 +29,7 @@ QuantizerParam ReadQuantizerParam(
 void WriteQuantizerParam(const QuantizerParam &qp,
                           proto::QuantizerParam *pb) {
   pb->set_enable_rotate(qp.enable_rotate());
-  pb->set_num_subquantizers(qp.num_subquantizers());
+  pb->set_num_chunk(qp.num_chunk());
 }
 }  // namespace
 

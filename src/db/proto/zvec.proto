@@ -97,7 +97,7 @@ message QuantizerParam {
   // Number of PQ sub-quantizers (codebooks). Only effective with
   // quantize_type=PQ. The vector dimension must be divisible by this value.
   // Default: 8.
-  int32 num_subquantizers = 2;
+  int32 num_chunk = 2;
 };
 
 message BaseIndexParams {

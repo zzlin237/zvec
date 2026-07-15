@@ -30,12 +30,12 @@ inline uint8_t decode_nibble(const uint8_t *code, size_t m) {
 }  // namespace
 
 void pq_adc_int4_distance(const void *pq_code_v, const void *lut_v,
-                          size_t num_subquantizers, float *out) {
+                          size_t num_chunk, float *out) {
   constexpr size_t kNumCentroids = 16;
   const auto *pq_code = reinterpret_cast<const uint8_t *>(pq_code_v);
   const auto *lut = reinterpret_cast<const float *>(lut_v);
   float sum = 0.0f;
-  for (size_t m = 0; m < num_subquantizers; ++m) {
+  for (size_t m = 0; m < num_chunk; ++m) {
     uint8_t idx = decode_nibble(pq_code, m);
     sum += lut[m * kNumCentroids + idx];
   }
@@ -43,7 +43,7 @@ void pq_adc_int4_distance(const void *pq_code_v, const void *lut_v,
 }
 
 void pq_sdc_int4_distance(const void *a_v, const void *b_v,
-                          const void *dist_table_v, size_t num_subquantizers,
+                          const void *dist_table_v, size_t num_chunk,
                           float *out) {
   constexpr size_t kNumCentroids = 16;
   constexpr size_t kTablePerSub = kNumCentroids * kNumCentroids;  // 256
@@ -51,7 +51,7 @@ void pq_sdc_int4_distance(const void *a_v, const void *b_v,
   const auto *b = reinterpret_cast<const uint8_t *>(b_v);
   const auto *dist_table = reinterpret_cast<const float *>(dist_table_v);
   float sum = 0.0f;
-  for (size_t m = 0; m < num_subquantizers; ++m) {
+  for (size_t m = 0; m < num_chunk; ++m) {
     uint8_t ai = decode_nibble(a, m);
     uint8_t bi = decode_nibble(b, m);
     size_t idx = m * kTablePerSub + static_cast<size_t>(ai) * kNumCentroids +
@@ -62,7 +62,7 @@ void pq_sdc_int4_distance(const void *a_v, const void *b_v,
 }
 
 void pq_adc_int4_batch_distance(const void **candidates_v, const void *lut_v,
-                                size_t num, size_t num_subquantizers,
+                                size_t num, size_t num_chunk,
                                 float *out) {
   constexpr size_t kNumCentroids = 16;
   const auto *lut = reinterpret_cast<const float *>(lut_v);
@@ -77,7 +77,7 @@ void pq_adc_int4_batch_distance(const void **candidates_v, const void *lut_v,
     const uint8_t *c2 = candidates[i + 2];
     const uint8_t *c3 = candidates[i + 3];
     float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
-    for (size_t m = 0; m < num_subquantizers; ++m) {
+    for (size_t m = 0; m < num_chunk; ++m) {
       const float *tab = lut + m * kNumCentroids;
       uint8_t n0 = decode_nibble(c0, m);
       uint8_t n1 = decode_nibble(c1, m);
@@ -97,7 +97,7 @@ void pq_adc_int4_batch_distance(const void **candidates_v, const void *lut_v,
   for (; i < num; ++i) {
     const uint8_t *code = candidates[i];
     float d = 0.0f;
-    for (size_t m = 0; m < num_subquantizers; ++m) {
+    for (size_t m = 0; m < num_chunk; ++m) {
       uint8_t idx = decode_nibble(code, m);
       d += lut[m * kNumCentroids + idx];
     }

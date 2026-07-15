@@ -93,8 +93,8 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
                                  : "PqInt8Quantizer";
       proxima_index_params_.set(core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
                                 pq_class);
-      proxima_index_params_.set("num_subquantizers",
-                                quantizer_param.num_subquantizers);
+      proxima_index_params_.set("num_chunk",
+                                quantizer_param.num_chunk);
       break;
     }
     default:

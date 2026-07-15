@@ -67,7 +67,7 @@ using PqBatchAdcFunc = void (*)(const void **candidates, const void *lut,
 // Batch ADC: compute distances for multiple PQ codes against a shared LUT.
 // Signature matches BatchDistanceFunc for direct assignment (no lambda).
 using PqBatchAdcFunc = void (*)(const void **candidates, const void *lut,
-                                 size_t num, size_t num_subquantizers,
+                                 size_t num, size_t num_chunk,
                                  float *out);
 
 // Aggregate of all FHT kernels needed by FhtRotator, dispatched by ISA.

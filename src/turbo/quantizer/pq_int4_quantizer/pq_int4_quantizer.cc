@@ -35,7 +35,7 @@ namespace turbo {
 // ---------------------------------------------------------------------------
 struct PqInt4SerPayload {
   uint32_t original_dim;
-  uint32_t num_subquantizers;
+  uint32_t num_chunk;
   uint32_t sub_dim;
   uint32_t num_centroids;  // always 16 for int4
 };
@@ -46,34 +46,34 @@ int PqInt4Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
   uint32_t d = meta.dimension();
   original_dim_ = d;
 
-  // Read num_subquantizers from params (required).
+  // Read num_chunk from params (required).
   uint32_t nsq = 0;
-  if (!params.get("num_subquantizers", &nsq) || nsq == 0) {
-    LOG_ERROR("PqInt4Quantizer: num_subquantizers not set or zero");
+  if (!params.get("num_chunk", &nsq) || nsq == 0) {
+    LOG_ERROR("PqInt4Quantizer: num_chunk not set or zero");
     return kErrUnsupported;
   }
   if (d % nsq != 0) {
     LOG_ERROR(
-        "PqInt4Quantizer: dim (%u) is not divisible by num_subquantizers (%u)",
+        "PqInt4Quantizer: dim (%u) is not divisible by num_chunk (%u)",
         d, nsq);
     return kErrUnsupported;
   }
   // int4 codes are packed nibbles: 2 sub-quantizers per byte.
-  // num_subquantizers MUST be even for clean byte packing.
+  // num_chunk MUST be even for clean byte packing.
   if (nsq % 2 != 0) {
     LOG_ERROR(
-        "PqInt4Quantizer: num_subquantizers (%u) must be even for int4 "
+        "PqInt4Quantizer: num_chunk (%u) must be even for int4 "
         "packed nibble encoding",
         nsq);
     return kErrUnsupported;
   }
 
-  num_subquantizers_ = nsq;
+  num_chunk_ = nsq;
   sub_dim_ = d / nsq;
 
   // Pre-allocate centroids (filled by train()).
   centroids_.resize(
-      static_cast<size_t>(num_subquantizers_) * kNumCentroids * sub_dim_, 0.0f);
+      static_cast<size_t>(num_chunk_) * kNumCentroids * sub_dim_, 0.0f);
 
   // Dispatch ISA kernels: int4 packed nibble path.
   auto pq_k = get_pq_kernels(DataType::kInt4, QuantizeType::kPQ);
@@ -123,8 +123,8 @@ int PqInt4Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
 void PqInt4Quantizer::build_centroid_ptrs_cache() {
   const size_t k = kNumCentroids;
   const size_t d = sub_dim_;
-  centroid_ptrs_cache_.resize(num_subquantizers_);
-  for (uint32_t m = 0; m < num_subquantizers_; ++m) {
+  centroid_ptrs_cache_.resize(num_chunk_);
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
     const float *centroids_m =
         centroids_.data() + static_cast<size_t>(m) * k * d;
     auto &ptrs = centroid_ptrs_cache_[m];
@@ -247,12 +247,12 @@ int PqInt4Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
   }
 
   thread_count =
-      std::max(1, std::min(thread_count, static_cast<int>(num_subquantizers_)));
+      std::max(1, std::min(thread_count, static_cast<int>(num_chunk_)));
 
   LOG_INFO(
       "PQ int4 training: %zu vectors, dim=%u, nsq=%u, sub_dim=%u, "
       "max_iters=%u, threads=%d",
-      num, original_dim_, num_subquantizers_, sub_dim_, kMaxKmeansIters,
+      num, original_dim_, num_chunk_, sub_dim_, kMaxKmeansIters,
       thread_count);
 
   // Create thread pool (aligned with multi_chunk_cluster L183-185)
@@ -267,7 +267,7 @@ int PqInt4Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
     task_group->submit(ailego::Closure::New(
         [this, &all_data, num, data_stride, i, pool_count, &finished]() {
           for (uint32_t m = static_cast<uint32_t>(i);
-               m < num_subquantizers_;
+               m < num_chunk_;
                m += static_cast<uint32_t>(pool_count)) {
             train_subquantizer(all_data.data(), num, data_stride, m);
             finished++;
@@ -277,7 +277,7 @@ int PqInt4Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
   task_group->wait_finish();
 
   LOG_INFO("  all %u sub-quantizers trained (%zu threads)",
-           num_subquantizers_, pool_count);
+           num_chunk_, pool_count);
 
   build_centroid_ptrs_cache();
 
@@ -291,9 +291,9 @@ int PqInt4Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
 void PqInt4Quantizer::compute_dist_table() {
   const size_t k = kNumCentroids;
   const size_t d = sub_dim_;
-  dist_table_.resize(static_cast<size_t>(num_subquantizers_) * k * k, 0.0f);
+  dist_table_.resize(static_cast<size_t>(num_chunk_) * k * k, 0.0f);
 
-  for (uint32_t m = 0; m < num_subquantizers_; ++m) {
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
     const float *centroids_m = centroids_.data() + m * k * d;
     float *table_m = dist_table_.data() + m * k * k;
 
@@ -320,14 +320,14 @@ void PqInt4Quantizer::quantize_data(const void *input, void *output) const {
     vec = norm_vec_storage.data();
   }
 
-  // Clear packed nibble code buffer (num_subquantizers / 2 bytes).
-  size_t code_bytes = static_cast<size_t>(num_subquantizers_) / 2;
+  // Clear packed nibble code buffer (num_chunk / 2 bytes).
+  size_t code_bytes = static_cast<size_t>(num_chunk_) / 2;
   std::memset(code, 0, code_bytes);
 
   // Encode each sub-quantizer and pack into nibbles.
   float dists[kNumCentroids];
 
-  for (uint32_t m = 0; m < num_subquantizers_; ++m) {
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
     const float *sub_vec = vec + m * sub_dim_;
     const auto &centroid_ptrs = centroid_ptrs_cache_[m];
 
@@ -376,7 +376,7 @@ void PqInt4Quantizer::quantize_query(const void *input, void *output) const {
 
   // For each sub-quantizer, compute distance from query sub-vector to all
   // 16 centroids.  LUT stride = kNumCentroids = 16.
-  for (uint32_t m = 0; m < num_subquantizers_; ++m) {
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
     const auto &centroid_ptrs = centroid_ptrs_cache_[m];
     fp32_batch_fn_(const_cast<const void **>(centroid_ptrs.data()),
                    reinterpret_cast<const void *>(query + m * sub_dim_),
@@ -387,7 +387,7 @@ void PqInt4Quantizer::quantize_query(const void *input, void *output) const {
 float PqInt4Quantizer::calc_distance_dp_query(const void *dp,
                                               const void *query) const {
   float d = 0.0f;
-  adc_fn_(dp, query, num_subquantizers_, &d);
+  adc_fn_(dp, query, num_chunk_, &d);
   if (meta_.metric_name() == "Cosine") {
     d = 1.0f + d;
   }
@@ -399,7 +399,7 @@ void PqInt4Quantizer::calc_distance_dp_query_batch(const void *const *dp_list,
                                                    const void *query,
                                                    float *dist_list) const {
   batch_adc_fn_(const_cast<const void **>(dp_list), query,
-                static_cast<size_t>(dp_num), num_subquantizers_, dist_list);
+                static_cast<size_t>(dp_num), num_chunk_, dist_list);
   if (meta_.metric_name() == "Cosine") {
     for (int i = 0; i < dp_num; ++i) {
       dist_list[i] = 1.0f + dist_list[i];
@@ -409,11 +409,11 @@ void PqInt4Quantizer::calc_distance_dp_query_batch(const void *const *dp_list,
 
 float PqInt4Quantizer::calc_distance_dp_query_unquantized(
     const void *dp, const void *query) const {
-  std::vector<float> lut(static_cast<size_t>(num_subquantizers_) *
+  std::vector<float> lut(static_cast<size_t>(num_chunk_) *
                          kNumCentroids);
   quantize_query(query, lut.data());
   float d = 0.0f;
-  adc_fn_(dp, lut.data(), num_subquantizers_, &d);
+  adc_fn_(dp, lut.data(), num_chunk_, &d);
   if (meta_.metric_name() == "Cosine") {
     d = 1.0f + d;
   }
@@ -423,11 +423,11 @@ float PqInt4Quantizer::calc_distance_dp_query_unquantized(
 void PqInt4Quantizer::calc_distance_dp_query_batch_unquantized(
     const void *const *dp_list, int dp_num, const void *query,
     float *dist_list) const {
-  std::vector<float> lut(static_cast<size_t>(num_subquantizers_) *
+  std::vector<float> lut(static_cast<size_t>(num_chunk_) *
                          kNumCentroids);
   quantize_query(query, lut.data());
   batch_adc_fn_(const_cast<const void **>(dp_list), lut.data(),
-                static_cast<size_t>(dp_num), num_subquantizers_, dist_list);
+                static_cast<size_t>(dp_num), num_chunk_, dist_list);
   if (meta_.metric_name() == "Cosine") {
     for (int i = 0; i < dp_num; ++i) {
       dist_list[i] = 1.0f + dist_list[i];
@@ -438,7 +438,7 @@ void PqInt4Quantizer::calc_distance_dp_query_batch_unquantized(
 float PqInt4Quantizer::calc_distance_dp_dp(const void *dp1,
                                            const void *dp2) const {
   float d = 0.0f;
-  sdc_fn_(dp1, dp2, dist_table_.data(), num_subquantizers_, &d);
+  sdc_fn_(dp1, dp2, dist_table_.data(), num_chunk_, &d);
   return d;
 }
 
@@ -468,7 +468,7 @@ int PqInt4Quantizer::dequantize(const void *in, const IndexQueryMeta &qmeta,
 
   const size_t k = kNumCentroids;
   const size_t d = sub_dim_;
-  for (uint32_t m = 0; m < num_subquantizers_; ++m) {
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
     const float *centroids_m =
         centroids_.data() + static_cast<size_t>(m) * k * d;
 
@@ -483,7 +483,7 @@ int PqInt4Quantizer::dequantize(const void *in, const IndexQueryMeta &qmeta,
 
   // For Cosine: rescale by stored norm.
   if (meta_.metric_name() == "Cosine") {
-    size_t code_bytes = static_cast<size_t>(num_subquantizers_) / 2;
+    size_t code_bytes = static_cast<size_t>(num_chunk_) / 2;
     float norm = 0.0f;
     std::memcpy(&norm, code + code_bytes, sizeof(float));
     for (uint32_t j = 0; j < original_dim_; ++j) {
@@ -510,7 +510,7 @@ DistanceImpl PqInt4Quantizer::distance(const void *query,
 
   return DistanceImpl(std::move(adc_func), std::move(batch_func),
                       std::move(lut_storage),
-                      static_cast<size_t>(num_subquantizers_));
+                      static_cast<size_t>(num_chunk_));
 }
 
 DistanceImpl PqInt4Quantizer::sym_distance(const void *query,
@@ -532,7 +532,7 @@ DistanceImpl PqInt4Quantizer::sym_distance(const void *query,
 
   // SDC has no batch kernel — use the 3-arg constructor.
   return DistanceImpl(std::move(sdc_func), std::move(code_storage),
-                      static_cast<size_t>(num_subquantizers_));
+                      static_cast<size_t>(num_chunk_));
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +550,7 @@ int PqInt4Quantizer::serialize(std::string *out) const {
 
   PqInt4SerPayload payload{};
   payload.original_dim = original_dim_;
-  payload.num_subquantizers = num_subquantizers_;
+  payload.num_chunk = num_chunk_;
   payload.sub_dim = sub_dim_;
   payload.num_centroids = kNumCentroids;
 
@@ -586,12 +586,12 @@ int PqInt4Quantizer::deserialize(const void *data, size_t len) {
   ptr += sizeof(payload);
 
   original_dim_ = payload.original_dim;
-  num_subquantizers_ = payload.num_subquantizers;
+  num_chunk_ = payload.num_chunk;
   sub_dim_ = payload.sub_dim;
 
   meta_.set_meta(IndexMeta::DataType::DT_FP32, original_dim_);
 
-  size_t centroids_bytes = static_cast<size_t>(num_subquantizers_) *
+  size_t centroids_bytes = static_cast<size_t>(num_chunk_) *
                            kNumCentroids * sub_dim_ * sizeof(float);
 
   centroids_.resize(centroids_bytes / sizeof(float));

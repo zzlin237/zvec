@@ -62,7 +62,7 @@ inline __m512i unpack_nibbles_512(const uint8_t *packed) {
 }  // namespace
 
 void pq_adc_int4_distance_avx512(const void *pq_code_v, const void *lut_v,
-                                 size_t num_subquantizers, float *out) {
+                                 size_t num_chunk, float *out) {
   const auto *pq_code = reinterpret_cast<const uint8_t *>(pq_code_v);
   const auto *lut = reinterpret_cast<const float *>(lut_v);
 
@@ -77,7 +77,7 @@ void pq_adc_int4_distance_avx512(const void *pq_code_v, const void *lut_v,
   __m512 acc = _mm512_setzero_ps();
   size_t m = 0;
 
-  for (; m + kChunkSize <= num_subquantizers; m += kChunkSize) {
+  for (; m + kChunkSize <= num_chunk; m += kChunkSize) {
     __m512i nibbles = unpack_nibbles_512(pq_code + (m >> 1));
     __m512i indices = _mm512_add_epi32(nibbles, base_offsets);
     __m512 gathered = _mm512_i32gather_ps(indices, lut + m * kNumCentroids, 4);
@@ -86,7 +86,7 @@ void pq_adc_int4_distance_avx512(const void *pq_code_v, const void *lut_v,
 
   float sum = _mm512_reduce_add_ps(acc);
   // Scalar leftover
-  for (; m < num_subquantizers; ++m) {
+  for (; m < num_chunk; ++m) {
     uint8_t byte = pq_code[m >> 1];
     uint8_t idx = (m & 1u) ? (byte >> 4) : (byte & 0x0Fu);
     sum += lut[m * kNumCentroids + idx];
@@ -96,7 +96,7 @@ void pq_adc_int4_distance_avx512(const void *pq_code_v, const void *lut_v,
 
 void pq_sdc_int4_distance_avx512(const void *a_v, const void *b_v,
                                  const void *dist_table_v,
-                                 size_t num_subquantizers, float *out) {
+                                 size_t num_chunk, float *out) {
   const auto *a = reinterpret_cast<const uint8_t *>(a_v);
   const auto *b = reinterpret_cast<const uint8_t *>(b_v);
   const auto *dist_table = reinterpret_cast<const float *>(dist_table_v);
@@ -111,7 +111,7 @@ void pq_sdc_int4_distance_avx512(const void *a_v, const void *b_v,
   __m512 acc = _mm512_setzero_ps();
   size_t m = 0;
 
-  for (; m + kChunkSize <= num_subquantizers; m += kChunkSize) {
+  for (; m + kChunkSize <= num_chunk; m += kChunkSize) {
     __m512i a_nibs = unpack_nibbles_512(a + (m >> 1));
     __m512i b_nibs = unpack_nibbles_512(b + (m >> 1));
     // index = m_local * 256 + a_nib * 16 + b_nib
@@ -124,7 +124,7 @@ void pq_sdc_int4_distance_avx512(const void *a_v, const void *b_v,
   }
 
   float sum = _mm512_reduce_add_ps(acc);
-  for (; m < num_subquantizers; ++m) {
+  for (; m < num_chunk; ++m) {
     uint8_t ab = a[m >> 1], bb = b[m >> 1];
     uint8_t ai = (m & 1u) ? (ab >> 4) : (ab & 0x0Fu);
     uint8_t bi = (m & 1u) ? (bb >> 4) : (bb & 0x0Fu);
@@ -135,7 +135,7 @@ void pq_sdc_int4_distance_avx512(const void *a_v, const void *b_v,
 
 void pq_adc_int4_batch_distance_avx512(const void **candidates_v,
                                        const void *lut_v, size_t num,
-                                       size_t num_subquantizers, float *out) {
+                                       size_t num_chunk, float *out) {
   const auto *lut = reinterpret_cast<const float *>(lut_v);
   const auto *candidates =
       reinterpret_cast<const uint8_t *const *>(candidates_v);
@@ -159,7 +159,7 @@ void pq_adc_int4_batch_distance_avx512(const void **candidates_v,
     __m512 acc3 = _mm512_setzero_ps();
 
     size_t m = 0;
-    for (; m + kChunkSize <= num_subquantizers; m += kChunkSize) {
+    for (; m + kChunkSize <= num_chunk; m += kChunkSize) {
       const float *lut_base = lut + m * kNumCentroids;
       __m512i nib0 = unpack_nibbles_512(c0 + (m >> 1));
       __m512i nib1 = unpack_nibbles_512(c1 + (m >> 1));
@@ -185,7 +185,7 @@ void pq_adc_int4_batch_distance_avx512(const void **candidates_v,
     float s3 = _mm512_reduce_add_ps(acc3);
 
     // Scalar leftover for remaining sub-quantizers.
-    for (; m < num_subquantizers; ++m) {
+    for (; m < num_chunk; ++m) {
       const float *tab = lut + m * kNumCentroids;
       uint8_t b0 = c0[m >> 1], b1 = c1[m >> 1], b2 = c2[m >> 1],
               b3 = c3[m >> 1];
@@ -201,7 +201,7 @@ void pq_adc_int4_batch_distance_avx512(const void **candidates_v,
   }
   // Remaining candidates: use single ADC kernel.
   for (; i < num; ++i) {
-    pq_adc_int4_distance_avx512(candidates[i], lut, num_subquantizers, out + i);
+    pq_adc_int4_distance_avx512(candidates[i], lut, num_chunk, out + i);
   }
 }
 

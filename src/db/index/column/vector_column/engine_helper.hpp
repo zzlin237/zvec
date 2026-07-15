@@ -410,11 +410,11 @@ class ProximaEngineHelper {
         index_param_builder->WithUseContiguousMemory(
             db_index_params->use_contiguous_memory());
 
-        // Propagate num_subquantizers for PQ quantization.
+        // Propagate num_chunk for PQ quantization.
         if (db_index_params->quantize_type() == QuantizeType::PQ) {
           auto engine_qt =
               convert_to_engine_quantize_type(db_index_params->quantize_type());
-          int nsq = db_index_params->quantizer_param().num_subquantizers();
+          int nsq = db_index_params->quantizer_param().num_chunk();
           if (nsq <= 0) nsq = 8;
           index_param_builder->WithQuantizerParam(
               core_interface::QuantizerParam(engine_qt.value(), nsq));

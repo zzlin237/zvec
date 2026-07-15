@@ -92,13 +92,13 @@ inline void accumulate_adc(__m256 &acc, const float *lut, __m128i lo_nib,
 }  // namespace
 
 void pq_adc_int4_distance_avx2(const void *pq_code_v, const void *lut_v,
-                               size_t num_subquantizers, float *out) {
+                               size_t num_chunk, float *out) {
   const auto *pq_code = reinterpret_cast<const uint8_t *>(pq_code_v);
   const auto *lut = reinterpret_cast<const float *>(lut_v);
   __m256 acc = _mm256_setzero_ps();
 
   size_t m = 0;
-  for (; m + kChunkSize <= num_subquantizers; m += kChunkSize) {
+  for (; m + kChunkSize <= num_chunk; m += kChunkSize) {
     __m128i lo_nib, hi_nib;
     unpack_nibbles(pq_code + (m >> 1), lo_nib, hi_nib);
     accumulate_adc(acc, lut + m * kNumCentroids, lo_nib, hi_nib);
@@ -106,7 +106,7 @@ void pq_adc_int4_distance_avx2(const void *pq_code_v, const void *lut_v,
 
   float sum = horizontal_sum_avx2(acc);
   // Scalar leftover
-  for (; m < num_subquantizers; ++m) {
+  for (; m < num_chunk; ++m) {
     uint8_t byte = pq_code[m >> 1];
     uint8_t idx = (m & 1u) ? (byte >> 4) : (byte & 0x0Fu);
     sum += lut[m * kNumCentroids + idx];
@@ -116,7 +116,7 @@ void pq_adc_int4_distance_avx2(const void *pq_code_v, const void *lut_v,
 
 void pq_sdc_int4_distance_avx2(const void *a_v, const void *b_v,
                                const void *dist_table_v,
-                               size_t num_subquantizers, float *out) {
+                               size_t num_chunk, float *out) {
   const auto *a = reinterpret_cast<const uint8_t *>(a_v);
   const auto *b = reinterpret_cast<const uint8_t *>(b_v);
   const auto *dist_table = reinterpret_cast<const float *>(dist_table_v);
@@ -128,7 +128,7 @@ void pq_sdc_int4_distance_avx2(const void *a_v, const void *b_v,
 
   __m256 acc = _mm256_setzero_ps();
   size_t m = 0;
-  for (; m + kChunkSize <= num_subquantizers; m += kChunkSize) {
+  for (; m + kChunkSize <= num_chunk; m += kChunkSize) {
     const float *dt_base = dist_table + m * kTablePerSub;
 
     __m128i a_lo, a_hi, b_lo, b_hi;
@@ -154,7 +154,7 @@ void pq_sdc_int4_distance_avx2(const void *a_v, const void *b_v,
   }
 
   float sum = horizontal_sum_avx2(acc);
-  for (; m < num_subquantizers; ++m) {
+  for (; m < num_chunk; ++m) {
     uint8_t ab = a[m >> 1], bb = b[m >> 1];
     uint8_t ai = (m & 1u) ? (ab >> 4) : (ab & 0x0Fu);
     uint8_t bi = (m & 1u) ? (bb >> 4) : (bb & 0x0Fu);
@@ -165,7 +165,7 @@ void pq_sdc_int4_distance_avx2(const void *a_v, const void *b_v,
 
 void pq_adc_int4_batch_distance_avx2(const void **candidates_v,
                                      const void *lut_v, size_t num,
-                                     size_t num_subquantizers, float *out) {
+                                     size_t num_chunk, float *out) {
   const auto *lut = reinterpret_cast<const float *>(lut_v);
   const auto *candidates =
       reinterpret_cast<const uint8_t *const *>(candidates_v);
@@ -182,7 +182,7 @@ void pq_adc_int4_batch_distance_avx2(const void **candidates_v,
     __m256 acc3 = _mm256_setzero_ps();
 
     size_t m = 0;
-    for (; m + kChunkSize <= num_subquantizers; m += kChunkSize) {
+    for (; m + kChunkSize <= num_chunk; m += kChunkSize) {
       const float *lut_base = lut + m * kNumCentroids;
       __m128i lo0, hi0, lo1, hi1, lo2, hi2, lo3, hi3;
       unpack_nibbles(c0 + (m >> 1), lo0, hi0);
@@ -201,7 +201,7 @@ void pq_adc_int4_batch_distance_avx2(const void **candidates_v,
     float s3 = horizontal_sum_avx2(acc3);
 
     // Scalar leftover for remaining sub-quantizers.
-    for (; m < num_subquantizers; ++m) {
+    for (; m < num_chunk; ++m) {
       const float *tab = lut + m * kNumCentroids;
       uint8_t b0 = c0[m >> 1], b1 = c1[m >> 1], b2 = c2[m >> 1],
               b3 = c3[m >> 1];
@@ -217,7 +217,7 @@ void pq_adc_int4_batch_distance_avx2(const void **candidates_v,
   }
   // Remaining candidates: use single ADC kernel.
   for (; i < num; ++i) {
-    pq_adc_int4_distance_avx2(candidates[i], lut, num_subquantizers, out + i);
+    pq_adc_int4_distance_avx2(candidates[i], lut, num_chunk, out + i);
   }
 }
 

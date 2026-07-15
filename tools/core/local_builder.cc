@@ -1217,8 +1217,8 @@ int do_build(YAML::Node &config_root, YAML::Node &config_common) {
     }
     ailego::Params quantizer_params;
     int nsq = 0;
-    if (params.get("num_subquantizers", &nsq)) {
-      quantizer_params.set("num_subquantizers", nsq);
+    if (params.get("num_chunk", &nsq)) {
+      quantizer_params.set("num_chunk", nsq);
     }
     ret = quantizer->init(meta, quantizer_params);
     if (ret != 0) {
