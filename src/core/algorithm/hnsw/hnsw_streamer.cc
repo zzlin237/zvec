@@ -513,6 +513,10 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
         if (sp.get("num_chunk", &nsq)) {
           quantizer_params.set("num_chunk", nsq);
         }
+        bool use_zero_mean = false;
+        if (sp.get("use_zero_mean", &use_zero_mean)) {
+          quantizer_params.set("use_zero_mean", use_zero_mean);
+        }
         ret = add_quantizer_->init(meta_, quantizer_params);
         if (ret != 0) {
           LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",

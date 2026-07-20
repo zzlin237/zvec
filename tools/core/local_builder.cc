@@ -1220,6 +1220,10 @@ int do_build(YAML::Node &config_root, YAML::Node &config_common) {
     if (params.get("num_chunk", &nsq)) {
       quantizer_params.set("num_chunk", nsq);
     }
+    bool use_zero_mean = false;
+    if (params.get("use_zero_mean", &use_zero_mean)) {
+      quantizer_params.set("use_zero_mean", use_zero_mean);
+    }
     ret = quantizer->init(meta, quantizer_params);
     if (ret != 0) {
       LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
