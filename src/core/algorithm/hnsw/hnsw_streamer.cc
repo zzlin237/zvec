@@ -492,16 +492,42 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       // Restore quantizer from serialized state in IndexMeta.
       add_quantizer_ = IndexFactory::CreateQuantizer(quantizer_class);
       if (add_quantizer_) {
-        ret = add_quantizer_->deserialize(quantizer_data);
+        // Init BEFORE deserialize so the metric context (normalization,
+        // extra-meta size, distance function) flows from the current meta_
+        // exactly as it does for a fresh index.  The construction params
+        // (num_chunk, use_zero_mean) were persisted in streamer_params at
+        // build time and restored above, so init() can reconstruct the same
+        // configuration; deserialize() then loads the codebook on top.  This
+        // keeps persisted quantizers (which never had init() called before)
+        // consistent with the non-persisted path, avoiding a silent fallback
+        // to the default metric at search time.
+        ailego::Params quantizer_params;
+        int nsq = 0;
+        if (sp.get("num_chunk", &nsq)) {
+          quantizer_params.set("num_chunk", nsq);
+        }
+        bool use_zero_mean = false;
+        if (sp.get("use_zero_mean", &use_zero_mean)) {
+          quantizer_params.set("use_zero_mean", use_zero_mean);
+        }
+        ret = add_quantizer_->init(meta_, quantizer_params);
         if (ret != 0) {
-          LOG_ERROR("Failed to deserialize turbo quantizer '%s', ret=%d",
+          LOG_ERROR("Failed to init turbo quantizer '%s' before restore, "
+                    "ret=%d",
                     quantizer_class.c_str(), ret);
           add_quantizer_.reset();
         } else {
-          turbo_quantizer_class_ = quantizer_class;
-          search_quantizer_ = add_quantizer_;
-          LOG_INFO("HnswStreamer: restored turbo quantizer '%s' from index",
-                   quantizer_class.c_str());
+          ret = add_quantizer_->deserialize(quantizer_data);
+          if (ret != 0) {
+            LOG_ERROR("Failed to deserialize turbo quantizer '%s', ret=%d",
+                      quantizer_class.c_str(), ret);
+            add_quantizer_.reset();
+          } else {
+            turbo_quantizer_class_ = quantizer_class;
+            search_quantizer_ = add_quantizer_;
+            LOG_INFO("HnswStreamer: restored turbo quantizer '%s' from index",
+                     quantizer_class.c_str());
+          }
         }
       }
     } else if (!turbo_quantizer_class_.empty()) {
