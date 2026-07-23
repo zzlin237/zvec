@@ -12,13 +12,70 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "ivf_builder.h"
+#include <ailego/math/normalizer.h>
 #include <ailego/pattern/defer.h>
+#include <functional>
 #include <zvec/ailego/utility/string_helper.h>
 #include "algorithm/cluster/cluster_params.h"
 #include "ivf_dumper.h"
 
 namespace zvec {
 namespace core {
+
+/*! In-memory fp32 holder backed by a contiguous residual buffer.
+ *  Used to feed per-cluster residuals into the PQ quantizer trainer.
+ */
+class BufferedFloatHolder : public IndexHolder {
+ public:
+  class Iterator : public IndexHolder::Iterator {
+   public:
+    Iterator(const std::vector<float> *buf, size_t dim) : buf_(buf), dim_(dim) {}
+    ~Iterator(void) override {}
+    const void *data(void) const override {
+      return buf_->data() + id_ * dim_;
+    }
+    bool is_valid(void) const override {
+      return (id_ + 1) * dim_ <= buf_->size();
+    }
+    uint64_t key(void) const override {
+      return id_;
+    }
+    void next(void) override {
+      ++id_;
+    }
+
+   private:
+    const std::vector<float> *buf_{nullptr};
+    size_t dim_{0};
+    size_t id_{0};
+  };
+
+  BufferedFloatHolder(std::vector<float> buf, size_t dim)
+      : buf_(std::move(buf)), dim_(dim) {}
+
+  size_t count(void) const override {
+    return dim_ ? buf_.size() / dim_ : 0;
+  }
+  size_t dimension(void) const override {
+    return dim_;
+  }
+  IndexMeta::DataType data_type(void) const override {
+    return IndexMeta::DataType::DT_FP32;
+  }
+  size_t element_size(void) const override {
+    return dim_ * sizeof(float);
+  }
+  bool multipass(void) const override {
+    return true;
+  }
+  IndexHolder::Iterator::Pointer create_iterator(void) override {
+    return IndexHolder::Iterator::Pointer(new Iterator(&buf_, dim_));
+  }
+
+ private:
+  std::vector<float> buf_{};
+  size_t dim_{0};
+};
 
 /*! IndexHolder support filtered by vector labels
  */
@@ -195,6 +252,14 @@ int IVFBuilder::cleanup(void) {
   quantized_meta_ = meta_;
   quantizers_.clear();
 
+  pq_quantizers_.clear();
+  pq_centroids_.clear();
+  pq_dim_ = 0;
+  pq_num_chunk_ = 0;
+  pq_enable_ = false;
+  pq_use_zero_mean_ = false;
+  pq_normalize_ = false;
+
   error_ = false;
   err_code_ = 0;
 
@@ -311,6 +376,41 @@ int IVFBuilder::train(const IndexTrainer::Pointer &trainer) {
   ret = centroid_index_->build(centroid_list);
   ivf_check_with_msg(ret, "Failed to build centroid index");
 
+  //! Extract fp32 centroids (in the same leaf order the centroid index uses
+  //! for labeling) so residuals v - centroid_i can be computed at build/dump.
+  if (pq_enable_) {
+    pq_dim_ = converted_meta_.dimension();
+    pq_centroids_.clear();
+    pq_centroids_.reserve(centroid_index_->centroids_count() * pq_dim_);
+    std::function<void(const IndexCluster::CentroidList &)> collect_leaves =
+        [&](const IndexCluster::CentroidList &cents) {
+          for (const auto &it : cents) {
+            if (it.subitems().empty()) {
+              const float *f = reinterpret_cast<const float *>(it.feature());
+              pq_centroids_.insert(pq_centroids_.end(), f, f + pq_dim_);
+            } else {
+              collect_leaves(it.subitems());
+            }
+          }
+        };
+    collect_leaves(centroid_list);
+    if (pq_centroids_.size() !=
+        static_cast<size_t>(centroid_index_->centroids_count()) * pq_dim_) {
+      LOG_ERROR("IVF PQ: collected centroids(%zu) mismatch expected(%zu)",
+                pq_centroids_.size(),
+                static_cast<size_t>(centroid_index_->centroids_count()) *
+                    pq_dim_);
+      return IndexError_Runtime;
+    }
+    if (pq_normalize_) {
+      for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
+        float norm = 0.0f;
+        ailego::Normalizer<float>::L2(pq_centroids_.data() + i * pq_dim_,
+                                      pq_dim_, &norm);
+      }
+    }
+  }
+
   if (params_.has(PARAM_IVF_BUILDER_OPTIMIZER_QUANTIZER_CLASS)) {
     //! Quantize the centroids for searcher
     searcher_centroid_index_ = std::make_shared<IVFCentroidIndex>();
@@ -391,8 +491,13 @@ int IVFBuilder::build(IndexThreads::Pointer threads,
   ivf_check_with_msg(ret, "Failed to build index for %s",
                      IndexError::What(ret));
 
-  ret = this->prepare_quantizer(threads.get());
-  ivf_check_error_code(ret);
+  if (pq_enable_) {
+    ret = this->prepare_pq_quantizers(threads.get());
+    ivf_check_error_code(ret);
+  } else {
+    ret = this->prepare_quantizer(threads.get());
+    ivf_check_error_code(ret);
+  }
 
   stats_.set_built_costtime(timer.milli_seconds());
 
@@ -575,6 +680,35 @@ int IVFBuilder::parse_general_params(const ailego::Params &params) {
     LOG_ERROR("block_vector_count * element_size not align with 32 bytes.");
     return IndexError_InvalidArgument;
   }
+
+  //! Per-cluster residual PQ (pure PQ-ADC). L2/Cosine only.
+  params.get(PARAM_IVF_BUILDER_PQ_ENABLE, &pq_enable_);
+  if (pq_enable_) {
+    const std::string &metric = meta_.metric_name();
+    if (metric != kL2MetricName && metric != "Cosine") {
+      LOG_WARN("IVF residual PQ is only supported for SquaredEuclidean/Cosine, "
+               "metric=%s; disabling PQ",
+               metric.c_str());
+      pq_enable_ = false;
+    } else {
+      pq_normalize_ = (metric == "Cosine");
+      pq_num_chunk_ = params.get_as_uint32(PARAM_IVF_BUILDER_PQ_NUM_CHUNK);
+      if (pq_num_chunk_ == 0) {
+        pq_num_chunk_ = 8;
+      }
+      pq_use_zero_mean_ = true;
+      params.get(PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, &pq_use_zero_mean_);
+      if (meta_.dimension() % pq_num_chunk_ != 0) {
+        LOG_ERROR("IVF PQ: dim(%u) not divisible by num_chunk(%u)",
+                  meta_.dimension(), pq_num_chunk_);
+        return IndexError_InvalidArgument;
+      }
+      LOG_INFO("IVF residual PQ enabled: num_chunk=%u use_zero_mean=%d "
+               "normalize=%d",
+               pq_num_chunk_, pq_use_zero_mean_, pq_normalize_);
+    }
+  }
+
   return 0;
 }
 
@@ -668,7 +802,27 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
     dumped_ids.reserve(holder_->count());
     record_dumped_id = [&](uint32_t id) { dumped_ids.emplace_back(id); };
   }
-  if (quantizers_.size() == 0) {
+  if (pq_enable_) {
+    //! Per-cluster residual PQ: store uint8[num_chunk] codes.
+    ivf_dumper->set_pq_meta(pq_num_chunk_, pq_use_zero_mean_ ? 1 : 0);
+    std::vector<uint8_t> code(pq_num_chunk_);
+    std::vector<float> resid(pq_dim_);
+    for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
+      ailego_assert_with(i < labels_.size(), "Index Overflow");
+      const float *centroid = pq_centroids_.data() + i * pq_dim_;
+      for (size_t j = 0; j < labels_[i].size(); ++j) {
+        auto id = labels_[i][j];
+        record_dumped_id(id);
+        const float *v =
+            reinterpret_cast<const float *>(holder_->element(id));
+        this->compute_pq_residual(v, centroid, resid.data());
+        pq_quantizers_[i]->quantize_data(resid.data(), code.data());
+        ret = ivf_dumper->dump_inverted_vector(i, holder_->key(id),
+                                               code.data());
+        ivf_check_error_code(ret);
+      }
+    }
+  } else if (quantizers_.size() == 0) {
     //! No quantizer for inverted vectors
     for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
       ailego_assert_with(i < labels_.size(), "Index Overflow");
@@ -714,6 +868,11 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   ret = ivf_dumper->dump_centroid_index(centroid_index->data(),
                                         centroid_index->size());
   ivf_check_with_msg(ret, "Failed to dump CentroidIndex");
+
+  if (pq_enable_) {
+    ret = ivf_dumper->dump_pq(pq_quantizers_, pq_centroids_, pq_dim_);
+    ivf_check_with_msg(ret, "Failed to dump per-cluster PQ codebooks");
+  }
 
   if (store_original_features_) {
     for (size_t i = 0; i < dumped_ids.size(); ++i) {
@@ -820,6 +979,121 @@ int IVFBuilder::prepare_quantizer(IndexThreads *threads) {
     quantized_meta_ = quantizers_[0]->meta();
   }
 
+  return 0;
+}
+
+void IVFBuilder::compute_pq_residual(const float *vec, const float *centroid,
+                                    float *out) const {
+  if (pq_normalize_) {
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      out[d] = vec[d];
+    }
+    float norm = 0.0f;
+    ailego::Normalizer<float>::L2(out, pq_dim_, &norm);
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      out[d] -= centroid[d];
+    }
+  } else {
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      out[d] = vec[d] - centroid[d];
+    }
+  }
+}
+
+void IVFBuilder::train_pq_cluster(size_t cluster_id, const IndexMeta &pq_meta,
+                                  const ailego::Params &pq_params) {
+  if (error_) {
+    return;
+  }
+  auto quantizer = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  if (!quantizer) {
+    LOG_ERROR("Failed to create PqInt8Quantizer");
+    if (!error_.exchange(true)) {
+      err_code_ = IndexError_NoExist;
+    }
+    return;
+  }
+  int ret = quantizer->init(pq_meta, pq_params);
+  if (ret != 0) {
+    LOG_ERROR("Failed to init residual PQ for cluster %zu, ret=%d", cluster_id,
+              ret);
+    if (!error_.exchange(true)) {
+      err_code_ = IndexError_Runtime;
+    }
+    return;
+  }
+
+  const auto &ids = labels_[cluster_id];
+  if (!ids.empty()) {
+    const float *centroid = pq_centroids_.data() + cluster_id * pq_dim_;
+    std::vector<float> buf(ids.size() * static_cast<size_t>(pq_dim_));
+    for (size_t j = 0; j < ids.size(); ++j) {
+      const float *vec =
+          reinterpret_cast<const float *>(holder_->element(ids[j]));
+      this->compute_pq_residual(vec, centroid, buf.data() + j * pq_dim_);
+    }
+    auto holder =
+        std::make_shared<BufferedFloatHolder>(std::move(buf), pq_dim_);
+    ret = quantizer->train(holder);
+    if (ret != 0) {
+      LOG_ERROR("Failed to train residual PQ for cluster %zu, ret=%d",
+                cluster_id, ret);
+      if (!error_.exchange(true)) {
+        err_code_ = IndexError_Runtime;
+      }
+      return;
+    }
+  }
+  pq_quantizers_[cluster_id] = quantizer;
+}
+
+int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
+  size_t nlist = centroid_index_->centroids_count();
+  pq_quantizers_.assign(nlist, nullptr);
+
+  //! The residual PQ codebook is always trained/searched in L2 (residual)
+  //! space, fp32, original dimension. Cosine handling (unit-normalization) is
+  //! applied by the builder/entity before the residual is formed.
+  IndexMeta pq_meta = meta_;
+  pq_meta.set_metric(kL2MetricName, 0, ailego::Params());
+  pq_meta.set_reformer(std::string(), 0, ailego::Params());
+  pq_meta.set_converter(std::string(), 0, ailego::Params());
+  pq_meta.set_meta(IndexMeta::DataType::DT_FP32, pq_dim_);
+
+  ailego::Params pq_params;
+  pq_params.set("num_chunk", static_cast<int>(pq_num_chunk_));
+  pq_params.set("use_zero_mean", pq_use_zero_mean_);
+  pq_params.set("thread_count", 1);
+  // IVF uses ADC only; skip the per-cluster SDC dist_table to save
+  // build time and memory (O(num_chunk * 256^2) floats per cluster).
+  pq_params.set("compute_sdc", false);
+
+  auto task_group = threads->make_group();
+  if (!task_group) {
+    LOG_ERROR("Failed to create task group");
+    return IndexError_Runtime;
+  }
+  for (size_t i = 0; i < nlist; ++i) {
+    if (error_) {
+      break;
+    }
+    task_group->submit(ailego::Closure::New([this, i, pq_meta, pq_params]() {
+      this->train_pq_cluster(i, pq_meta, pq_params);
+    }));
+  }
+  task_group->wait_finish();
+  if (error_) {
+    return err_code_;
+  }
+
+  //! Codes are uint8[num_chunk]; store them row-major.
+  quantized_meta_ = meta_;
+  quantized_meta_.set_reformer(std::string(), 0, ailego::Params());
+  quantized_meta_.set_converter(std::string(), 0, ailego::Params());
+  quantized_meta_.set_meta(IndexMeta::DataType::DT_INT8, pq_num_chunk_);
+  quantized_meta_.set_major_order(IndexMeta::MO_ROW);
+
+  LOG_INFO("Trained %zu per-cluster residual PQ quantizers", nlist);
   return 0;
 }
 

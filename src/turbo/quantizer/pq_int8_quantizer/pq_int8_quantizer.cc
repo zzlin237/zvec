@@ -105,6 +105,7 @@ int PqInt8Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
   params.get("markov_chain_length", &markov_chain_length_);
   params.get("epsilon", &epsilon_);
   params.get("use_zero_mean", &use_zero_mean_);
+  params.get("compute_sdc", &compute_sdc_);
 
   // Zero-mean centering is valid only where the search metric is
   // translation-invariant.  SquaredEuclidean qualifies directly.  Cosine now
@@ -318,9 +319,12 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
   // Pre-build centroid pointer cache (needed by compute_dist_table).
   build_centroid_ptrs_cache();
 
-  // Pre-compute SDC dist_table.
-  LOG_INFO("Computing SDC dist_table ...");
-  compute_dist_table();
+  // Pre-compute SDC dist_table (only when symmetric distance is needed).
+  // ADC-only consumers (e.g. IVF) disable this via "compute_sdc"=false.
+  if (compute_sdc_) {
+    LOG_INFO("Computing SDC dist_table ...");
+    compute_dist_table();
+  }
 
   LOG_INFO("PQ training complete.");
   return 0;

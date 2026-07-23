@@ -59,6 +59,14 @@ static const std::string PARAM_IVF_BUILDER_OPTIMIZER_QUANTIZER_PARAMS(
 static const std::string PARAM_IVF_BUILDER_BLOCK_VECTOR_COUNT(
     "proxima.ivf.builder.block_vector_count");
 
+// Per-cluster residual Product Quantization (PQ) params
+static const std::string PARAM_IVF_BUILDER_PQ_ENABLE(
+    "proxima.ivf.builder.pq_enable");
+static const std::string PARAM_IVF_BUILDER_PQ_NUM_CHUNK(
+    "proxima.ivf.builder.pq_num_chunk");
+static const std::string PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN(
+    "proxima.ivf.builder.pq_use_zero_mean");
+
 // searcher params
 static const std::string PARAM_IVF_SEARCHER_SCAN_RATIO(
     "proxima.ivf.searcher.scan_ratio");

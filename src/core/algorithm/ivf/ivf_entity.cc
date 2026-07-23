@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "ivf_entity.h"
+#include <ailego/math/normalizer.h>
 #include <iostream>
+#include <vector>
 #include "ivf_utility.h"
 namespace zvec {
 namespace core {
@@ -450,6 +452,187 @@ void IVFEntity::IVFReformerWrapper::transform(size_t qidx, const float *in,
   }
 }
 
+int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
+  pq_num_chunk_ = header_.pq_num_chunk;
+  pq_normalize_ = (meta_.metric_name() == "Cosine");
+  const size_t nlist = header_.inverted_list_count;
+
+  //! fp32 centroids segment (nlist * pq_dim_)
+  auto cent_seg = container->get(IVF_PQ_CENTROIDS_SEG_ID);
+  if (!cent_seg) {
+    LOG_ERROR("Failed to get segment %s", IVF_PQ_CENTROIDS_SEG_ID.c_str());
+    return IndexError_InvalidFormat;
+  }
+  const void *cdata = nullptr;
+  const size_t cent_bytes = cent_seg->data_size();
+  if (cent_seg->read(0, &cdata, cent_bytes) != cent_bytes) {
+    return IndexError_ReadData;
+  }
+  const size_t cent_floats = cent_bytes / sizeof(float);
+  const float *cf = reinterpret_cast<const float *>(cdata);
+  pq_centroids_.assign(cf, cf + cent_floats);
+  pq_dim_ = nlist ? static_cast<uint32_t>(cent_floats / nlist) : 0;
+  if (pq_dim_ == 0 || pq_num_chunk_ == 0 || pq_dim_ % pq_num_chunk_ != 0) {
+    LOG_ERROR("Invalid PQ dims: dim=%u num_chunk=%u", pq_dim_, pq_num_chunk_);
+    return IndexError_InvalidFormat;
+  }
+
+  //! per-cluster codebook offset table
+  auto meta_seg = container->get(IVF_PQ_META_SEG_ID);
+  if (!meta_seg) {
+    LOG_ERROR("Failed to get segment %s", IVF_PQ_META_SEG_ID.c_str());
+    return IndexError_InvalidFormat;
+  }
+  const void *mdata = nullptr;
+  const size_t mbytes = nlist * sizeof(InvertedPqCodebookMeta);
+  if (meta_seg->read(0, &mdata, mbytes) != mbytes) {
+    return IndexError_ReadData;
+  }
+  const InvertedPqCodebookMeta *metas =
+      reinterpret_cast<const InvertedPqCodebookMeta *>(mdata);
+
+  //! concatenated serialized codebooks
+  auto cb_seg = container->get(IVF_PQ_CODEBOOKS_SEG_ID);
+  if (!cb_seg) {
+    LOG_ERROR("Failed to get segment %s", IVF_PQ_CODEBOOKS_SEG_ID.c_str());
+    return IndexError_InvalidFormat;
+  }
+  const void *cbdata = nullptr;
+  const size_t cb_bytes = cb_seg->data_size();
+  if (cb_seg->read(0, &cbdata, cb_bytes) != cb_bytes) {
+    return IndexError_ReadData;
+  }
+  const char *cb = reinterpret_cast<const char *>(cbdata);
+
+  //! Init each quantizer (L2 residual space, fp32, pq_dim_) BEFORE deserialize
+  //! so the metric context matches the build side.
+  IndexMeta pq_meta = meta_;
+  pq_meta.set_metric(kL2MetricName, 0, ailego::Params());
+  pq_meta.set_reformer(std::string(), 0, ailego::Params());
+  pq_meta.set_converter(std::string(), 0, ailego::Params());
+  pq_meta.set_meta(IndexMeta::DataType::DT_FP32, pq_dim_);
+  ailego::Params pq_params;
+  pq_params.set("num_chunk", static_cast<int>(pq_num_chunk_));
+  pq_params.set("use_zero_mean", header_.pq_use_zero_mean != 0);
+
+  pq_quantizers_.assign(nlist, nullptr);
+  for (size_t i = 0; i < nlist; ++i) {
+    auto q = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+    if (!q) {
+      LOG_ERROR("Failed to create PqInt8Quantizer");
+      return IndexError_NoExist;
+    }
+    int ret = q->init(pq_meta, pq_params);
+    if (ret != 0) {
+      LOG_ERROR("Failed to init PQ for cluster %zu, ret=%d", i, ret);
+      return ret;
+    }
+    if (metas[i].size > 0) {
+      ret = q->deserialize(cb + metas[i].offset, metas[i].size);
+      if (ret != 0) {
+        LOG_ERROR("Failed to deserialize PQ for cluster %zu, ret=%d", i, ret);
+        return ret;
+      }
+    }
+    pq_quantizers_[i] = q;
+  }
+
+  pq_enabled_ = true;
+  LOG_DEBUG("Loaded per-cluster residual PQ: nlist=%zu dim=%u num_chunk=%u "
+            "normalize=%d",
+            nlist, pq_dim_, pq_num_chunk_, pq_normalize_);
+  return 0;
+}
+
+int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
+                         const IndexFilter *filter, uint32_t *scan_count,
+                         IndexDocumentHeap *heap,
+                         IndexContext::Stats *context_stats) const {
+  auto list_meta = this->inverted_list_meta(inverted_list_id);
+  ivf_assert(list_meta, IndexError_ReadData);
+  const auto &pq = pq_quantizers_[inverted_list_id];
+  ivf_assert(pq, IndexError_Runtime);
+
+  //! Residual query: r = (unit(q) if Cosine else q) - centroid_cid
+  const float *q = reinterpret_cast<const float *>(query);
+  const float *centroid = pq_centroids_.data() + inverted_list_id * pq_dim_;
+  std::vector<float> resid(pq_dim_);
+  if (pq_normalize_) {
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      resid[d] = q[d];
+    }
+    float norm = 0.0f;
+    ailego::Normalizer<float>::L2(resid.data(), pq_dim_, &norm);
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      resid[d] -= centroid[d];
+    }
+  } else {
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      resid[d] = q[d] - centroid[d];
+    }
+  }
+
+  //! Build the ADC lookup table for this residual query.
+  std::vector<float> lut(pq->quantized_query_vector_length() / sizeof(float));
+  pq->quantize_query(resid.data(), lut.data());
+
+  const void *data = nullptr;
+  const size_t block_vecs = header_.block_vector_count;
+  const size_t block_size = header_.block_size;
+  const size_t code_size = pq_num_chunk_;
+  const size_t batch_size = kBatchBlocks;
+  std::vector<float> distances(block_vecs);
+  std::vector<const void *> dp(block_vecs);
+
+  for (size_t i = 0; i < list_meta->block_count; i += batch_size) {
+    const size_t off = list_meta->offset + i * block_size;
+    const size_t blocks = std::min(batch_size, list_meta->block_count - i);
+    const size_t size =
+        std::min(blocks * block_size,
+                 static_cast<size_t>(header_.inverted_body_size - off));
+    if (inverted_->read(off, &data, size) != size) {
+      LOG_ERROR("Failed to read block, off=%zu, size=%zu", off, size);
+      return IndexError_ReadData;
+    }
+
+    const size_t items = std::min(blocks * block_vecs,
+                                  list_meta->vector_count - (i * block_vecs));
+    auto keys = get_keys(list_meta->id_offset + i * block_vecs, items);
+    if (!keys) {
+      return IndexError_ReadData;
+    }
+
+    for (size_t b = 0; b < blocks; ++b) {
+      const size_t vecs_count =
+          std::min(block_vecs, list_meta->vector_count - (i + b) * block_vecs);
+      auto block_keys = keys + b * block_vecs;
+      const char *block_data =
+          static_cast<const char *>(data) + b * block_size;
+      for (size_t k = 0; k < vecs_count; ++k) {
+        dp[k] = block_data + k * code_size;
+      }
+      pq->calc_distance_dp_query_batch(dp.data(),
+                                       static_cast<int>(vecs_count), lut.data(),
+                                       distances.data());
+      *(context_stats->mutable_dist_calced_count()) += vecs_count;
+      const uint32_t id_off = list_meta->id_offset + (i + b) * block_vecs;
+      for (size_t k = 0; k < vecs_count; ++k) {
+        if (block_keys[k] == kInvalidKey) {
+          continue;
+        }
+        if (filter && (*filter)(block_keys[k])) {
+          ++(*context_stats->mutable_filtered_count());
+          continue;
+        }
+        heap->emplace(block_keys[k], distances[k], id_off + k);
+      }
+    }
+  }
+
+  *scan_count = list_meta->vector_count;
+  return 0;
+}
+
 int IVFEntity::load_header(const IndexStorage::Pointer &container) {
   //! Load the Header Segment
   auto header = container->get(IVF_INVERTED_HEADER_SEG_ID);
@@ -485,6 +668,13 @@ int IVFEntity::load_header(const IndexStorage::Pointer &container) {
 
   int ret = reformer_.init(meta_);
   ivf_check_error_code(ret);
+
+  //! In per-cluster residual PQ mode the inverted vectors are uint8 PQ codes,
+  //! not fp32/int8 features, so the fp32/int8 distance calculator is unused.
+  //! Skip creating it to avoid initializing a metric over the code meta.
+  if (header_.pq_enabled) {
+    return 0;
+  }
 
   //! Create the distance calculator
   auto metric = IndexFactory::CreateMetric(meta_.metric_name());
@@ -591,6 +781,12 @@ int IVFEntity::load(const IndexStorage::Pointer &container) {
     }
   }
 
+  //! Load per-cluster residual PQ state if this is a PQ index.
+  if (header_.pq_enabled) {
+    ret = this->load_pq(container);
+    ivf_check_error_code(ret);
+  }
+
   LOG_DEBUG(
       "Load inverted index done, docs=%u invertedListCnt=%u "
       "elementSize=%u metric=%s reformer=%s",
@@ -606,6 +802,10 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
                       IndexContext::Stats *context_stats) const {
   ailego_assert_with(inverted_list_id < header_.inverted_list_count,
                      "invalid id");
+  if (pq_enabled_) {
+    return this->search_pq(inverted_list_id, query, &filter, scan_count, heap,
+                           context_stats);
+  }
   auto list_meta = this->inverted_list_meta(inverted_list_id);
   ivf_assert(list_meta, IndexError_ReadData);
 
@@ -680,6 +880,10 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
                       IndexContext::Stats *context_stats) const {
   ailego_assert_with(inverted_list_id < header_.inverted_list_count,
                      "invalid id");
+  if (pq_enabled_) {
+    return this->search_pq(inverted_list_id, query, nullptr, scan_count, heap,
+                           context_stats);
+  }
   auto list_meta = inverted_list_meta(inverted_list_id);
   ivf_assert(list_meta, IndexError_ReadData);
 
@@ -966,6 +1170,15 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
   entity->features_ = features;
   entity->norm_value_ = this->norm_value_;
   entity->norm_value_sqrt_ = this->norm_value_sqrt_;
+
+  //! Per-cluster residual PQ state: quantizers are immutable after load, so
+  //! the shared_ptrs can be shared across cloned entities/contexts.
+  entity->pq_enabled_ = this->pq_enabled_;
+  entity->pq_normalize_ = this->pq_normalize_;
+  entity->pq_dim_ = this->pq_dim_;
+  entity->pq_num_chunk_ = this->pq_num_chunk_;
+  entity->pq_quantizers_ = this->pq_quantizers_;
+  entity->pq_centroids_ = this->pq_centroids_;
 
   return entity;
 }

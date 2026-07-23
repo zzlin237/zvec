@@ -146,6 +146,12 @@ class PqInt8Quantizer : public Quantizer {
   //! from all vectors (train, encode, query) and added back on dequantize.
   bool use_zero_mean_{false};
 
+  //! Whether to precompute the SDC centroid-to-centroid distance table during
+  //! train().  SDC is only used for symmetric distance (e.g. HNSW graph
+  //! construction); ADC-only consumers such as IVF can set "compute_sdc"=false
+  //! to skip this (avoids an O(num_chunk * 256^2) table per quantizer).
+  bool compute_sdc_{true};
+
   IndexMeta meta_{};
   uint32_t original_dim_{0};
   uint32_t num_chunk_{0};

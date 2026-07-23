@@ -15,6 +15,7 @@
 
 #include <zvec/core/framework/index_builder.h>
 #include <zvec/core/framework/index_meta.h>
+#include <turbo/quantizer/quantizer.h>
 #include "ivf_centroid_index.h"
 
 namespace zvec {
@@ -227,6 +228,18 @@ class IVFBuilder : public IndexBuilder {
   //! Prepare the quantizer for inverted index
   int prepare_quantizer(IndexThreads *threads);
 
+  //! Prepare per-cluster residual PQ quantizers (one independent PQ per
+  //! cluster, trained on residuals v - centroid_i). L2/Cosine only.
+  int prepare_pq_quantizers(IndexThreads *threads);
+
+  //! Train the residual PQ quantizer for a single cluster.
+  void train_pq_cluster(size_t cluster_id, const IndexMeta &pq_meta,
+                        const ailego::Params &pq_params);
+
+  //! Compute residual = (normalize? unit(v) : v) - centroid into out (dim).
+  void compute_pq_residual(const float *vec, const float *centroid,
+                           float *out) const;
+
   //! Quantize the centrods list
   int quantize_centroids();
 
@@ -298,6 +311,15 @@ class IVFBuilder : public IndexBuilder {
   IndexConverter::Pointer converter_{};
   IndexMeta quantized_meta_{};
   std::vector<IndexConverter::Pointer> quantizers_{};
+
+  //! Per-cluster residual PQ state (pure PQ-ADC mode)
+  std::vector<turbo::Quantizer::Pointer> pq_quantizers_{};
+  std::vector<float> pq_centroids_{};  // nlist * pq_dim_ (normalized if Cosine)
+  uint32_t pq_dim_{0};
+  uint32_t pq_num_chunk_{0};
+  bool pq_enable_{false};
+  bool pq_use_zero_mean_{false};
+  bool pq_normalize_{false};  // true for Cosine metric
 
   std::atomic_bool error_{false};
   int err_code_{0};

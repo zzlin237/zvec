@@ -14,6 +14,7 @@
 #pragma once
 
 #include <core/quantizer/quantizer_params.h>
+#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_framework.h>
 #include "metric/metric_params.h"
 #include "ivf_distance_calculator.h"
@@ -335,6 +336,16 @@ class IVFEntity {
   //! Load the header segment
   int load_header(const IndexStorage::Pointer &container);
 
+  //! Load per-cluster residual PQ codebooks/centroids (pure PQ-ADC mode)
+  int load_pq(const IndexStorage::Pointer &container);
+
+  //! Search a single inverted list using per-cluster residual PQ ADC.
+  //! filter may be null (no filter).
+  int search_pq(size_t inverted_list_id, const void *query,
+                const IndexFilter *filter, uint32_t *scan_count,
+                IndexDocumentHeap *heap,
+                IndexContext::Stats *context_stats) const;
+
   //! Convert the int8 quantizer scale to normalize value
   float convert_to_normalize_value(float scale) const {
     auto v = scale == 0.0 ? 1.0 : (1.0 / scale);
@@ -361,6 +372,14 @@ class IVFEntity {
   float norm_value_{0.0f};  // normalize the inverted vector to orignal score
   bool norm_value_sqrt_{false};  // does the norm value need to sqrt
   InvertedIndexHeader header_;
+
+  //! Per-cluster residual PQ state (pure PQ-ADC mode).
+  std::vector<turbo::Quantizer::Pointer> pq_quantizers_{};
+  std::vector<float> pq_centroids_{};  // nlist * pq_dim_ (normalized if Cosine)
+  uint32_t pq_dim_{0};
+  uint32_t pq_num_chunk_{0};
+  bool pq_enabled_{false};
+  bool pq_normalize_{false};  // true for Cosine metric
 };
 
 }  // namespace core

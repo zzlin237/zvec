@@ -33,6 +33,15 @@ int IVFIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
   proxima_index_params_.set(core::PARAM_IVF_BUILDER_CENTROID_COUNT,
                             param_.nlist);
 
+  // Propagate per-cluster residual PQ configuration to the IVF builder.
+  const auto &quantizer_param = param_.quantizer_param;
+  if (quantizer_param.type == QuantizerType::kPQ) {
+    int nsq = quantizer_param.num_chunk > 0 ? quantizer_param.num_chunk : 8;
+    proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_ENABLE, true);
+    proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_NUM_CHUNK, nsq);
+    proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, true);
+  }
+
   // TODO: add_vector_with_id & fetch_by_id don't rely on this param
   builder_ = core::IndexFactory::CreateBuilder("IVFBuilder");
   streamer_ = core::IndexFactory::CreateStreamer("IVFStreamer");

@@ -35,7 +35,13 @@ struct InvertedIndexHeader {
   uint32_t block_size{0};
   uint32_t block_count{0};
   uint32_t index_meta_size{0};
-  char reserved_[28];
+  // Per-cluster residual PQ metadata (carved out of reserved_). All-zero
+  // (pq_enabled == 0) preserves backward compatibility with legacy indexes.
+  uint8_t pq_enabled{0};
+  uint8_t pq_use_zero_mean{0};
+  uint16_t pq_pad_{0};
+  uint32_t pq_num_chunk{0};
+  char reserved_[20];
 #ifdef _MSC_VER
   char index_meta[];
 #else
@@ -69,6 +75,13 @@ struct InvertedVecLocation {
 struct InvertedIntegerQuantizerParams {
   float scale{1.0};
   float bias{0.0};
+};
+
+/*! Per-cluster PQ codebook location within the codebooks segment
+ */
+struct InvertedPqCodebookMeta {
+  uint64_t offset{0};  // byte offset into IVF_PQ_CODEBOOKS_SEG_ID
+  uint64_t size{0};    // serialized codebook byte size
 };
 
 /*! Location of Vectors Block in Storage Segment
@@ -166,6 +179,11 @@ const std::string IVF_MAPPING_SEG_ID("ivf.mapping");
 const std::string IVF_FEATURES_SEG_ID("ivf.features");
 const std::string IVF_INT8_QUANTIZED_PARAMS_SEG_ID("ivf.int8_quantized_params");
 const std::string IVF_INT4_QUANTIZED_PARAMS_SEG_ID("ivf.int4_quantized_params");
+
+// Per-cluster residual PQ segments
+const std::string IVF_PQ_CENTROIDS_SEG_ID("ivf.pq_centroids");
+const std::string IVF_PQ_CODEBOOKS_SEG_ID("ivf.pq_codebooks");
+const std::string IVF_PQ_META_SEG_ID("ivf.pq_meta");
 
 const std::string IVF_INVERTED_LIST_HEAD_SEG_ID("ivf.inverted_list_head");
 const std::string IVF_STORAGE_SEGMENT_ID("ivf.S");
