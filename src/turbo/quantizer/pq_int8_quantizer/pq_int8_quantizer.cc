@@ -349,7 +349,7 @@ void PqInt8Quantizer::compute_dist_table() {
     // expects const void**.  The kernel never modifies the pointer array.
     const auto &centroid_ptrs = centroid_ptrs_cache_[m];
     for (uint32_t i = 0; i < k; ++i) {
-      fp32_l2_batch_fn_(const_cast<const void **>(centroid_ptrs.data()),
+      fp32_batch_fn_(const_cast<const void **>(centroid_ptrs.data()),
                      reinterpret_cast<const void *>(centroids_m + i * d), k, d,
                      table_m + i * k);
     }
