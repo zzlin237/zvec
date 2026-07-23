@@ -478,21 +478,7 @@ int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
     return IndexError_InvalidFormat;
   }
 
-  //! per-cluster codebook offset table
-  auto meta_seg = container->get(IVF_PQ_META_SEG_ID);
-  if (!meta_seg) {
-    LOG_ERROR("Failed to get segment %s", IVF_PQ_META_SEG_ID.c_str());
-    return IndexError_InvalidFormat;
-  }
-  const void *mdata = nullptr;
-  const size_t mbytes = nlist * sizeof(InvertedPqCodebookMeta);
-  if (meta_seg->read(0, &mdata, mbytes) != mbytes) {
-    return IndexError_ReadData;
-  }
-  const InvertedPqCodebookMeta *metas =
-      reinterpret_cast<const InvertedPqCodebookMeta *>(mdata);
-
-  //! concatenated serialized codebooks
+  //! Single shared codebook blob (faiss-style).
   auto cb_seg = container->get(IVF_PQ_CODEBOOKS_SEG_ID);
   if (!cb_seg) {
     LOG_ERROR("Failed to get segment %s", IVF_PQ_CODEBOOKS_SEG_ID.c_str());
@@ -505,9 +491,9 @@ int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
   }
   const char *cb = reinterpret_cast<const char *>(cbdata);
 
-  //! Init each quantizer BEFORE deserialize so the metric context matches the
-  //! build side. Encoding is always L2 (fp32_l2_batch_fn_); the init metric
-  //! only selects the search LUT: InnerProduct for IP, else SquaredEuclidean.
+  //! Init BEFORE deserialize so the metric context matches the build side.
+  //! Encoding is always L2 (fp32_l2_batch_fn_); the init metric only selects
+  //! the search LUT: InnerProduct for IP, else SquaredEuclidean.
   IndexMeta pq_meta = meta_;
   pq_meta.set_metric(pq_ip_ ? kIPMetricName : kL2MetricName, 0,
                      ailego::Params());
@@ -518,32 +504,28 @@ int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
   pq_params.set("num_chunk", static_cast<int>(pq_num_chunk_));
   pq_params.set("use_zero_mean", header_.pq_use_zero_mean != 0);
 
-  pq_quantizers_.assign(nlist, nullptr);
-  for (size_t i = 0; i < nlist; ++i) {
-    auto q = IndexFactory::CreateQuantizer("PqInt8Quantizer");
-    if (!q) {
-      LOG_ERROR("Failed to create PqInt8Quantizer");
-      return IndexError_NoExist;
-    }
-    int ret = q->init(pq_meta, pq_params);
+  pq_quantizer_ = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  if (!pq_quantizer_) {
+    LOG_ERROR("Failed to create PqInt8Quantizer");
+    return IndexError_NoExist;
+  }
+  int ret = pq_quantizer_->init(pq_meta, pq_params);
+  if (ret != 0) {
+    LOG_ERROR("Failed to init shared PQ, ret=%d", ret);
+    return ret;
+  }
+  if (cb_bytes > 0) {
+    ret = pq_quantizer_->deserialize(cb, cb_bytes);
     if (ret != 0) {
-      LOG_ERROR("Failed to init PQ for cluster %zu, ret=%d", i, ret);
+      LOG_ERROR("Failed to deserialize shared PQ codebook, ret=%d", ret);
       return ret;
     }
-    if (metas[i].size > 0) {
-      ret = q->deserialize(cb + metas[i].offset, metas[i].size);
-      if (ret != 0) {
-        LOG_ERROR("Failed to deserialize PQ for cluster %zu, ret=%d", i, ret);
-        return ret;
-      }
-    }
-    pq_quantizers_[i] = q;
   }
 
   pq_enabled_ = true;
-  LOG_DEBUG("Loaded per-cluster residual PQ: nlist=%zu dim=%u num_chunk=%u "
-            "normalize=%d",
-            nlist, pq_dim_, pq_num_chunk_, pq_normalize_);
+  LOG_DEBUG("Loaded shared residual PQ: nlist=%zu dim=%u num_chunk=%u "
+            "normalize=%d ip=%d",
+            nlist, pq_dim_, pq_num_chunk_, pq_normalize_, pq_ip_);
   return 0;
 }
 
@@ -553,7 +535,7 @@ int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
                          IndexContext::Stats *context_stats) const {
   auto list_meta = this->inverted_list_meta(inverted_list_id);
   ivf_assert(list_meta, IndexError_ReadData);
-  const auto &pq = pq_quantizers_[inverted_list_id];
+  const auto &pq = pq_quantizer_;  // shared codebook for all clusters
   ivf_assert(pq, IndexError_Runtime);
 
   //! Build the ADC LUT and the per-list constant `dis0`.
@@ -1195,7 +1177,7 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
   entity->pq_ip_ = this->pq_ip_;
   entity->pq_dim_ = this->pq_dim_;
   entity->pq_num_chunk_ = this->pq_num_chunk_;
-  entity->pq_quantizers_ = this->pq_quantizers_;
+  entity->pq_quantizer_ = this->pq_quantizer_;
   entity->pq_centroids_ = this->pq_centroids_;
 
   return entity;

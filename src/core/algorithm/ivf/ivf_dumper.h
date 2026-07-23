@@ -214,8 +214,8 @@ class IVFDumper {
     header_.pq_use_zero_mean = use_zero_mean;
   }
 
-  //! Dump per-cluster residual PQ codebooks, offset table and fp32 centroids.
-  int dump_pq(const std::vector<turbo::Quantizer::Pointer> &quantizers,
+  //! Dump the shared residual PQ codebook and fp32 centroids.
+  int dump_pq(const turbo::Quantizer::Pointer &quantizer,
               const std::vector<float> &centroids, uint32_t dim);
 
   //! Dump the original vector, which doesnot been quantized

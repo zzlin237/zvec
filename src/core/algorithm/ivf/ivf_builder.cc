@@ -15,6 +15,7 @@
 #include <ailego/math/normalizer.h>
 #include <ailego/pattern/defer.h>
 #include <functional>
+#include <random>
 #include <zvec/ailego/utility/string_helper.h>
 #include "algorithm/cluster/cluster_params.h"
 #include "ivf_dumper.h"
@@ -252,7 +253,7 @@ int IVFBuilder::cleanup(void) {
   quantized_meta_ = meta_;
   quantizers_.clear();
 
-  pq_quantizers_.clear();
+  pq_quantizer_.reset();
   pq_centroids_.clear();
   pq_dim_ = 0;
   pq_num_chunk_ = 0;
@@ -846,7 +847,7 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
         const float *v =
             reinterpret_cast<const float *>(holder_->element(id));
         this->compute_pq_residual(v, centroid, resid.data());
-        pq_quantizers_[i]->quantize_data(resid.data(), code.data());
+        pq_quantizer_->quantize_data(resid.data(), code.data());
         ret = ivf_dumper->dump_inverted_vector(i, holder_->key(id),
                                                code.data());
         ivf_check_error_code(ret);
@@ -900,8 +901,8 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   ivf_check_with_msg(ret, "Failed to dump CentroidIndex");
 
   if (pq_enable_) {
-    ret = ivf_dumper->dump_pq(pq_quantizers_, pq_centroids_, pq_dim_);
-    ivf_check_with_msg(ret, "Failed to dump per-cluster PQ codebooks");
+    ret = ivf_dumper->dump_pq(pq_quantizer_, pq_centroids_, pq_dim_);
+    ivf_check_with_msg(ret, "Failed to dump shared PQ codebook");
   }
 
   if (store_original_features_) {
@@ -1030,62 +1031,47 @@ void IVFBuilder::compute_pq_residual(const float *vec, const float *centroid,
   }
 }
 
-void IVFBuilder::train_pq_cluster(size_t cluster_id, const IndexMeta &pq_meta,
-                                  const ailego::Params &pq_params) {
-  if (error_) {
-    return;
-  }
-  auto quantizer = IndexFactory::CreateQuantizer("PqInt8Quantizer");
-  if (!quantizer) {
-    LOG_ERROR("Failed to create PqInt8Quantizer");
-    if (!error_.exchange(true)) {
-      err_code_ = IndexError_NoExist;
-    }
-    return;
-  }
-  int ret = quantizer->init(pq_meta, pq_params);
-  if (ret != 0) {
-    LOG_ERROR("Failed to init residual PQ for cluster %zu, ret=%d", cluster_id,
-              ret);
-    if (!error_.exchange(true)) {
-      err_code_ = IndexError_Runtime;
-    }
-    return;
-  }
-
-  const auto &ids = labels_[cluster_id];
-  if (!ids.empty()) {
-    const float *centroid = pq_centroids_.data() + cluster_id * pq_dim_;
-    std::vector<float> buf(ids.size() * static_cast<size_t>(pq_dim_));
-    for (size_t j = 0; j < ids.size(); ++j) {
-      const float *vec =
-          reinterpret_cast<const float *>(holder_->element(ids[j]));
-      this->compute_pq_residual(vec, centroid, buf.data() + j * pq_dim_);
-    }
-    auto holder =
-        std::make_shared<BufferedFloatHolder>(std::move(buf), pq_dim_);
-    ret = quantizer->train(holder);
-    if (ret != 0) {
-      LOG_ERROR("Failed to train residual PQ for cluster %zu, ret=%d",
-                cluster_id, ret);
-      if (!error_.exchange(true)) {
-        err_code_ = IndexError_Runtime;
-      }
-      return;
-    }
-  }
-  pq_quantizers_[cluster_id] = quantizer;
-}
-
 int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
-  size_t nlist = centroid_index_->centroids_count();
-  pq_quantizers_.assign(nlist, nullptr);
+  (void)threads;
+  const size_t nlist = centroid_index_->centroids_count();
 
-  //! The residual PQ codebook is always trained/encoded in L2 (via
-  //! fp32_l2_batch_fn_), fp32, original dimension. The init metric only
-  //! selects the *search* LUT: InnerProduct for IP (IP LUT), else L2. Cosine
-  //! handling (unit-normalization) is applied by the builder/entity before the
-  //! residual is formed.
+  //! Shared-codebook training set (faiss-style): reservoir-sample up to
+  //! kPqTrainSample residuals (v - c_i) pooled across all clusters. Bounds
+  //! training memory to kPqTrainSample * pq_dim_ floats regardless of dataset
+  //! size (PqInt8Quantizer::train also subsamples to the same limit).
+  constexpr size_t kPqTrainSample = 65536;
+  const size_t cap = std::min<size_t>(holder_->count(), kPqTrainSample);
+  std::vector<float> sample(cap * static_cast<size_t>(pq_dim_));
+  std::mt19937 rng(42);
+  size_t seen = 0;
+  for (size_t i = 0; i < nlist; ++i) {
+    const float *centroid = pq_centroids_.data() + i * pq_dim_;
+    for (uint32_t id : labels_[i]) {
+      size_t slot = cap;  // sentinel: not selected
+      if (seen < cap) {
+        slot = seen;
+      } else {
+        std::uniform_int_distribution<size_t> dist(0, seen);
+        size_t j = dist(rng);
+        if (j < cap) {
+          slot = j;
+        }
+      }
+      if (slot < cap) {
+        const float *vec =
+            reinterpret_cast<const float *>(holder_->element(id));
+        this->compute_pq_residual(vec, centroid, sample.data() + slot * pq_dim_);
+      }
+      ++seen;
+    }
+  }
+  if (seen < cap) {  // fewer vectors than the cap
+    sample.resize(seen * static_cast<size_t>(pq_dim_));
+  }
+  const size_t train_rows = sample.size() / static_cast<size_t>(pq_dim_);
+
+  //! One shared PQ codebook. Encoding is always L2 (fp32_l2_batch_fn_); the
+  //! init metric only selects the search LUT: InnerProduct for IP, else L2.
   IndexMeta pq_meta = meta_;
   pq_meta.set_metric(pq_ip_ ? kIPMetricName : kL2MetricName, 0,
                      ailego::Params());
@@ -1096,28 +1082,22 @@ int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
   ailego::Params pq_params;
   pq_params.set("num_chunk", static_cast<int>(pq_num_chunk_));
   pq_params.set("use_zero_mean", pq_use_zero_mean_);
-  pq_params.set("thread_count", 1);
-  // IVF uses ADC only; skip the per-cluster SDC dist_table to save
-  // build time and memory (O(num_chunk * 256^2) floats per cluster).
+  pq_params.set("thread_count", static_cast<int>(thread_count_));
+  // IVF uses ADC only; skip the SDC dist_table.
   pq_params.set("compute_sdc", false);
 
-  auto task_group = threads->make_group();
-  if (!task_group) {
-    LOG_ERROR("Failed to create task group");
-    return IndexError_Runtime;
+  pq_quantizer_ = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  if (!pq_quantizer_) {
+    LOG_ERROR("Failed to create PqInt8Quantizer");
+    return IndexError_NoExist;
   }
-  for (size_t i = 0; i < nlist; ++i) {
-    if (error_) {
-      break;
-    }
-    task_group->submit(ailego::Closure::New([this, i, pq_meta, pq_params]() {
-      this->train_pq_cluster(i, pq_meta, pq_params);
-    }));
-  }
-  task_group->wait_finish();
-  if (error_) {
-    return err_code_;
-  }
+  int ret = pq_quantizer_->init(pq_meta, pq_params);
+  ivf_check_with_msg(ret, "Failed to init shared residual PQ, ret=%d", ret);
+
+  auto holder =
+      std::make_shared<BufferedFloatHolder>(std::move(sample), pq_dim_);
+  ret = pq_quantizer_->train(holder);
+  ivf_check_with_msg(ret, "Failed to train shared residual PQ, ret=%d", ret);
 
   //! Codes are uint8[num_chunk]; store them row-major.
   quantized_meta_ = meta_;
@@ -1126,7 +1106,9 @@ int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
   quantized_meta_.set_meta(IndexMeta::DataType::DT_INT8, pq_num_chunk_);
   quantized_meta_.set_major_order(IndexMeta::MO_ROW);
 
-  LOG_INFO("Trained %zu per-cluster residual PQ quantizers", nlist);
+  LOG_INFO("Trained shared residual PQ codebook: nlist=%zu num_chunk=%u "
+           "train_rows=%zu ip=%d",
+           nlist, pq_num_chunk_, train_rows, pq_ip_);
   return 0;
 }
 

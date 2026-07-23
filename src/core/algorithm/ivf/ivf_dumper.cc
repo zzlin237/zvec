@@ -237,7 +237,7 @@ int IVFDumper::dump_quantizer_params(
       params.data(), params.size() * sizeof(InvertedIntegerQuantizerParams));
 }
 
-int IVFDumper::dump_pq(const std::vector<turbo::Quantizer::Pointer> &quantizers,
+int IVFDumper::dump_pq(const turbo::Quantizer::Pointer &quantizer,
                        const std::vector<float> &centroids, uint32_t dim) {
   (void)dim;
   //! 1) fp32 centroids segment (nlist * dim)
@@ -245,32 +245,20 @@ int IVFDumper::dump_pq(const std::vector<turbo::Quantizer::Pointer> &quantizers,
                                centroids.size() * sizeof(float));
   ivf_check_error_code(ret);
 
-  //! 2) Serialize each per-cluster codebook and build the offset table.
+  //! 2) Single shared codebook blob (faiss-style: one codebook for all lists).
   std::string blob;
-  std::vector<InvertedPqCodebookMeta> metas(quantizers.size());
-  for (size_t i = 0; i < quantizers.size(); ++i) {
-    std::string ser;
-    if (quantizers[i]) {
-      int r = quantizers[i]->serialize(&ser);
-      if (r != 0) {
-        LOG_ERROR("Failed to serialize PQ codebook for cluster %zu", i);
-        return IndexError_Runtime;
-      }
+  if (quantizer) {
+    ret = quantizer->serialize(&blob);
+    if (ret != 0) {
+      LOG_ERROR("Failed to serialize shared PQ codebook");
+      return IndexError_Runtime;
     }
-    metas[i].offset = blob.size();
-    metas[i].size = ser.size();
-    blob.append(ser);
   }
-
   ret = this->dump_segment(IVF_PQ_CODEBOOKS_SEG_ID, blob.data(), blob.size());
   ivf_check_error_code(ret);
 
-  ret = this->dump_segment(IVF_PQ_META_SEG_ID, metas.data(),
-                           metas.size() * sizeof(InvertedPqCodebookMeta));
-  ivf_check_error_code(ret);
-
-  LOG_DEBUG("Dump PQ: nlist=%zu codebooks_bytes=%zu centroids_floats=%zu",
-            quantizers.size(), blob.size(), centroids.size());
+  LOG_DEBUG("Dump PQ: shared codebook_bytes=%zu centroids_floats=%zu",
+            blob.size(), centroids.size());
   return 0;
 }
 

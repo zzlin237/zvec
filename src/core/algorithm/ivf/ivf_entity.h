@@ -374,7 +374,8 @@ class IVFEntity {
   InvertedIndexHeader header_;
 
   //! Per-cluster residual PQ state (pure PQ-ADC mode).
-  std::vector<turbo::Quantizer::Pointer> pq_quantizers_{};
+  //! Single shared PQ codebook (faiss-style): one quantizer for all clusters.
+  turbo::Quantizer::Pointer pq_quantizer_{};
   std::vector<float> pq_centroids_{};  // nlist * pq_dim_ (normalized if Cosine)
   uint32_t pq_dim_{0};
   uint32_t pq_num_chunk_{0};
