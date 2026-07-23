@@ -455,6 +455,7 @@ void IVFEntity::IVFReformerWrapper::transform(size_t qidx, const float *in,
 int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
   pq_num_chunk_ = header_.pq_num_chunk;
   pq_normalize_ = (meta_.metric_name() == "Cosine");
+  pq_ip_ = (meta_.metric_name() == "InnerProduct");
   const size_t nlist = header_.inverted_list_count;
 
   //! fp32 centroids segment (nlist * pq_dim_)
@@ -504,10 +505,12 @@ int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
   }
   const char *cb = reinterpret_cast<const char *>(cbdata);
 
-  //! Init each quantizer (L2 residual space, fp32, pq_dim_) BEFORE deserialize
-  //! so the metric context matches the build side.
+  //! Init each quantizer BEFORE deserialize so the metric context matches the
+  //! build side. Encoding is always L2 (fp32_l2_batch_fn_); the init metric
+  //! only selects the search LUT: InnerProduct for IP, else SquaredEuclidean.
   IndexMeta pq_meta = meta_;
-  pq_meta.set_metric(kL2MetricName, 0, ailego::Params());
+  pq_meta.set_metric(pq_ip_ ? kIPMetricName : kL2MetricName, 0,
+                     ailego::Params());
   pq_meta.set_reformer(std::string(), 0, ailego::Params());
   pq_meta.set_converter(std::string(), 0, ailego::Params());
   pq_meta.set_meta(IndexMeta::DataType::DT_FP32, pq_dim_);
@@ -553,28 +556,42 @@ int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
   const auto &pq = pq_quantizers_[inverted_list_id];
   ivf_assert(pq, IndexError_Runtime);
 
-  //! Residual query: r = (unit(q) if Cosine else q) - centroid_cid
+  //! Build the ADC LUT and the per-list constant `dis0`.
+  //! - L2/Cosine: residual query r = (unit(q) if Cosine else q) - c; LUT on r;
+  //!   dis0 = 0 (residual ADC directly approximates the metric distance).
+  //! - IP (faiss residual+dis0): LUT on the RAW query q (no shift); the coarse
+  //!   center contributes a per-list constant dis0 = IP_dist(q, c) = -<q,c>.
+  //!   Final score = dis0 + ADC = -<q,c> - <q,r_hat> = -<q,v>  (min-heap: the
+  //!   smaller, the larger the true inner product).
   const float *q = reinterpret_cast<const float *>(query);
   const float *centroid = pq_centroids_.data() + inverted_list_id * pq_dim_;
-  std::vector<float> resid(pq_dim_);
-  if (pq_normalize_) {
-    for (uint32_t d = 0; d < pq_dim_; ++d) {
-      resid[d] = q[d];
-    }
-    float norm = 0.0f;
-    ailego::Normalizer<float>::L2(resid.data(), pq_dim_, &norm);
-    for (uint32_t d = 0; d < pq_dim_; ++d) {
-      resid[d] -= centroid[d];
-    }
-  } else {
-    for (uint32_t d = 0; d < pq_dim_; ++d) {
-      resid[d] = q[d] - centroid[d];
-    }
-  }
-
-  //! Build the ADC lookup table for this residual query.
   std::vector<float> lut(pq->quantized_query_vector_length() / sizeof(float));
-  pq->quantize_query(resid.data(), lut.data());
+  float dis0 = 0.0f;
+  if (pq_ip_) {
+    pq->quantize_query(q, lut.data());
+    double dot = 0.0;
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      dot += static_cast<double>(q[d]) * centroid[d];
+    }
+    dis0 = static_cast<float>(-dot);  // IP distance convention is -dot
+  } else {
+    std::vector<float> resid(pq_dim_);
+    if (pq_normalize_) {
+      for (uint32_t d = 0; d < pq_dim_; ++d) {
+        resid[d] = q[d];
+      }
+      float norm = 0.0f;
+      ailego::Normalizer<float>::L2(resid.data(), pq_dim_, &norm);
+      for (uint32_t d = 0; d < pq_dim_; ++d) {
+        resid[d] -= centroid[d];
+      }
+    } else {
+      for (uint32_t d = 0; d < pq_dim_; ++d) {
+        resid[d] = q[d] - centroid[d];
+      }
+    }
+    pq->quantize_query(resid.data(), lut.data());
+  }
 
   const void *data = nullptr;
   const size_t block_vecs = header_.block_vector_count;
@@ -624,7 +641,7 @@ int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
           ++(*context_stats->mutable_filtered_count());
           continue;
         }
-        heap->emplace(block_keys[k], distances[k], id_off + k);
+        heap->emplace(block_keys[k], distances[k] + dis0, id_off + k);
       }
     }
   }
@@ -1175,6 +1192,7 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
   //! the shared_ptrs can be shared across cloned entities/contexts.
   entity->pq_enabled_ = this->pq_enabled_;
   entity->pq_normalize_ = this->pq_normalize_;
+  entity->pq_ip_ = this->pq_ip_;
   entity->pq_dim_ = this->pq_dim_;
   entity->pq_num_chunk_ = this->pq_num_chunk_;
   entity->pq_quantizers_ = this->pq_quantizers_;

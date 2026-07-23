@@ -380,6 +380,7 @@ class IVFEntity {
   uint32_t pq_num_chunk_{0};
   bool pq_enabled_{false};
   bool pq_normalize_{false};  // true for Cosine metric
+  bool pq_ip_{false};         // true for InnerProduct metric (residual+dis0)
 };
 
 }  // namespace core

@@ -259,6 +259,7 @@ int IVFBuilder::cleanup(void) {
   pq_enable_ = false;
   pq_use_zero_mean_ = false;
   pq_normalize_ = false;
+  pq_ip_ = false;
 
   error_ = false;
   err_code_ = 0;
@@ -669,8 +670,14 @@ int IVFBuilder::parse_general_params(const ailego::Params &params) {
   params.get(PARAM_IVF_BUILDER_STORE_ORIGINAL_FEATURES,
              &store_original_features_);
 
-  //! Prepare Converter for training
-  if (meta_.metric_name() == kIPMetricName) {
+  //! Prepare Converter for training.
+  //! IP normally uses the MipsConverter (augments dims, reducing MIPS->L2).
+  //! But per-cluster residual PQ implements IP directly in the raw space
+  //! (faiss-style residual + per-list dis0=<q,c>), so the MIPS augmentation
+  //! must be skipped for IP+PQ to keep the native dimension (e.g. 768).
+  bool pq_enabled_param = false;
+  params.get(PARAM_IVF_BUILDER_PQ_ENABLE, &pq_enabled_param);
+  if (meta_.metric_name() == kIPMetricName && !pq_enabled_param) {
     converter_class_ = kMipsConverterName;
   }
   params.get(PARAM_IVF_BUILDER_CONVERTER_CLASS, &converter_class_);
@@ -696,31 +703,39 @@ int IVFBuilder::parse_general_params(const ailego::Params &params) {
     return IndexError_InvalidArgument;
   }
 
-  //! Per-cluster residual PQ (pure PQ-ADC). L2/Cosine only.
+  //! Per-cluster residual PQ (pure PQ-ADC). L2/Cosine/InnerProduct.
   params.get(PARAM_IVF_BUILDER_PQ_ENABLE, &pq_enable_);
   if (pq_enable_) {
     const std::string &metric = meta_.metric_name();
-    if (metric != kL2MetricName && metric != "Cosine") {
-      LOG_WARN("IVF residual PQ is only supported for SquaredEuclidean/Cosine, "
-               "metric=%s; disabling PQ",
+    if (metric != kL2MetricName && metric != "Cosine" &&
+        metric != kIPMetricName) {
+      LOG_WARN("IVF residual PQ is only supported for "
+               "SquaredEuclidean/Cosine/InnerProduct, metric=%s; disabling PQ",
                metric.c_str());
       pq_enable_ = false;
     } else {
       pq_normalize_ = (metric == "Cosine");
+      pq_ip_ = (metric == kIPMetricName);
       pq_num_chunk_ = params.get_as_uint32(PARAM_IVF_BUILDER_PQ_NUM_CHUNK);
       if (pq_num_chunk_ == 0) {
         pq_num_chunk_ = 8;
       }
-      pq_use_zero_mean_ = true;
-      params.get(PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, &pq_use_zero_mean_);
+      if (pq_ip_) {
+        // InnerProduct is not translation-invariant: zero-mean centering is
+        // invalid. IP uses faiss-style residual encoding + per-list dis0.
+        pq_use_zero_mean_ = false;
+      } else {
+        pq_use_zero_mean_ = true;
+        params.get(PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, &pq_use_zero_mean_);
+      }
       if (meta_.dimension() % pq_num_chunk_ != 0) {
         LOG_ERROR("IVF PQ: dim(%u) not divisible by num_chunk(%u)",
                   meta_.dimension(), pq_num_chunk_);
         return IndexError_InvalidArgument;
       }
       LOG_INFO("IVF residual PQ enabled: num_chunk=%u use_zero_mean=%d "
-               "normalize=%d",
-               pq_num_chunk_, pq_use_zero_mean_, pq_normalize_);
+               "normalize=%d ip=%d",
+               pq_num_chunk_, pq_use_zero_mean_, pq_normalize_, pq_ip_);
     }
   }
 
@@ -1066,11 +1081,14 @@ int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
   size_t nlist = centroid_index_->centroids_count();
   pq_quantizers_.assign(nlist, nullptr);
 
-  //! The residual PQ codebook is always trained/searched in L2 (residual)
-  //! space, fp32, original dimension. Cosine handling (unit-normalization) is
-  //! applied by the builder/entity before the residual is formed.
+  //! The residual PQ codebook is always trained/encoded in L2 (via
+  //! fp32_l2_batch_fn_), fp32, original dimension. The init metric only
+  //! selects the *search* LUT: InnerProduct for IP (IP LUT), else L2. Cosine
+  //! handling (unit-normalization) is applied by the builder/entity before the
+  //! residual is formed.
   IndexMeta pq_meta = meta_;
-  pq_meta.set_metric(kL2MetricName, 0, ailego::Params());
+  pq_meta.set_metric(pq_ip_ ? kIPMetricName : kL2MetricName, 0,
+                     ailego::Params());
   pq_meta.set_reformer(std::string(), 0, ailego::Params());
   pq_meta.set_converter(std::string(), 0, ailego::Params());
   pq_meta.set_meta(IndexMeta::DataType::DT_FP32, pq_dim_);

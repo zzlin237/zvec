@@ -320,6 +320,7 @@ class IVFBuilder : public IndexBuilder {
   bool pq_enable_{false};
   bool pq_use_zero_mean_{false};
   bool pq_normalize_{false};  // true for Cosine metric
+  bool pq_ip_{false};         // true for InnerProduct metric (faiss residual+dis0)
 
   std::atomic_bool error_{false};
   int err_code_{0};
