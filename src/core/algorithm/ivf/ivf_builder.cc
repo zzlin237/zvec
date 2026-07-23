@@ -545,6 +545,21 @@ int IVFBuilder::dump(const IndexDumper::Pointer &dumper) {
 }
 
 int IVFBuilder::CheckAndUpdateMajorOrder(IndexMeta &meta) {
+  // Per-cluster residual PQ stores uint8[num_chunk] codes row-major. The search
+  // metric (e.g. Cosine) does not apply to the code bytes and may not even
+  // support the quantized data type (Cosine+INT8 fails to init), so skip the
+  // metric-based column-major probing and keep the codes row-major.
+  if (pq_enable_) {
+    meta.set_major_order(IndexMeta::MO_ROW);
+    if (block_vector_count_ * meta.element_size() % 32 != 0) {
+      LOG_ERROR(
+          "block_vector_count * quantized_element_size not align with 32 "
+          "bytes.");
+      return IndexError_InvalidArgument;
+    }
+    return 0;
+  }
+
   const std::string &metric_name = meta.metric_name();
   auto metric = IndexFactory::CreateMetric(metric_name);
   if (!metric) {
