@@ -15,19 +15,23 @@
 #include <cassert>
 #include <ailego/internal/cpu_features.h>
 #include <zvec/turbo/turbo.h>
+#include "avx2/pq_quantizer_int4/pq_distance.h"
 #include "avx2/pq_quantizer_int8/pq_distance.h"
 #include "avx2/rotate/fht/fht.h"
+#include "avx512/pq_quantizer_int4/pq_distance.h"
 #include "avx512/pq_quantizer_int8/pq_distance.h"
 #include "avx512/rotate/fht/fht.h"
 #include "avx512_vnni/record_quantized_int8/cosine.h"
 #include "avx512_vnni/record_quantized_int8/squared_euclidean.h"
 #include "avx512_vnni/uniform_int8/quantize.h"
 #include "avx512_vnni/uniform_int8/squared_euclidean.h"
+#include "neon/pq_quantizer_int4/pq_distance.h"
 #include "neon/pq_quantizer_int8/pq_distance.h"
 #include "neon/rotate/fht/fht.h"
 #include "scalar/fp32/cosine.h"
 #include "scalar/fp32/inner_product.h"
 #include "scalar/fp32/squared_euclidean.h"
+#include "scalar/pq_quantizer_int4/pq_distance.h"
 #include "scalar/pq_quantizer_int8/pq_distance.h"
 #include "scalar/rotate/fht/fht.h"
 #include "sse/rotate/fht/fht.h"
@@ -159,8 +163,29 @@ UniformQuantizeFunc get_uniform_quantize_func(DataType data_type) {
 
 PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
                          CpuArchType cpu_arch_type) {
-  (void)data_type;
   if (quantize_type == QuantizeType::kPQ) {
+    if (data_type == DataType::kInt4) {
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+        return {avx512::pq_adc_int4_distance_avx512,
+                avx512::pq_sdc_int4_distance_avx512,
+                avx512::pq_adc_int4_batch_distance_avx512};
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+        return {avx2::pq_adc_int4_distance_avx2,
+                avx2::pq_sdc_int4_distance_avx2,
+                avx2::pq_adc_int4_batch_distance_avx2};
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+        return {neon::pq_adc_int4_distance_neon,
+                neon::pq_sdc_int4_distance_neon,
+                neon::pq_adc_int4_batch_distance_neon};
+      }
+      return {scalar::pq_adc_int4_distance, scalar::pq_sdc_int4_distance,
+              scalar::pq_adc_int4_batch_distance};
+    }
     if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
         IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
       return {avx512::pq_adc_int8_distance_avx512,
