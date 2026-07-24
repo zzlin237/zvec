@@ -19,20 +19,25 @@
 
 namespace zvec::turbo::avx512 {
 
-// ADC (Asymmetric Distance Computation) for int4 PQ codes via AVX512.
-// Uses vpshufb to unpack 16 nibbles from 8 bytes, then a single
-// _mm512_i32gather_ps to process all 16 sub-quantizers at once.
+// PQ int4: 16 centroids per subquantizer, codes packed 2-per-byte (nibbles).
+// The low nibble of pq_code[m / 2] holds subquantizer m when m is even, the
+// high nibble when m is odd. SIMD paths unpack nibbles into int32 lanes
+// before the AVX512 gather.
+
+// ADC (Asymmetric Distance Computation) via AVX512 gather.
+// Processes 16 subquantizers per _mm512_i32gather_ps iteration.
 void pq_adc_int4_distance_avx512(const void *pq_code, const void *lut,
                                  size_t num_chunk, float *out);
 
-// SDC (Symmetric Distance Computation) for int4 PQ codes via AVX512.
-// 16-wide index computation (a*16 + b + m*256) + single gather.
+// SDC (Symmetric Distance Computation) via AVX512 gather.
+// 16-wide index computation + gather.
 void pq_sdc_int4_distance_avx512(const void *a, const void *b,
-                                 const void *dist_table,
-                                 size_t num_chunk, float *out);
+                                 const void *dist_table, size_t num_chunk,
+                                 float *out);
 
-// Batch ADC via AVX512: process 4 candidates per iteration,
-// each using the 16-sub vpshufb + gather kernel.
+// Batch ADC via AVX512 gather: process 4 candidates per iteration,
+// each using 16-wide _mm512_i32gather_ps. 4 independent __m512
+// accumulators maximize ILP.
 void pq_adc_int4_batch_distance_avx512(const void **candidates, const void *lut,
                                        size_t num, size_t num_chunk,
                                        float *out);

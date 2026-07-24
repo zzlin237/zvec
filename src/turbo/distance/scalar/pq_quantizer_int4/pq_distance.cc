@@ -18,13 +18,9 @@ namespace zvec::turbo::scalar {
 
 namespace {
 
-// Decode the 4-bit index for sub-quantizer m from a packed int4 code.
-// Layout: byte[m/2] = (code[2*(m/2)+1] << 4) | code[2*(m/2)]
-//   even m -> low nibble;  odd m -> high nibble.
-inline uint8_t decode_nibble(const uint8_t *code, size_t m) {
-  uint8_t byte = code[m >> 1];
-  return (m & 1u) ? static_cast<uint8_t>(byte >> 4)
-                  : static_cast<uint8_t>(byte & 0x0Fu);
+// Extract the 4-bit code of subquantizer m from a nibble-packed buffer.
+inline uint8_t nibble(const uint8_t *code, size_t m) {
+  return static_cast<uint8_t>((code[m >> 1] >> ((m & 1) * 4)) & 0x0F);
 }
 
 }  // namespace
@@ -36,8 +32,7 @@ void pq_adc_int4_distance(const void *pq_code_v, const void *lut_v,
   const auto *lut = reinterpret_cast<const float *>(lut_v);
   float sum = 0.0f;
   for (size_t m = 0; m < num_chunk; ++m) {
-    uint8_t idx = decode_nibble(pq_code, m);
-    sum += lut[m * kNumCentroids + idx];
+    sum += lut[m * kNumCentroids + nibble(pq_code, m)];
   }
   *out = sum;
 }
@@ -52,25 +47,26 @@ void pq_sdc_int4_distance(const void *a_v, const void *b_v,
   const auto *dist_table = reinterpret_cast<const float *>(dist_table_v);
   float sum = 0.0f;
   for (size_t m = 0; m < num_chunk; ++m) {
-    uint8_t ai = decode_nibble(a, m);
-    uint8_t bi = decode_nibble(b, m);
-    size_t idx = m * kTablePerSub + static_cast<size_t>(ai) * kNumCentroids +
-                 static_cast<size_t>(bi);
+    size_t idx = m * kTablePerSub +
+                 static_cast<size_t>(nibble(a, m)) * kNumCentroids +
+                 static_cast<size_t>(nibble(b, m));
     sum += dist_table[idx];
   }
   *out = sum;
 }
 
 void pq_adc_int4_batch_distance(const void **candidates_v, const void *lut_v,
-                                size_t num, size_t num_chunk,
-                                float *out) {
+                                size_t num, size_t num_chunk, float *out) {
   constexpr size_t kNumCentroids = 16;
   const auto *lut = reinterpret_cast<const float *>(lut_v);
-  const auto *candidates =
-      reinterpret_cast<const uint8_t *const *>(candidates_v);
+  // candidates_v is const void**, but we need const uint8_t**
+  // Use an intermediate cast through const char** to avoid aliasing issues.
+  auto candidates = reinterpret_cast<const uint8_t *const *>(candidates_v);
 
   size_t i = 0;
-  // Main loop: process 4 candidates per iteration (batch4 ILP).
+  // Main loop: process 4 candidates per iteration.
+  // Shared LUT base pointer (tab) is computed once per subquantizer,
+  // reducing redundant pointer arithmetic across the 4 candidates.
   for (; i + 4 <= num; i += 4) {
     const uint8_t *c0 = candidates[i];
     const uint8_t *c1 = candidates[i + 1];
@@ -79,14 +75,10 @@ void pq_adc_int4_batch_distance(const void **candidates_v, const void *lut_v,
     float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
     for (size_t m = 0; m < num_chunk; ++m) {
       const float *tab = lut + m * kNumCentroids;
-      uint8_t n0 = decode_nibble(c0, m);
-      uint8_t n1 = decode_nibble(c1, m);
-      uint8_t n2 = decode_nibble(c2, m);
-      uint8_t n3 = decode_nibble(c3, m);
-      d0 += tab[n0];
-      d1 += tab[n1];
-      d2 += tab[n2];
-      d3 += tab[n3];
+      d0 += tab[nibble(c0, m)];
+      d1 += tab[nibble(c1, m)];
+      d2 += tab[nibble(c2, m)];
+      d3 += tab[nibble(c3, m)];
     }
     out[i] = d0;
     out[i + 1] = d1;
@@ -98,8 +90,7 @@ void pq_adc_int4_batch_distance(const void **candidates_v, const void *lut_v,
     const uint8_t *code = candidates[i];
     float d = 0.0f;
     for (size_t m = 0; m < num_chunk; ++m) {
-      uint8_t idx = decode_nibble(code, m);
-      d += lut[m * kNumCentroids + idx];
+      d += lut[m * kNumCentroids + nibble(code, m)];
     }
     out[i] = d;
   }

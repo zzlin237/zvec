@@ -28,18 +28,19 @@ using namespace zvec::core;
 
 //! Product Quantizer with 4-bit sub-codes (num_bits=4, 16 centroids).
 //!
-//! Datapoints are encoded as packed nibbles: two 4-bit indices per byte.
-//!   byte[i] = (code[2*i+1] << 4) | code[2*i]
-//! num_chunk MUST be even for clean byte packing.
+//! Datapoints are encoded as nibble-packed codes: two 4-bit sub-codes share
+//! one byte (sub-quantizer m occupies the low nibble of byte m/2 when m is
+//! even, the high nibble when m is odd).  An odd num_chunk pads the last
+//! byte's high nibble with 0.  Total code length is ceil(num_chunk / 2) bytes.
 //!
-//! Queries are encoded as a float LUT of size [num_chunk * 16]
-//! via quantize_query().  Distance between a PQ code and a query uses
-//! ADC (LUT look-up); distance between two PQ codes uses SDC
-//! (centroid-to-centroid distance table of size [nsq * 16 * 16]).
+//! Queries are encoded as a float LUT of size [num_chunk * 16] via
+//! quantize_query().  Distance between a PQ code and a query uses ADC (LUT
+//! look-up); distance between two PQ codes uses SDC (centroid-to-centroid
+//! distance table).
 class PqInt4Quantizer : public Quantizer {
  public:
   PqInt4Quantizer() {
-    type_ = QuantizeType::kPQ;  // shares kPQ with int8; DataType distinguishes
+    type_ = QuantizeType::kPQ;
   }
 
   ~PqInt4Quantizer() override = default;
@@ -70,15 +71,12 @@ class PqInt4Quantizer : public Quantizer {
 
   int train(IndexHolder::Pointer holder, int thread_count) override;
 
-  // Packed nibbles: num_chunk / 2 bytes + optional Cosine norm.
   size_t quantized_datapoint_vector_length() const override {
-    return static_cast<size_t>(num_chunk_) / 2 + extra_meta_size_;
+    return packed_code_length() + extra_meta_size_;
   }
 
-  // LUT: [num_chunk * 16] floats.
   size_t quantized_query_vector_length() const override {
-    return static_cast<size_t>(num_chunk_) * kNumCentroids *
-           sizeof(float);
+    return static_cast<size_t>(num_chunk_) * kNumCentroids * sizeof(float);
   }
 
   void quantize_data(const void *input, void *output) const override;
@@ -120,7 +118,8 @@ class PqInt4Quantizer : public Quantizer {
   int deserialize(const void *data, size_t len) override;
 
  private:
-  //! Train a single sub-quantizer (KMeans, k=16) on the sub-vectors.
+  //! Train a single sub-quantizer (KMeans, k=16) on the sub-vectors
+  //! extracted from holder.  sub_idx selects which sub-quantizer to train.
   void train_subquantizer(const float *data, size_t num, size_t stride,
                           size_t sub_idx);
 
@@ -128,7 +127,13 @@ class PqInt4Quantizer : public Quantizer {
   void compute_dist_table();
 
   //! Build centroid_ptrs_cache_ from current centroids_.
+  //! Called after train() and deserialize() when centroids are available.
   void build_centroid_ptrs_cache();
+
+  //! Packed code length in bytes: two 4-bit codes per byte, last byte padded.
+  size_t packed_code_length() const {
+    return (static_cast<size_t>(num_chunk_) + 1) / 2;
+  }
 
   static constexpr uint32_t kNumCentroids = 16;
   static constexpr uint32_t kMaxKmeansIters = 25;
@@ -145,6 +150,11 @@ class PqInt4Quantizer : public Quantizer {
   //! Cost-based convergence threshold (aligned with multi_chunk_cluster).
   double epsilon_{std::numeric_limits<float>::epsilon()};
 
+  //! Whether to apply zero-mean centering before training/encoding.
+  //! When enabled, the per-dimension mean of training data is subtracted
+  //! from all vectors (train, encode, query) and added back on dequantize.
+  bool use_zero_mean_{false};
+
   IndexMeta meta_{};
   uint32_t original_dim_{0};
   uint32_t num_chunk_{0};
@@ -153,23 +163,35 @@ class PqInt4Quantizer : public Quantizer {
   //! Centroids: [num_chunk * kNumCentroids * sub_dim]
   std::vector<float> centroids_;
 
+  //! Global centroid (per-dimension mean) for zero-mean centering.
+  //! Size: original_dim_ floats.  Only populated when use_zero_mean_ = true.
+  std::vector<float> centroid_;
+
   //! Centroid-to-centroid distance table for SDC:
   //! [num_chunk * kNumCentroids * kNumCentroids]
   std::vector<float> dist_table_;
 
   //! Pre-built centroid pointer arrays for each sub-quantizer.
+  //! Layout: centroid_ptrs_cache_[sub_idx][centroid_idx] = pointer to centroid.
+  //! Built once during init/deserialize, reused by compute_dist_table
+  //! and quantize_query to avoid repeated allocations.
   std::vector<std::vector<const void *>> centroid_ptrs_cache_;
 
   //! ISA-dispatched kernel function pointers (ADC / SDC / Batch ADC).
-  //! These point to int4-specific kernels (packed nibble codes).
   PqAdcDistanceFunc adc_fn_{nullptr};
   PqSdcKernelFunc sdc_fn_{nullptr};
   PqBatchAdcFunc batch_adc_fn_{nullptr};
 
-  //! Metric-aware fp32 batch distance for search-side LUT and SDC table.
+  //! Metric-aware fp32 batch distance function for search-side LUT
+  //! computation and SDC dist_table.  Obtained from
+  //! get_batch_distance_func() with the configured metric.
   BatchDistanceFunc fp32_batch_fn_{};
 
-  //! L2-only fp32 batch distance for encoding and KMeans training.
+  //! L2-only fp32 batch distance function for encoding (quantize_data)
+  //! and KMeans training (train_subquantizer).  PQ encoding must always
+  //! minimize L2 quantization error regardless of the search metric.
+  //! This separation ensures encoding and search LUT use the correct
+  //! distance semantics independently.
   BatchDistanceFunc fp32_l2_batch_fn_{};
 };
 

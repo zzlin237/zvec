@@ -17,30 +17,25 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace zvec::turbo::avx2 {
+namespace zvec::turbo::neon {
 
 // PQ int4: 16 centroids per subquantizer, codes packed 2-per-byte (nibbles).
 // The low nibble of pq_code[m / 2] holds subquantizer m when m is even, the
-// high nibble when m is odd. SIMD paths unpack nibbles into int32 lanes
-// before the AVX2 gather.
+// high nibble when m is odd. NEON lacks hardware gather, so LUT lookups are
+// scalar; accumulation uses float32x4_t with pairwise horizontal reduction.
 
-// ADC (Asymmetric Distance Computation) via AVX2 gather.
-// Processes 8 subquantizers per _mm256_i32gather_ps iteration.
-// For general M: loop in chunks of 8, scalar leftover.
-void pq_adc_int4_distance_avx2(const void *pq_code, const void *lut,
+// ADC (Asymmetric Distance Computation) using NEON vector accumulation.
+void pq_adc_int4_distance_neon(const void *pq_code, const void *lut,
                                size_t num_chunk, float *out);
 
-// SDC (Symmetric Distance Computation) via AVX2 gather.
-// Computes indices (a[m]*16 + b[m]) as int32, adds per-subquantizer
-// base offsets, gathers 8 floats per iteration.
-void pq_sdc_int4_distance_avx2(const void *a, const void *b,
+// SDC (Symmetric Distance Computation) via scalar nibble lookup.
+void pq_sdc_int4_distance_neon(const void *a, const void *b,
                                const void *dist_table, size_t num_chunk,
                                float *out);
 
-// Batch ADC via AVX2 gather: process 4 candidates per iteration,
-// each using 8-wide _mm256_i32gather_ps. 4 independent __m256
-// accumulators maximize ILP.
-void pq_adc_int4_batch_distance_avx2(const void **candidates, const void *lut,
+// Batch ADC: compute distances for multiple PQ codes against a shared LUT.
+// Processes 4 candidates per iteration with NEON vector accumulation.
+void pq_adc_int4_batch_distance_neon(const void **candidates, const void *lut,
                                      size_t num, size_t num_chunk, float *out);
 
-}  // namespace zvec::turbo::avx2
+}  // namespace zvec::turbo::neon
