@@ -158,35 +158,6 @@ UniformQuantizeFunc get_uniform_quantize_func(DataType data_type) {
   return nullptr;
 }
 
-RotatorKernels get_rotator_kernels(RotateType rotate_type,
-                                   CpuArchType cpu_arch_type) {
-  switch (rotate_type) {
-    case RotateType::kFht: {
-      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
-          zvec::ailego::internal::CpuFeatures::static_flags_.AVX512DQ &&
-          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
-        return {avx512::fht_rotate_avx512, avx512::fht_unrotate_avx512};
-      }
-      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
-          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
-        return {avx2::fht_rotate_avx2, avx2::fht_unrotate_avx2};
-      }
-      if (zvec::ailego::internal::CpuFeatures::static_flags_.SSE2 &&
-          IsArchMatch(cpu_arch_type, CpuArchType::kSSE)) {
-        return {sse::fht_rotate_sse, sse::fht_unrotate_sse};
-      }
-      if (IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
-        return {neon::fht_rotate_neon, neon::fht_unrotate_neon};
-      }
-      return {scalar::fht_rotate, scalar::fht_unrotate};
-    }
-  }
-
-  // Fallback (unreachable for valid RotateType values).
-  assert(false && "unsupported RotateType");
-  return {};
-}
-
 PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
                          CpuArchType cpu_arch_type) {
   (void)data_type;
@@ -199,20 +170,46 @@ PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
     }
     if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
         IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
-      return {avx2::pq_adc_int8_distance_avx2,
-              avx2::pq_sdc_int8_distance_avx2,
+      return {avx2::pq_adc_int8_distance_avx2, avx2::pq_sdc_int8_distance_avx2,
               avx2::pq_adc_int8_batch_distance_avx2};
     }
-    if (IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
-      return {neon::pq_adc_int8_distance_neon,
-              neon::pq_sdc_int8_distance_neon,
+    if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+        IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+      return {neon::pq_adc_int8_distance_neon, neon::pq_sdc_int8_distance_neon,
               neon::pq_adc_int8_batch_distance_neon};
     }
-    return {scalar::pq_adc_int8_distance,
-            scalar::pq_sdc_int8_distance,
+    return {scalar::pq_adc_int8_distance, scalar::pq_sdc_int8_distance,
             scalar::pq_adc_int8_batch_distance};
   }
   return {};
+}
+
+RotatorKernels get_rotator_kernels(RotateType rotate_type,
+                                   CpuArchType cpu_arch_type) {
+  switch (rotate_type) {
+    case RotateType::kFht: {
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+        return {avx512::fht_rotate_avx512, avx512::fht_unrotate_avx512};
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+        return {avx2::fht_rotate_avx2, avx2::fht_unrotate_avx2};
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.SSE2 &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kSSE)) {
+        return {sse::fht_rotate_sse, sse::fht_unrotate_sse};
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+        return {neon::fht_rotate_neon, neon::fht_unrotate_neon};
+      }
+      return {scalar::fht_rotate, scalar::fht_unrotate};
+    }
+  }
+
+  assert(false && "unsupported RotateType");
+  return {scalar::fht_rotate, scalar::fht_unrotate};
 }
 
 }  // namespace zvec::turbo

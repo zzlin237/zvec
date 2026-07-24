@@ -123,7 +123,7 @@ struct SerializableBase {
 struct QuantizerParam : public SerializableBase {
   QuantizerType type = QuantizerType::kNone;
   int num_chunk = 8;  // M
-  int num_bits = 8;           // bits per subquantizer
+  int num_bits = 8;   // bits per subquantizer
   bool enable_rotate =
       false;  // rotate vectors before quantization to reduce error
 

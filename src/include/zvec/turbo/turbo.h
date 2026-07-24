@@ -20,6 +20,28 @@
 
 namespace zvec::turbo {
 
+//! Error code literals mirroring core::IndexError::Code integer values.
+//!
+//! Turbo quantizer sources use these directly instead of the
+//! `IndexError_NotImplemented` / `IndexError_Unsupported` const objects
+//! because MSVC's WINDOWS_EXPORT_ALL_SYMBOLS does not export const data
+//! with constructors from zvec_shared.dll.  zvec_turbo is a static library
+//! linked with /WHOLEARCHIVE, so referencing those unexported symbols across
+//! the DLL boundary triggers LNK2019 on Windows.
+//!
+//! IndexError::Code stores -val in its constructor, so NotImplemented(11)
+//! yields -11 and Unsupported(12) yields -12.
+constexpr int kErrRuntime = -1;
+constexpr int kErrNotImplemented = -11;
+constexpr int kErrUnsupported = -12;
+constexpr int kErrInvalidArgument = -31;
+
+//! Magic number ('QTZR') stamped at the start of a serialized quantizer blob.
+constexpr uint32_t kQuantizerMagic = 0x52545A51u;
+
+//! Current quantizer serialization format version.
+constexpr uint16_t kQuantizerSerVersion = 1;
+
 using DistanceFunc =
     std::function<void(const void *m, const void *q, size_t dim, float *out)>;
 using BatchDistanceFunc = std::function<void(
@@ -56,14 +78,13 @@ using PqAdcDistanceFunc = void (*)(const void *pq_code, const void *lut,
 //   dist_table:        [num_chunk * 256 * 256] float
 // Uses void* for consistency with DistanceFunc / PqAdcDistanceFunc.
 using PqSdcKernelFunc = void (*)(const void *a, const void *b,
-                                 const void *dist_table,
-                                 size_t num_chunk, float *out);
+                                 const void *dist_table, size_t num_chunk,
+                                 float *out);
 
 // Batch ADC: compute distances for multiple PQ codes against a shared LUT.
 // Signature matches BatchDistanceFunc for direct assignment (no lambda).
 using PqBatchAdcFunc = void (*)(const void **candidates, const void *lut,
-                                size_t num, size_t num_chunk,
-                                float *out);
+                                size_t num, size_t num_chunk, float *out);
 
 // Batch ADC: compute distances for multiple PQ codes against a shared LUT.
 // Signature matches BatchDistanceFunc for direct assignment (no lambda).
@@ -80,9 +101,9 @@ struct RotatorKernels {
 // data_type selects the code packing layout:
 //   kInt8: one uint8 per sub-quantizer (256 centroids, stride=256)
 struct PqKernels {
-  PqAdcDistanceFunc adc_distance;
-  PqSdcKernelFunc sdc_distance;
-  PqBatchAdcFunc batch_adc_distance;
+  PqAdcDistanceFunc adc_distance = nullptr;
+  PqSdcKernelFunc sdc_distance = nullptr;
+  PqBatchAdcFunc batch_adc_distance = nullptr;
 };
 
 enum class MetricType {

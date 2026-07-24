@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace zvec::turbo {
 
@@ -35,8 +36,12 @@ struct FhtPrimitives {
 ///   offset 16: float  fac
 ///   offset 20: uint8_t pad[4]
 ///   offset 24: uint8_t flip[]
-inline void fht_rotate_impl(float *data, size_t dim, void *ctx,
+inline void fht_rotate_impl(const float *in, float *out, size_t dim, void *ctx,
                             const FhtPrimitives &p) {
+  if (out != in) {
+    std::memcpy(out, in, sizeof(float) * dim);
+  }
+  float *data = out;
   auto *base = reinterpret_cast<const uint8_t *>(ctx);
   const size_t flip_offset = *reinterpret_cast<const size_t *>(base);
   const size_t trunc_dim = *reinterpret_cast<const size_t *>(base + 8);
@@ -78,8 +83,12 @@ inline void fht_rotate_impl(float *data, size_t dim, void *ctx,
   p.rescale(data, dim, 0.25f);
 }
 
-inline void fht_unrotate_impl(float *data, size_t dim, void *ctx,
-                              const FhtPrimitives &p) {
+inline void fht_unrotate_impl(const float *in, float *out, size_t dim,
+                              void *ctx, const FhtPrimitives &p) {
+  if (out != in) {
+    std::memcpy(out, in, sizeof(float) * dim);
+  }
+  float *data = out;
   auto *base = reinterpret_cast<const uint8_t *>(ctx);
   const size_t flip_offset = *reinterpret_cast<const size_t *>(base);
   const size_t trunc_dim = *reinterpret_cast<const size_t *>(base + 8);
