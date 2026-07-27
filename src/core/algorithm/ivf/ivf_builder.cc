@@ -255,6 +255,7 @@ int IVFBuilder::cleanup(void) {
 
   pq_quantizer_.reset();
   pq_centroids_.clear();
+  pq_quantizer_class_.clear();
   pq_dim_ = 0;
   pq_num_chunk_ = 0;
   pq_enable_ = false;
@@ -721,22 +722,26 @@ int IVFBuilder::parse_general_params(const ailego::Params &params) {
       if (pq_num_chunk_ == 0) {
         pq_num_chunk_ = 8;
       }
-      if (pq_ip_) {
-        // InnerProduct is not translation-invariant: zero-mean centering is
-        // invalid. IP uses faiss-style residual encoding + per-list dis0.
-        pq_use_zero_mean_ = false;
-      } else {
-        pq_use_zero_mean_ = true;
-        params.get(PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, &pq_use_zero_mean_);
+      //! Pass-through only: the metric policy (e.g. zero-mean centering is
+      //! invalid for InnerProduct) is decided solely by the quantizer's
+      //! init(), which is the single source of truth for such rules.
+      pq_use_zero_mean_ = true;
+      params.get(PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, &pq_use_zero_mean_);
+      pq_quantizer_class_ = kDefaultPqQuantizerName;
+      params.get(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS, &pq_quantizer_class_);
+      if (pq_quantizer_class_.empty()) {
+        pq_quantizer_class_ = kDefaultPqQuantizerName;
       }
       if (meta_.dimension() % pq_num_chunk_ != 0) {
         LOG_ERROR("IVF PQ: dim(%u) not divisible by num_chunk(%u)",
                   meta_.dimension(), pq_num_chunk_);
         return IndexError_InvalidArgument;
       }
-      LOG_INFO("IVF residual PQ enabled: num_chunk=%u use_zero_mean=%d "
-               "normalize=%d ip=%d",
-               pq_num_chunk_, pq_use_zero_mean_, pq_normalize_, pq_ip_);
+      LOG_INFO(
+          "IVF residual PQ enabled: quantizer=%s num_chunk=%u "
+          "use_zero_mean=%d normalize=%d ip=%d",
+          pq_quantizer_class_.c_str(), pq_num_chunk_, pq_use_zero_mean_,
+          pq_normalize_, pq_ip_);
     }
   }
 
@@ -835,6 +840,8 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   }
   if (pq_enable_) {
     //! Per-cluster residual PQ: store uint8[num_chunk] codes.
+    //! Header PQ fields are informational only; the authoritative quantizer
+    //! config is restored from the serialized codebook blob on load.
     ivf_dumper->set_pq_meta(pq_num_chunk_, pq_use_zero_mean_ ? 1 : 0);
     std::vector<uint8_t> code(pq_num_chunk_);
     std::vector<float> resid(pq_dim_);
@@ -1013,6 +1020,11 @@ int IVFBuilder::prepare_quantizer(IndexThreads *threads) {
   return 0;
 }
 
+//! Residual orchestration is an index-level concern (only IVF knows the
+//! coarse centroid): Cosine normalizes BEFORE subtracting the centroid so
+//! train/encode/search all operate in the same unit space. Metric policies
+//! internal to the quantizer (zero-mean validity, LUT metric selection) are
+//! decided by the quantizer's init() alone.
 void IVFBuilder::compute_pq_residual(const float *vec, const float *centroid,
                                     float *out) const {
   if (pq_normalize_) {
@@ -1086,9 +1098,9 @@ int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
   // IVF uses ADC only; skip the SDC dist_table.
   pq_params.set("compute_sdc", false);
 
-  pq_quantizer_ = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  pq_quantizer_ = IndexFactory::CreateQuantizer(pq_quantizer_class_);
   if (!pq_quantizer_) {
-    LOG_ERROR("Failed to create PqInt8Quantizer");
+    LOG_ERROR("Failed to create quantizer %s", pq_quantizer_class_.c_str());
     return IndexError_NoExist;
   }
   int ret = pq_quantizer_->init(pq_meta, pq_params);

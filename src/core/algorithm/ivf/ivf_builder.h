@@ -312,6 +312,7 @@ class IVFBuilder : public IndexBuilder {
   //! Single shared PQ codebook (faiss-style): one quantizer for all clusters.
   turbo::Quantizer::Pointer pq_quantizer_{};
   std::vector<float> pq_centroids_{};  // nlist * pq_dim_ (normalized if Cosine)
+  std::string pq_quantizer_class_{};   // factory name, default PqInt8Quantizer
   uint32_t pq_dim_{0};
   uint32_t pq_num_chunk_{0};
   bool pq_enable_{false};

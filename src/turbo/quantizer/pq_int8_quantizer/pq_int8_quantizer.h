@@ -86,6 +86,10 @@ class PqInt8Quantizer : public Quantizer {
                                     const void *query,
                                     float *dist_list) const override;
 
+  void calc_distance_dp_query_batch_contiguous(const void *codes, int dp_num,
+                                               size_t stride, const void *query,
+                                               float *dist_list) const override;
+
   float calc_distance_dp_query_unquantized(const void *dp,
                                            const void *query) const override;
 

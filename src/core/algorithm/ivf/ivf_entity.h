@@ -339,6 +339,12 @@ class IVFEntity {
   //! Load per-cluster residual PQ codebooks/centroids (pure PQ-ADC mode)
   int load_pq(const IndexStorage::Pointer &container);
 
+  //! Prepare the per-list ADC query state: fill `lut` with the quantized
+  //! query LUT (built on the residual for L2/Cosine, on the raw query for IP)
+  //! and set `dis0` to the per-list constant added to every ADC distance.
+  void build_pq_list_query(size_t inverted_list_id, const void *query,
+                           std::vector<float> *lut, float *dis0) const;
+
   //! Search a single inverted list using per-cluster residual PQ ADC.
   //! filter may be null (no filter).
   int search_pq(size_t inverted_list_id, const void *query,

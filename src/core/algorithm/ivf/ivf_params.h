@@ -66,6 +66,8 @@ static const std::string PARAM_IVF_BUILDER_PQ_NUM_CHUNK(
     "proxima.ivf.builder.pq_num_chunk");
 static const std::string PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN(
     "proxima.ivf.builder.pq_use_zero_mean");
+static const std::string PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS(
+    "proxima.ivf.builder.pq_quantizer_class");
 
 // searcher params
 static const std::string PARAM_IVF_SEARCHER_SCAN_RATIO(
@@ -92,6 +94,7 @@ static constexpr char const *kInt8QuantizerName = "Int8QuantizerConverter";
 static constexpr char const *kInt4QuantizerName = "Int4QuantizerConverter";
 static constexpr char const *kInt8ReformerName = "Int8QuantizerReformer";
 static constexpr char const *kInt4ReformerName = "Int4QuantizerReformer";
+static constexpr char const *kDefaultPqQuantizerName = "PqInt8Quantizer";
 static constexpr float kNormalizeScaleFactor = 16.0f;
 
 }  // namespace core

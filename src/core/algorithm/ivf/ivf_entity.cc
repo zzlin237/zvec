@@ -453,7 +453,19 @@ void IVFEntity::IVFReformerWrapper::transform(size_t qidx, const float *in,
 }
 
 int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
-  pq_num_chunk_ = header_.pq_num_chunk;
+  //! Quantizer config source of truth: the builder params persisted in
+  //! meta_ plus the serialized codebook blob. Header PQ fields are kept
+  //! only as a fallback for indexes dumped without builder params.
+  const ailego::Params &builder_params = meta_.builder_params();
+  pq_num_chunk_ = builder_params.get_as_uint32(PARAM_IVF_BUILDER_PQ_NUM_CHUNK);
+  if (pq_num_chunk_ == 0) {
+    pq_num_chunk_ = header_.pq_num_chunk;
+  }
+  std::string quantizer_class;
+  builder_params.get(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS, &quantizer_class);
+  if (quantizer_class.empty()) {
+    quantizer_class = kDefaultPqQuantizerName;
+  }
   pq_normalize_ = (meta_.metric_name() == "Cosine");
   pq_ip_ = (meta_.metric_name() == "InnerProduct");
   const size_t nlist = header_.inverted_list_count;
@@ -502,11 +514,12 @@ int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
   pq_meta.set_meta(IndexMeta::DataType::DT_FP32, pq_dim_);
   ailego::Params pq_params;
   pq_params.set("num_chunk", static_cast<int>(pq_num_chunk_));
-  pq_params.set("use_zero_mean", header_.pq_use_zero_mean != 0);
+  //! use_zero_mean is intentionally not passed here: the authoritative value
+  //! is restored from the codebook blob by deserialize() below.
 
-  pq_quantizer_ = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  pq_quantizer_ = IndexFactory::CreateQuantizer(quantizer_class);
   if (!pq_quantizer_) {
-    LOG_ERROR("Failed to create PqInt8Quantizer");
+    LOG_ERROR("Failed to create quantizer %s", quantizer_class.c_str());
     return IndexError_NoExist;
   }
   int ret = pq_quantizer_->init(pq_meta, pq_params);
@@ -529,15 +542,9 @@ int IVFEntity::load_pq(const IndexStorage::Pointer &container) {
   return 0;
 }
 
-int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
-                         const IndexFilter *filter, uint32_t *scan_count,
-                         IndexDocumentHeap *heap,
-                         IndexContext::Stats *context_stats) const {
-  auto list_meta = this->inverted_list_meta(inverted_list_id);
-  ivf_assert(list_meta, IndexError_ReadData);
-  const auto &pq = pq_quantizer_;  // shared codebook for all clusters
-  ivf_assert(pq, IndexError_Runtime);
-
+void IVFEntity::build_pq_list_query(size_t inverted_list_id, const void *query,
+                                    std::vector<float> *lut,
+                                    float *dis0) const {
   //! Build the ADC LUT and the per-list constant `dis0`.
   //! - L2/Cosine: residual query r = (unit(q) if Cosine else q) - c; LUT on r;
   //!   dis0 = 0 (residual ADC directly approximates the metric distance).
@@ -547,41 +554,53 @@ int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
   //!   smaller, the larger the true inner product).
   const float *q = reinterpret_cast<const float *>(query);
   const float *centroid = pq_centroids_.data() + inverted_list_id * pq_dim_;
-  std::vector<float> lut(pq->quantized_query_vector_length() / sizeof(float));
-  float dis0 = 0.0f;
+  *dis0 = 0.0f;
   if (pq_ip_) {
-    pq->quantize_query(q, lut.data());
+    pq_quantizer_->quantize_query(q, lut->data());
     double dot = 0.0;
     for (uint32_t d = 0; d < pq_dim_; ++d) {
       dot += static_cast<double>(q[d]) * centroid[d];
     }
-    dis0 = static_cast<float>(-dot);  // IP distance convention is -dot
-  } else {
-    std::vector<float> resid(pq_dim_);
-    if (pq_normalize_) {
-      for (uint32_t d = 0; d < pq_dim_; ++d) {
-        resid[d] = q[d];
-      }
-      float norm = 0.0f;
-      ailego::Normalizer<float>::L2(resid.data(), pq_dim_, &norm);
-      for (uint32_t d = 0; d < pq_dim_; ++d) {
-        resid[d] -= centroid[d];
-      }
-    } else {
-      for (uint32_t d = 0; d < pq_dim_; ++d) {
-        resid[d] = q[d] - centroid[d];
-      }
-    }
-    pq->quantize_query(resid.data(), lut.data());
+    *dis0 = static_cast<float>(-dot);  // IP distance convention is -dot
+    return;
   }
+  std::vector<float> resid(pq_dim_);
+  if (pq_normalize_) {
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      resid[d] = q[d];
+    }
+    float norm = 0.0f;
+    ailego::Normalizer<float>::L2(resid.data(), pq_dim_, &norm);
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      resid[d] -= centroid[d];
+    }
+  } else {
+    for (uint32_t d = 0; d < pq_dim_; ++d) {
+      resid[d] = q[d] - centroid[d];
+    }
+  }
+  pq_quantizer_->quantize_query(resid.data(), lut->data());
+}
+
+int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
+                         const IndexFilter *filter, uint32_t *scan_count,
+                         IndexDocumentHeap *heap,
+                         IndexContext::Stats *context_stats) const {
+  auto list_meta = this->inverted_list_meta(inverted_list_id);
+  ivf_assert(list_meta, IndexError_ReadData);
+  const auto &pq = pq_quantizer_;  // shared codebook for all clusters
+  ivf_assert(pq, IndexError_Runtime);
+
+  std::vector<float> lut(pq->quantized_query_vector_length() / sizeof(float));
+  float dis0 = 0.0f;
+  this->build_pq_list_query(inverted_list_id, query, &lut, &dis0);
 
   const void *data = nullptr;
   const size_t block_vecs = header_.block_vector_count;
   const size_t block_size = header_.block_size;
-  const size_t code_size = pq_num_chunk_;
+  const size_t code_size = pq->quantized_datapoint_vector_length();
   const size_t batch_size = kBatchBlocks;
   std::vector<float> distances(block_vecs);
-  std::vector<const void *> dp(block_vecs);
 
   for (size_t i = 0; i < list_meta->block_count; i += batch_size) {
     const size_t off = list_meta->offset + i * block_size;
@@ -607,12 +626,9 @@ int IVFEntity::search_pq(size_t inverted_list_id, const void *query,
       auto block_keys = keys + b * block_vecs;
       const char *block_data =
           static_cast<const char *>(data) + b * block_size;
-      for (size_t k = 0; k < vecs_count; ++k) {
-        dp[k] = block_data + k * code_size;
-      }
-      pq->calc_distance_dp_query_batch(dp.data(),
-                                       static_cast<int>(vecs_count), lut.data(),
-                                       distances.data());
+      pq->calc_distance_dp_query_batch_contiguous(
+          block_data, static_cast<int>(vecs_count), code_size, lut.data(),
+          distances.data());
       *(context_stats->mutable_dist_calced_count()) += vecs_count;
       const uint32_t id_off = list_meta->id_offset + (i + b) * block_vecs;
       for (size_t k = 0; k < vecs_count; ++k) {

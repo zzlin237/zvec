@@ -443,6 +443,25 @@ void PqInt8Quantizer::calc_distance_dp_query_batch(const void *const *dp_list,
   // are already cosine distances — no conversion applied here.
 }
 
+void PqInt8Quantizer::calc_distance_dp_query_batch_contiguous(
+    const void *codes, int dp_num, size_t stride, const void *query,
+    float *dist_list) const {
+  // The ISA batch ADC kernel takes a pointer array, so the strided codes are
+  // fanned out in fixed-size stack chunks: same kernel path as the pointer
+  // batch, without a heap allocation per call (the base-class default would
+  // allocate one vector per block).
+  constexpr int kChunk = 64;
+  const char *base = static_cast<const char *>(codes);
+  const void *dp[kChunk];
+  for (int i = 0; i < dp_num; i += kChunk) {
+    const int n = std::min(kChunk, dp_num - i);
+    for (int j = 0; j < n; ++j) {
+      dp[j] = base + static_cast<size_t>(i + j) * stride;
+    }
+    batch_adc_fn_(dp, query, static_cast<size_t>(n), num_chunk_, dist_list + i);
+  }
+}
+
 float PqInt8Quantizer::calc_distance_dp_query_unquantized(
     const void *dp, const void *query) const {
   // Build LUT on the fly, then use ADC.

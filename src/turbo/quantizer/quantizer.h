@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 #include <zvec/ailego/container/params.h>
 #include <zvec/core/framework/index_holder.h>
 #include <zvec/core/framework/index_meta.h>
@@ -106,6 +107,26 @@ class Quantizer {
   virtual void calc_distance_dp_query_batch(const void *const *dp_list,
                                             int dp_num, const void *query,
                                             float *dist_list) const = 0;
+
+  //! Batched distance over CONTIGUOUS quantized datapoints (codes laid out
+  //! back-to-back with a fixed stride in bytes). Block-scan oriented callers
+  //! (e.g. IVF inverted lists) should prefer this overload: it avoids the
+  //! per-vector pointer array and lets implementations consume the block
+  //! directly (a prerequisite for packed-layout quantizers like FastScan).
+  //! The default implementation forwards to the pointer-array batch.
+  virtual void calc_distance_dp_query_batch_contiguous(const void *codes,
+                                                       int dp_num,
+                                                       size_t stride,
+                                                       const void *query,
+                                                       float *dist_list) const {
+    std::vector<const void *> dp_list(static_cast<size_t>(dp_num));
+    const char *base = static_cast<const char *>(codes);
+    for (int i = 0; i < dp_num; ++i) {
+      dp_list[static_cast<size_t>(i)] = base + static_cast<size_t>(i) * stride;
+    }
+    this->calc_distance_dp_query_batch(dp_list.data(), dp_num, query,
+                                       dist_list);
+  }
 
   //! Distance between a quantized datapoint and an unquantized query
   virtual float calc_distance_dp_query_unquantized(const void *dp,
