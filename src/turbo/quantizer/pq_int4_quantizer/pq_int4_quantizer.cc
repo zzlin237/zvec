@@ -111,7 +111,7 @@ int PqInt4Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
     use_zero_mean_ = false;
   }
 
-  meta_.set_meta(IndexMeta::DataType::DT_INT8, num_chunk_);
+  meta_.set_meta(IndexMeta::DataType::DT_INT4, num_chunk_);
   return 0;
 }
 
@@ -542,7 +542,7 @@ int PqInt4Quantizer::quantize(const void *query, const IndexQueryMeta &qmeta,
   quantize_query(query, &(*out)[0]);
 
   *ometa = qmeta;
-  ometa->set_meta(IndexMeta::DataType::DT_INT8, num_chunk_,
+  ometa->set_meta(IndexMeta::DataType::DT_INT4, num_chunk_,
                   static_cast<uint32_t>(type_), 0);
   return 0;
 }
@@ -714,7 +714,7 @@ int PqInt4Quantizer::deserialize(const void *data, size_t len) {
     input_data_type_ = static_cast<DataType>(payload.input_data_type);
   }
 
-  meta_.set_meta(IndexMeta::DataType::DT_INT8, num_chunk_);
+  meta_.set_meta(IndexMeta::DataType::DT_INT4, num_chunk_);
 
   size_t type_size = element_size();
   size_t centroids_bytes =
