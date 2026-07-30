@@ -14,12 +14,12 @@
 #pragma once
 
 #include <core/quantizer/quantizer_params.h>
-#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_framework.h>
 #include "metric/metric_params.h"
 #include "ivf_distance_calculator.h"
 #include "ivf_index_format.h"
 #include "ivf_params.h"
+#include "ivf_residual_codec.h"
 
 namespace zvec {
 namespace core {
@@ -337,17 +337,11 @@ class IVFEntity {
   int load_header(const IndexStorage::Pointer &container);
 
   //! Load per-cluster residual PQ codebooks/centroids (pure PQ-ADC mode)
-  int load_pq(const IndexStorage::Pointer &container);
-
-  //! Prepare the per-list ADC query state: fill `lut` with the quantized
-  //! query LUT (built on the residual for L2/Cosine, on the raw query for IP)
-  //! and set `dis0` to the per-list constant added to every ADC distance.
-  void build_pq_list_query(size_t inverted_list_id, const void *query,
-                           std::vector<float> *lut, float *dis0) const;
+  int load_residual_codec(const IndexStorage::Pointer &container);
 
   //! Search a single inverted list using per-cluster residual PQ ADC.
   //! filter may be null (no filter).
-  int search_pq(size_t inverted_list_id, const void *query,
+  int search_residual(size_t inverted_list_id, const void *query,
                 const IndexFilter *filter, uint32_t *scan_count,
                 IndexDocumentHeap *heap,
                 IndexContext::Stats *context_stats) const;
@@ -379,15 +373,11 @@ class IVFEntity {
   bool norm_value_sqrt_{false};  // does the norm value need to sqrt
   InvertedIndexHeader header_;
 
-  //! Per-cluster residual PQ state (pure PQ-ADC mode).
-  //! Single shared PQ codebook (faiss-style): one quantizer for all clusters.
-  turbo::Quantizer::Pointer pq_quantizer_{};
-  std::vector<float> pq_centroids_{};  // nlist * pq_dim_ (normalized if Cosine)
-  uint32_t pq_dim_{0};
-  uint32_t pq_num_chunk_{0};
-  bool pq_enabled_{false};
-  bool pq_normalize_{false};  // true for Cosine metric
-  bool pq_ip_{false};         // true for InnerProduct metric (residual+dis0)
+  //! Per-cluster residual PQ state (pure PQ-ADC mode). All quantization
+  //! semantics (metric policy, residuals, LUT, codebook) live inside the
+  //! opaque codec; the entity only orchestrates inverted lists and storage.
+  IVFResidualCodec::Pointer residual_codec_{};
+  bool residual_enabled_{false};
 };
 
 }  // namespace core

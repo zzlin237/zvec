@@ -14,11 +14,11 @@
 #pragma once
 
 #include <core/quantizer/quantizer_params.h>
-#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_framework.h>
 #include "metric/metric_params.h"
 #include "ivf_index_format.h"
 #include "ivf_params.h"
+#include "ivf_residual_codec.h"
 #include "ivf_utility.h"
 
 namespace zvec {
@@ -208,7 +208,7 @@ class IVFDumper {
 
   //! Record per-cluster residual PQ metadata into the inverted header. Must be
   //! called before dump_inverted_vector_finished() writes the header segment.
-  void set_pq_meta(uint32_t num_chunk, uint8_t use_zero_mean) {
+  void set_residual_meta(uint32_t num_chunk, uint8_t use_zero_mean) {
     header_.pq_enabled = 1;
     header_.pq_num_chunk = num_chunk;
     header_.pq_use_zero_mean = use_zero_mean;
@@ -218,13 +218,12 @@ class IVFDumper {
   //! via quantizer->pack_codes() before it is written, and partial tail
   //! blocks are written at full block size (the packed layout interleaves
   //! all 32 lanes, so it cannot be truncated).
-  void set_pq_packer(const turbo::Quantizer::Pointer &quantizer) {
-    pq_packer_ = quantizer;
+  void set_residual_packer(const turbo::Quantizer::Pointer &quantizer) {
+    residual_packer_ = quantizer;
   }
 
   //! Dump the shared residual PQ codebook and fp32 centroids.
-  int dump_pq(const turbo::Quantizer::Pointer &quantizer,
-              const std::vector<float> &centroids, uint32_t dim);
+  int dump_residual_codec(const IVFResidualCodec &codec);
 
   //! Dump the original vector, which doesnot been quantized
   int dump_original_vector(const void *data, size_t size);
@@ -267,7 +266,7 @@ class IVFDumper {
   Block block_{};           // vectors grouped in block
   const IndexMeta meta_{};  // IndexMeta of the inverted index
   const IndexDumper::Pointer dumper_{};
-  turbo::Quantizer::Pointer pq_packer_{};  // packs blocks when set (FastScan)
+  turbo::Quantizer::Pointer residual_packer_{};  // packs blocks when set (FastScan)
   size_t block_vector_count_{kDefaultBlockCount};
   std::vector<InvertedListMeta> inverted_lists_meta_{};
   std::vector<uint64_t> keys_{};

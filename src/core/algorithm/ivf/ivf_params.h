@@ -94,7 +94,6 @@ static constexpr char const *kInt8QuantizerName = "Int8QuantizerConverter";
 static constexpr char const *kInt4QuantizerName = "Int4QuantizerConverter";
 static constexpr char const *kInt8ReformerName = "Int8QuantizerReformer";
 static constexpr char const *kInt4ReformerName = "Int4QuantizerReformer";
-static constexpr char const *kDefaultPqQuantizerName = "PqInt8Quantizer";
 static constexpr float kNormalizeScaleFactor = 16.0f;
 
 }  // namespace core

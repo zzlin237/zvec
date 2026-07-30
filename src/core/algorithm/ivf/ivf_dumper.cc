@@ -237,22 +237,19 @@ int IVFDumper::dump_quantizer_params(
       params.data(), params.size() * sizeof(InvertedIntegerQuantizerParams));
 }
 
-int IVFDumper::dump_pq(const turbo::Quantizer::Pointer &quantizer,
-                       const std::vector<float> &centroids, uint32_t dim) {
-  (void)dim;
+int IVFDumper::dump_residual_codec(const IVFResidualCodec &codec) {
   //! 1) fp32 centroids segment (nlist * dim)
+  const std::vector<float> &centroids = codec.centroids();
   int ret = this->dump_segment(IVF_PQ_CENTROIDS_SEG_ID, centroids.data(),
                                centroids.size() * sizeof(float));
   ivf_check_error_code(ret);
 
   //! 2) Single shared codebook blob (faiss-style: one codebook for all lists).
   std::string blob;
-  if (quantizer) {
-    ret = quantizer->serialize(&blob);
-    if (ret != 0) {
-      LOG_ERROR("Failed to serialize shared PQ codebook");
-      return IndexError_Runtime;
-    }
+  ret = codec.serialize_codebook(&blob);
+  if (ret != 0) {
+    LOG_ERROR("Failed to serialize shared PQ codebook");
+    return IndexError_Runtime;
   }
   ret = this->dump_segment(IVF_PQ_CODEBOOKS_SEG_ID, blob.data(), blob.size());
   ivf_check_error_code(ret);
@@ -418,12 +415,12 @@ int IVFDumper::dump_block(void) {
   const void *data = block_.data();
   size_t size = ailego_align(block_.bytes(), 32);
   std::vector<uint8_t> packed;
-  if (pq_packer_) {
+  if (residual_packer_) {
     //! Packed-code quantizer (FastScan): repack the plain codes into the
     //! block layout.  The packed layout interleaves all 32 lanes (missing
     //! tail lanes are zero-filled), so the full block is always written.
     packed.resize(ailego_align(block_.block_size(), 32), 0);
-    int ret = pq_packer_->pack_codes(block_.data(), block_.size(),
+    int ret = residual_packer_->pack_codes(block_.data(), block_.size(),
                                      block_.element_size(), packed.data());
     if (ret != 0) {
       LOG_ERROR("Failed to pack codes, ret=%d", ret);

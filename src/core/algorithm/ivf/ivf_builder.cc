@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "ivf_builder.h"
-#include <ailego/math/normalizer.h>
 #include <ailego/pattern/defer.h>
 #include <functional>
 #include <random>
@@ -253,15 +252,8 @@ int IVFBuilder::cleanup(void) {
   quantized_meta_ = meta_;
   quantizers_.clear();
 
-  pq_quantizer_.reset();
-  pq_centroids_.clear();
-  pq_quantizer_class_.clear();
-  pq_dim_ = 0;
-  pq_num_chunk_ = 0;
-  pq_enable_ = false;
-  pq_use_zero_mean_ = false;
-  pq_normalize_ = false;
-  pq_ip_ = false;
+  residual_codec_.reset();
+  residual_enable_ = false;
 
   error_ = false;
   err_code_ = 0;
@@ -379,39 +371,12 @@ int IVFBuilder::train(const IndexTrainer::Pointer &trainer) {
   ret = centroid_index_->build(centroid_list);
   ivf_check_with_msg(ret, "Failed to build centroid index");
 
-  //! Extract fp32 centroids (in the same leaf order the centroid index uses
-  //! for labeling) so residuals v - centroid_i can be computed at build/dump.
-  if (pq_enable_) {
-    pq_dim_ = converted_meta_.dimension();
-    pq_centroids_.clear();
-    pq_centroids_.reserve(centroid_index_->centroids_count() * pq_dim_);
-    std::function<void(const IndexCluster::CentroidList &)> collect_leaves =
-        [&](const IndexCluster::CentroidList &cents) {
-          for (const auto &it : cents) {
-            if (it.subitems().empty()) {
-              const float *f = reinterpret_cast<const float *>(it.feature());
-              pq_centroids_.insert(pq_centroids_.end(), f, f + pq_dim_);
-            } else {
-              collect_leaves(it.subitems());
-            }
-          }
-        };
-    collect_leaves(centroid_list);
-    if (pq_centroids_.size() !=
-        static_cast<size_t>(centroid_index_->centroids_count()) * pq_dim_) {
-      LOG_ERROR("IVF PQ: collected centroids(%zu) mismatch expected(%zu)",
-                pq_centroids_.size(),
-                static_cast<size_t>(centroid_index_->centroids_count()) *
-                    pq_dim_);
-      return IndexError_Runtime;
-    }
-    if (pq_normalize_) {
-      for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
-        float norm = 0.0f;
-        ailego::Normalizer<float>::L2(pq_centroids_.data() + i * pq_dim_,
-                                      pq_dim_, &norm);
-      }
-    }
+  //! Create the residual PQ codec and hand it the fp32 centroids (in the
+  //! same leaf order the centroid index uses for labeling) so residuals
+  //! v - centroid_i can be computed at build/dump.
+  if (residual_enable_) {
+    ret = this->create_residual_codec(centroid_list);
+    ivf_check_error_code(ret);
   }
 
   if (params_.has(PARAM_IVF_BUILDER_OPTIMIZER_QUANTIZER_CLASS)) {
@@ -494,8 +459,8 @@ int IVFBuilder::build(IndexThreads::Pointer threads,
   ivf_check_with_msg(ret, "Failed to build index for %s",
                      IndexError::What(ret));
 
-  if (pq_enable_) {
-    ret = this->prepare_pq_quantizers(threads.get());
+  if (residual_enable_) {
+    ret = this->prepare_residual_codec(threads.get());
     ivf_check_error_code(ret);
   } else {
     ret = this->prepare_quantizer(threads.get());
@@ -552,7 +517,7 @@ int IVFBuilder::CheckAndUpdateMajorOrder(IndexMeta &meta) {
   // metric (e.g. Cosine) does not apply to the code bytes and may not even
   // support the quantized data type (Cosine+INT8 fails to init), so skip the
   // metric-based column-major probing and keep the codes row-major.
-  if (pq_enable_) {
+  if (residual_enable_) {
     meta.set_major_order(IndexMeta::MO_ROW);
     if (block_vector_count_ * meta.element_size() % 32 != 0) {
       LOG_ERROR(
@@ -677,9 +642,9 @@ int IVFBuilder::parse_general_params(const ailego::Params &params) {
   //! But per-cluster residual PQ implements IP directly in the raw space
   //! (faiss-style residual + per-list dis0=<q,c>), so the MIPS augmentation
   //! must be skipped for IP+PQ to keep the native dimension (e.g. 768).
-  bool pq_enabled_param = false;
-  params.get(PARAM_IVF_BUILDER_PQ_ENABLE, &pq_enabled_param);
-  if (meta_.metric_name() == kIPMetricName && !pq_enabled_param) {
+  bool residual_enabled_param = false;
+  params.get(PARAM_IVF_BUILDER_PQ_ENABLE, &residual_enabled_param);
+  if (meta_.metric_name() == kIPMetricName && !residual_enabled_param) {
     converter_class_ = kMipsConverterName;
   }
   params.get(PARAM_IVF_BUILDER_CONVERTER_CLASS, &converter_class_);
@@ -705,44 +670,16 @@ int IVFBuilder::parse_general_params(const ailego::Params &params) {
     return IndexError_InvalidArgument;
   }
 
-  //! Per-cluster residual PQ (pure PQ-ADC). L2/Cosine/InnerProduct.
-  params.get(PARAM_IVF_BUILDER_PQ_ENABLE, &pq_enable_);
-  if (pq_enable_) {
-    const std::string &metric = meta_.metric_name();
-    if (metric != kL2MetricName && metric != "Cosine" &&
-        metric != kIPMetricName) {
-      LOG_WARN("IVF residual PQ is only supported for "
-               "SquaredEuclidean/Cosine/InnerProduct, metric=%s; disabling PQ",
-               metric.c_str());
-      pq_enable_ = false;
-    } else {
-      pq_normalize_ = (metric == "Cosine");
-      pq_ip_ = (metric == kIPMetricName);
-      pq_num_chunk_ = params.get_as_uint32(PARAM_IVF_BUILDER_PQ_NUM_CHUNK);
-      if (pq_num_chunk_ == 0) {
-        pq_num_chunk_ = 8;
-      }
-      //! Pass-through only: the metric policy (e.g. zero-mean centering is
-      //! invalid for InnerProduct) is decided solely by the quantizer's
-      //! init(), which is the single source of truth for such rules.
-      pq_use_zero_mean_ = true;
-      params.get(PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, &pq_use_zero_mean_);
-      pq_quantizer_class_ = kDefaultPqQuantizerName;
-      params.get(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS, &pq_quantizer_class_);
-      if (pq_quantizer_class_.empty()) {
-        pq_quantizer_class_ = kDefaultPqQuantizerName;
-      }
-      if (meta_.dimension() % pq_num_chunk_ != 0) {
-        LOG_ERROR("IVF PQ: dim(%u) not divisible by num_chunk(%u)",
-                  meta_.dimension(), pq_num_chunk_);
-        return IndexError_InvalidArgument;
-      }
-      LOG_INFO(
-          "IVF residual PQ enabled: quantizer=%s num_chunk=%u "
-          "use_zero_mean=%d normalize=%d ip=%d",
-          pq_quantizer_class_.c_str(), pq_num_chunk_, pq_use_zero_mean_,
-          pq_normalize_, pq_ip_);
-    }
+  //! Per-cluster residual PQ (pure PQ-ADC). The quantization semantics
+  //! (metric policy, parameter defaults/validation) belong to the codec;
+  //! here only the graceful fallback for unsupported metrics is kept.
+  params.get(PARAM_IVF_BUILDER_PQ_ENABLE, &residual_enable_);
+  if (residual_enable_ &&
+      !IVFResidualCodec::SupportsMetric(meta_.metric_name())) {
+    LOG_WARN("IVF residual PQ is only supported for "
+             "SquaredEuclidean/Cosine/InnerProduct, metric=%s; disabling PQ",
+             meta_.metric_name().c_str());
+    residual_enable_ = false;
   }
 
   return 0;
@@ -838,12 +775,13 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
     dumped_ids.reserve(holder_->count());
     record_dumped_id = [&](uint32_t id) { dumped_ids.emplace_back(id); };
   }
-  if (pq_enable_) {
-    //! Per-cluster residual PQ: store quantizer-defined code bytes.
+  if (residual_enable_) {
+    //! Per-cluster residual PQ: store codec-defined code bytes.
     //! Header PQ fields are informational only; the authoritative quantizer
     //! config is restored from the serialized codebook blob on load.
-    ivf_dumper->set_pq_meta(pq_num_chunk_, pq_use_zero_mean_ ? 1 : 0);
-    if (pq_quantizer_->requires_packed_codes()) {
+    ivf_dumper->set_residual_meta(residual_codec_->num_chunk(),
+                            residual_codec_->use_zero_mean() ? 1 : 0);
+    if (residual_codec_->requires_packed_codes()) {
       //! FastScan blocks interleave exactly 32 codes; the packed layout only
       //! works when one storage block holds one FastScan block.
       if (block_vector_count_ != kDefaultBlockCount) {
@@ -852,22 +790,17 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
             kDefaultBlockCount, block_vector_count_);
         return IndexError_InvalidArgument;
       }
-      ivf_dumper->set_pq_packer(pq_quantizer_);
+      ivf_dumper->set_residual_packer(residual_codec_->quantizer());
     }
-    const size_t pq_code_size =
-        pq_quantizer_->quantized_datapoint_vector_length();
-    std::vector<uint8_t> code(pq_code_size);
-    std::vector<float> resid(pq_dim_);
+    std::vector<uint8_t> code(residual_codec_->code_size());
     for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
       ailego_assert_with(i < labels_.size(), "Index Overflow");
-      const float *centroid = pq_centroids_.data() + i * pq_dim_;
       for (size_t j = 0; j < labels_[i].size(); ++j) {
         auto id = labels_[i][j];
         record_dumped_id(id);
         const float *v =
             reinterpret_cast<const float *>(holder_->element(id));
-        this->compute_pq_residual(v, centroid, resid.data());
-        pq_quantizer_->quantize_data(resid.data(), code.data());
+        residual_codec_->encode(v, i, code.data());
         ret = ivf_dumper->dump_inverted_vector(i, holder_->key(id),
                                                code.data());
         ivf_check_error_code(ret);
@@ -920,8 +853,8 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
                                         centroid_index->size());
   ivf_check_with_msg(ret, "Failed to dump CentroidIndex");
 
-  if (pq_enable_) {
-    ret = ivf_dumper->dump_pq(pq_quantizer_, pq_centroids_, pq_dim_);
+  if (residual_enable_) {
+    ret = ivf_dumper->dump_residual_codec(*residual_codec_);
     ivf_check_with_msg(ret, "Failed to dump shared PQ codebook");
   }
 
@@ -1033,44 +966,78 @@ int IVFBuilder::prepare_quantizer(IndexThreads *threads) {
   return 0;
 }
 
-//! Residual orchestration is an index-level concern (only IVF knows the
-//! coarse centroid): Cosine normalizes BEFORE subtracting the centroid so
-//! train/encode/search all operate in the same unit space. Metric policies
-//! internal to the quantizer (zero-mean validity, LUT metric selection) are
-//! decided by the quantizer's init() alone.
-void IVFBuilder::compute_pq_residual(const float *vec, const float *centroid,
-                                    float *out) const {
-  if (pq_normalize_) {
-    for (uint32_t d = 0; d < pq_dim_; ++d) {
-      out[d] = vec[d];
-    }
-    float norm = 0.0f;
-    ailego::Normalizer<float>::L2(out, pq_dim_, &norm);
-    for (uint32_t d = 0; d < pq_dim_; ++d) {
-      out[d] -= centroid[d];
-    }
-  } else {
-    for (uint32_t d = 0; d < pq_dim_; ++d) {
-      out[d] = vec[d] - centroid[d];
-    }
+//! Create the residual codec: map the IVF config surface onto the codec's
+//! generic param keys and pass through untouched. All quantization semantics
+//! (metric policy, defaults, dim/num_chunk validation, quantizer creation)
+//! are owned by the codec; the builder only supplies the coarse centroids.
+int IVFBuilder::create_residual_codec(const IndexCluster::CentroidList &centroid_list) {
+  residual_codec_ = std::make_shared<IVFResidualCodec>();
+  if (!residual_codec_) {
+    return IndexError_NoMemory;
   }
+
+  ailego::Params codec_params;
+  codec_params.set("dim", converted_meta_.dimension());
+  codec_params.set(
+      "num_chunk", params_.get_as_uint32(PARAM_IVF_BUILDER_PQ_NUM_CHUNK));
+  //! Build-time default is zero-mean on; the metric policy (e.g. zero-mean
+  //! centering is invalid for InnerProduct) is decided by the quantizer.
+  bool use_zero_mean = true;
+  params_.get(PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, &use_zero_mean);
+  codec_params.set("use_zero_mean", use_zero_mean);
+  std::string quantizer_class;
+  params_.get(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS, &quantizer_class);
+  codec_params.set("quantizer_class", quantizer_class);
+  codec_params.set("thread_count", static_cast<int>(thread_count_));
+
+  int ret = residual_codec_->init(meta_, codec_params);
+  ivf_check_with_msg(ret, "Failed to init residual PQ codec, ret=%d", ret);
+
+  //! Extract fp32 centroids in the same leaf order the centroid index uses
+  //! for labeling.
+  const uint32_t dim = residual_codec_->dim();
+  const size_t nlist = centroid_index_->centroids_count();
+  std::vector<float> centroids;
+  centroids.reserve(nlist * dim);
+  std::function<void(const IndexCluster::CentroidList &)> collect_leaves =
+      [&](const IndexCluster::CentroidList &cents) {
+        for (const auto &it : cents) {
+          if (it.subitems().empty()) {
+            const float *f = reinterpret_cast<const float *>(it.feature());
+            centroids.insert(centroids.end(), f, f + dim);
+          } else {
+            collect_leaves(it.subitems());
+          }
+        }
+      };
+  collect_leaves(centroid_list);
+
+  ret = residual_codec_->set_centroids(std::move(centroids), nlist);
+  ivf_check_with_msg(ret, "Failed to set PQ codec centroids, ret=%d", ret);
+
+  LOG_INFO("IVF residual PQ enabled: quantizer=%s num_chunk=%u "
+           "use_zero_mean=%d",
+           residual_codec_->quantizer_class().c_str(), residual_codec_->num_chunk(),
+           residual_codec_->use_zero_mean());
+  return 0;
 }
 
-int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
+int IVFBuilder::prepare_residual_codec(IndexThreads *threads) {
   (void)threads;
   const size_t nlist = centroid_index_->centroids_count();
+  const uint32_t dim = residual_codec_->dim();
 
   //! Shared-codebook training set (faiss-style): reservoir-sample up to
   //! kPqTrainSample residuals (v - c_i) pooled across all clusters. Bounds
-  //! training memory to kPqTrainSample * pq_dim_ floats regardless of dataset
+  //! training memory to kPqTrainSample * dim floats regardless of dataset
   //! size (PqInt8Quantizer::train also subsamples to the same limit).
   constexpr size_t kPqTrainSample = 65536;
   const size_t cap = std::min<size_t>(holder_->count(), kPqTrainSample);
-  std::vector<float> sample(cap * static_cast<size_t>(pq_dim_));
+  std::vector<float> sample(cap * static_cast<size_t>(dim));
   std::mt19937 rng(42);
   size_t seen = 0;
   for (size_t i = 0; i < nlist; ++i) {
-    const float *centroid = pq_centroids_.data() + i * pq_dim_;
+    const float *centroid = residual_codec_->centroid(i);
     for (uint32_t id : labels_[i]) {
       size_t slot = cap;  // sentinel: not selected
       if (seen < cap) {
@@ -1085,68 +1052,47 @@ int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
       if (slot < cap) {
         const float *vec =
             reinterpret_cast<const float *>(holder_->element(id));
-        this->compute_pq_residual(vec, centroid, sample.data() + slot * pq_dim_);
+        residual_codec_->compute_residual(vec, centroid, sample.data() + slot * dim);
       }
       ++seen;
     }
   }
   if (seen < cap) {  // fewer vectors than the cap
-    sample.resize(seen * static_cast<size_t>(pq_dim_));
+    sample.resize(seen * static_cast<size_t>(dim));
   }
-  const size_t train_rows = sample.size() / static_cast<size_t>(pq_dim_);
+  const size_t train_rows = sample.size() / static_cast<size_t>(dim);
 
-  //! One shared PQ codebook. Encoding is always L2 (fp32_l2_batch_fn_); the
-  //! init metric only selects the search LUT: InnerProduct for IP, else L2.
-  IndexMeta pq_meta = meta_;
-  pq_meta.set_metric(pq_ip_ ? kIPMetricName : kL2MetricName, 0,
-                     ailego::Params());
-  pq_meta.set_reformer(std::string(), 0, ailego::Params());
-  pq_meta.set_converter(std::string(), 0, ailego::Params());
-  pq_meta.set_meta(IndexMeta::DataType::DT_FP32, pq_dim_);
-
-  ailego::Params pq_params;
-  pq_params.set("num_chunk", static_cast<int>(pq_num_chunk_));
-  pq_params.set("use_zero_mean", pq_use_zero_mean_);
-  pq_params.set("thread_count", static_cast<int>(thread_count_));
-  // IVF uses ADC only; skip the SDC dist_table.
-  pq_params.set("compute_sdc", false);
-
-  pq_quantizer_ = IndexFactory::CreateQuantizer(pq_quantizer_class_);
-  if (!pq_quantizer_) {
-    LOG_ERROR("Failed to create quantizer %s", pq_quantizer_class_.c_str());
-    return IndexError_NoExist;
-  }
-  int ret = pq_quantizer_->init(pq_meta, pq_params);
-  ivf_check_with_msg(ret, "Failed to init shared residual PQ, ret=%d", ret);
-
-  auto holder =
-      std::make_shared<BufferedFloatHolder>(std::move(sample), pq_dim_);
-  ret = pq_quantizer_->train(holder);
+  auto holder = std::make_shared<BufferedFloatHolder>(std::move(sample), dim);
+  int ret = residual_codec_->train(holder);
   ivf_check_with_msg(ret, "Failed to train shared residual PQ, ret=%d", ret);
 
-  //! Store the quantized codes row-major.  The per-vector code length is
-  //! quantizer-defined: uint8[num_chunk] for PqInt8Quantizer, nibble-packed
-  //! ceil(num_chunk / 2) bytes for FastScan (PqFastQuantizer).
-  quantized_meta_ = meta_;
-  quantized_meta_.set_reformer(std::string(), 0, ailego::Params());
-  quantized_meta_.set_converter(std::string(), 0, ailego::Params());
-  const uint32_t pq_code_size =
-      static_cast<uint32_t>(pq_quantizer_->quantized_datapoint_vector_length());
-  quantized_meta_.set_meta(IndexMeta::DataType::DT_INT8, pq_code_size);
+  //! Retrieve the quantized storage meta from the codec's quantizer output
+  //! meta (origin-style ordered retrieval: data type, code dimension and
+  //! extra meta size are quantizer-defined, e.g. uint8[num_chunk] for
+  //! PqInt8Quantizer, nibble-packed for FastScan) instead of assembling the
+  //! layout by hand. Only two IVF-level concerns are overridden: the
+  //! original search metric (the load side derives the Cosine/IP policy
+  //! from it) and the row-major block layout.
+  quantized_meta_ = residual_codec_->meta();
+  quantized_meta_.set_metric(meta_.metric_name(), meta_.metric_revision(),
+                             ailego::Params(meta_.metric_params()));
   quantized_meta_.set_major_order(IndexMeta::MO_ROW);
 
-  //! Persist the PQ config in the inverted-header meta: IVFEntity::load_pq
-  //! restores the quantizer class and num_chunk from these builder params
-  //! (falling back to the default class / header fields otherwise).
-  ailego::Params pq_builder_params;
-  pq_builder_params.set(PARAM_IVF_BUILDER_PQ_NUM_CHUNK, pq_num_chunk_);
-  pq_builder_params.set(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS,
-                        pq_quantizer_class_);
-  quantized_meta_.set_builder("IVFBuilder", 0, std::move(pq_builder_params));
+  //! Persist the residual codec config in the inverted-header meta:
+  //! IVFEntity::load_residual_codec restores the quantizer class and
+  //! num_chunk from these builder params (falling back to the default
+  //! class / header fields otherwise).
+  ailego::Params residual_builder_params;
+  residual_builder_params.set(PARAM_IVF_BUILDER_PQ_NUM_CHUNK,
+                              residual_codec_->num_chunk());
+  residual_builder_params.set(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS,
+                              residual_codec_->quantizer_class());
+  quantized_meta_.set_builder("IVFBuilder", 0,
+                              std::move(residual_builder_params));
 
   LOG_INFO("Trained shared residual PQ codebook: nlist=%zu num_chunk=%u "
-           "train_rows=%zu ip=%d",
-           nlist, pq_num_chunk_, train_rows, pq_ip_);
+           "train_rows=%zu",
+           nlist, residual_codec_->num_chunk(), train_rows);
   return 0;
 }
 

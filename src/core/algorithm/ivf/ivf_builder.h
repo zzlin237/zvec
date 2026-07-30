@@ -15,8 +15,8 @@
 
 #include <zvec/core/framework/index_builder.h>
 #include <zvec/core/framework/index_meta.h>
-#include <turbo/quantizer/quantizer.h>
 #include "ivf_centroid_index.h"
+#include "ivf_residual_codec.h"
 
 namespace zvec {
 namespace core {
@@ -228,13 +228,13 @@ class IVFBuilder : public IndexBuilder {
   //! Prepare the quantizer for inverted index
   int prepare_quantizer(IndexThreads *threads);
 
-  //! Prepare a single shared residual PQ quantizer (faiss-style: one codebook
-  //! trained on residuals v - centroid_i pooled across all clusters).
-  int prepare_pq_quantizers(IndexThreads *threads);
+  //! Create the residual PQ codec and hand it the coarse centroid table
+  //! (called at train time, once the centroid index is built).
+  int create_residual_codec(const IndexCluster::CentroidList &centroid_list);
 
-  //! Compute residual = (normalize? unit(v) : v) - centroid into out (dim).
-  void compute_pq_residual(const float *vec, const float *centroid,
-                           float *out) const;
+  //! Train the shared residual PQ codebook (faiss-style: one codebook
+  //! trained on residuals v - centroid_i pooled across all clusters).
+  int prepare_residual_codec(IndexThreads *threads);
 
   //! Quantize the centrods list
   int quantize_centroids();
@@ -308,17 +308,11 @@ class IVFBuilder : public IndexBuilder {
   IndexMeta quantized_meta_{};
   std::vector<IndexConverter::Pointer> quantizers_{};
 
-  //! Per-cluster residual PQ state (pure PQ-ADC mode).
-  //! Single shared PQ codebook (faiss-style): one quantizer for all clusters.
-  turbo::Quantizer::Pointer pq_quantizer_{};
-  std::vector<float> pq_centroids_{};  // nlist * pq_dim_ (normalized if Cosine)
-  std::string pq_quantizer_class_{};   // factory name, default PqInt8Quantizer
-  uint32_t pq_dim_{0};
-  uint32_t pq_num_chunk_{0};
-  bool pq_enable_{false};
-  bool pq_use_zero_mean_{false};
-  bool pq_normalize_{false};  // true for Cosine metric
-  bool pq_ip_{false};         // true for InnerProduct metric (faiss residual+dis0)
+  //! Per-cluster residual PQ state (pure PQ-ADC mode). All quantization
+  //! semantics (metric policy, residuals, LUT, codebook) live inside the
+  //! opaque codec; the builder only orchestrates clusters and storage.
+  IVFResidualCodec::Pointer residual_codec_{};
+  bool residual_enable_{false};
 
   std::atomic_bool error_{false};
   int err_code_{0};
