@@ -3827,6 +3827,127 @@ TEST_F(IVFSearcherTest, TestNprobeClampToListCount) {
   EXPECT_EQ(0, ret);
 }
 
+TEST_F(IVFSearcherTest, TestResidualPqFastScanEndToEnd) {
+  // Residual PQ end-to-end: build + dump with a given pq_quantizer_class,
+  // load, full-scan search, and measure recall@topk against exact L2.
+  dimension_ = 32u;
+  index_meta_.set_meta(IndexMeta::DataType::DT_FP32, dimension_);
+  index_meta_.set_metric("SquaredEuclidean", 0, Params());
+
+  const size_t count = 2000;
+  const size_t topk = 10;
+  const size_t qnum = 20;
+
+  // Deterministic random dataset.
+  std::vector<std::vector<float>> data(count);
+  std::mt19937 gen(123);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+  for (size_t i = 0; i < count; ++i) {
+    data[i].resize(dimension_);
+    for (size_t j = 0; j < dimension_; ++j) {
+      data[i][j] = dist(gen);
+    }
+  }
+
+  // Exact L2 ground truth for the first qnum vectors as queries.
+  auto l2 = [&](const float *a, const float *b) {
+    float s = 0.0f;
+    for (size_t j = 0; j < dimension_; ++j) {
+      float d = a[j] - b[j];
+      s += d * d;
+    }
+    return s;
+  };
+  std::vector<std::vector<uint64_t>> gt(qnum);
+  for (size_t q = 0; q < qnum; ++q) {
+    std::vector<std::pair<float, uint64_t>> all(count);
+    for (size_t i = 0; i < count; ++i) {
+      all[i] = {l2(data[q].data(), data[i].data()), i};
+    }
+    std::partial_sort(all.begin(), all.begin() + topk, all.end());
+    for (size_t k = 0; k < topk; ++k) {
+      gt[q].push_back(all[k].second);
+    }
+  }
+
+  auto run_recall = [&](const std::string &quantizer_class) -> double {
+    File::RemovePath(index_path_);
+
+    auto *raw_holder =
+        new MultiPassIndexHolder<IndexMeta::DataType::DT_FP32>(dimension_);
+    for (size_t i = 0; i < count; ++i) {
+      NumericalVector<float> vec(dimension_);
+      for (size_t j = 0; j < dimension_; ++j) {
+        vec[j] = data[i][j];
+      }
+      raw_holder->emplace(i, vec);
+    }
+    holder_.reset(raw_holder);
+
+    IVFBuilder builder;
+    Params build_params;
+    build_params.set(PARAM_IVF_BUILDER_CENTROID_COUNT, "8");
+    build_params.set(PARAM_IVF_BUILDER_CLUSTER_CLASS, "KmeansCluster");
+    build_params.set(PARAM_IVF_BUILDER_PQ_ENABLE, true);
+    build_params.set(PARAM_IVF_BUILDER_PQ_NUM_CHUNK, (uint32_t)8);
+    build_params.set(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS, quantizer_class);
+
+    EXPECT_EQ(0, builder.init(index_meta_, build_params));
+    EXPECT_EQ(0, builder.train(threads_, holder_));
+    EXPECT_EQ(0, builder.build(threads_, holder_));
+
+    IndexDumper::Pointer dumper = IndexFactory::CreateDumper("FileDumper");
+    EXPECT_EQ(0, dumper->create(index_path_));
+    EXPECT_EQ(0, builder.dump(dumper));
+    EXPECT_EQ(0, dumper->close());
+
+    IVFSearcher searcher;
+    Params search_params;
+    search_params.set(PARAM_IVF_SEARCHER_SCAN_RATIO, 1.0);
+    search_params.set(PARAM_IVF_SEARCHER_BRUTE_FORCE_THRESHOLD, 1);
+    EXPECT_EQ(0, searcher.init(search_params));
+
+    IndexStorage::Pointer container =
+        IndexFactory::CreateStorage("MMapFileReadStorage");
+    EXPECT_TRUE(!!container);
+    Params container_params;
+    container_params.set("proxima.mmap_file.container.memory_warmup", true);
+    container->init(container_params);
+    EXPECT_EQ(0, container->open(index_path_, false));
+    EXPECT_EQ(0, searcher.load(container, IndexMetric::Pointer()));
+
+    auto context = searcher.create_context();
+    context->set_topk(topk);
+    IndexQueryMeta qmeta(IndexMeta::DataType::DT_FP32, dimension_);
+
+    size_t hits = 0;
+    for (size_t q = 0; q < qnum; ++q) {
+      EXPECT_EQ(0, searcher.search_impl(data[q].data(), qmeta, context));
+      const IndexDocumentList &result = context->result(0);
+      EXPECT_EQ(topk, result.size());
+      for (size_t k = 0; k < result.size(); ++k) {
+        if (std::find(gt[q].begin(), gt[q].end(), result[k].key()) !=
+            gt[q].end()) {
+          ++hits;
+        }
+      }
+    }
+    EXPECT_EQ(0, searcher.unload());
+    return static_cast<double>(hits) / static_cast<double>(topk * qnum);
+  };
+
+  const double recall_fast = run_recall("PqFastQuantizer");
+  const double recall_int4 = run_recall("PqInt4Quantizer");
+
+  // FastScan and PqInt4Quantizer share the same 4-bit codebook paradigm
+  // (16 centroids per sub-quantizer), so their recall must be comparable;
+  // the only extra loss is the uint8 LUT affine quantization.  The 8-bit
+  // quantizer scores much higher here and is NOT a valid baseline.
+  EXPECT_GE(recall_fast, 0.3) << "recall_fast=" << recall_fast;
+  EXPECT_GE(recall_fast, recall_int4 - 0.1)
+      << "recall_fast=" << recall_fast << " recall_int4=" << recall_int4;
+}
+
 #if defined(__GNUC__) || defined(__GNUG__)
 #pragma GCC diagnostic pop
 #endif

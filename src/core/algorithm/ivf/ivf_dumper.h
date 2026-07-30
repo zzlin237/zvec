@@ -214,6 +214,14 @@ class IVFDumper {
     header_.pq_use_zero_mean = use_zero_mean;
   }
 
+  //! Enable packed-code blocks (FastScan): every flushed block is repacked
+  //! via quantizer->pack_codes() before it is written, and partial tail
+  //! blocks are written at full block size (the packed layout interleaves
+  //! all 32 lanes, so it cannot be truncated).
+  void set_pq_packer(const turbo::Quantizer::Pointer &quantizer) {
+    pq_packer_ = quantizer;
+  }
+
   //! Dump the shared residual PQ codebook and fp32 centroids.
   int dump_pq(const turbo::Quantizer::Pointer &quantizer,
               const std::vector<float> &centroids, uint32_t dim);
@@ -259,6 +267,7 @@ class IVFDumper {
   Block block_{};           // vectors grouped in block
   const IndexMeta meta_{};  // IndexMeta of the inverted index
   const IndexDumper::Pointer dumper_{};
+  turbo::Quantizer::Pointer pq_packer_{};  // packs blocks when set (FastScan)
   size_t block_vector_count_{kDefaultBlockCount};
   std::vector<InvertedListMeta> inverted_lists_meta_{};
   std::vector<uint64_t> keys_{};

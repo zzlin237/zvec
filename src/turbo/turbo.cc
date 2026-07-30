@@ -15,6 +15,7 @@
 #include <cassert>
 #include <ailego/internal/cpu_features.h>
 #include <zvec/turbo/turbo.h>
+#include "avx2/pq_quantizer_fast/pq_distance.h"
 #include "avx2/pq_quantizer_int4/pq_distance.h"
 #include "avx2/pq_quantizer_int8/pq_distance.h"
 #include "avx2/rotate/fht/fht.h"
@@ -34,6 +35,7 @@
 #include "scalar/fp32/cosine.h"
 #include "scalar/fp32/inner_product.h"
 #include "scalar/fp32/squared_euclidean.h"
+#include "scalar/pq_quantizer_fast/pq_distance.h"
 #include "scalar/pq_quantizer_int4/pq_distance.h"
 #include "scalar/pq_quantizer_int8/pq_distance.h"
 #include "scalar/rotate/fht/fht.h"
@@ -196,6 +198,20 @@ UniformQuantizeFunc get_uniform_quantize_func(DataType data_type) {
 
 PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
                          CpuArchType cpu_arch_type) {
+  if (quantize_type == QuantizeType::kPQFast) {
+    // FastScan is inherently 4-bit: a 16-entry LUT is what fits one SIMD lane.
+    if (data_type != DataType::kInt4) {
+      return {};
+    }
+    PqKernels kernels;
+    if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+        IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+      kernels.fast_scan = avx2::pq_adc_fast_scan_avx2;
+    } else {
+      kernels.fast_scan = scalar::pq_adc_fast_scan;
+    }
+    return kernels;
+  }
   if (quantize_type == QuantizeType::kPQ) {
     if (data_type == DataType::kInt4) {
       if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&

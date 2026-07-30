@@ -34,9 +34,11 @@ int IVFIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
                             param_.nlist);
 
   // Propagate per-cluster residual PQ configuration to the IVF builder.
-  const auto &quantizer_param = param_.quantizer_param;
-  if (quantizer_param.type == QuantizerType::kPQ) {
-    int nsq = quantizer_param.num_chunk > 0 ? quantizer_param.num_chunk : 8;
+  if (param_.quantizer_type() == QuantizerType::kPQ) {
+    // num_chunk lives on the PQ-specific derived param.
+    const auto *pq_param =
+        dynamic_cast<const PqQuantizerParam *>(param_.quantizer_param.get());
+    int nsq = (pq_param && pq_param->num_chunk > 0) ? pq_param->num_chunk : 8;
     proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_ENABLE, true);
     proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_NUM_CHUNK, nsq);
     proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, true);

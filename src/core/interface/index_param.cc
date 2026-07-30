@@ -399,10 +399,6 @@ ailego::JsonObject QuantizerParam::SerializeToJsonObject(
     json_obj.set("type",
                  zvec::ailego::JsonValue(magic_enum::enum_name(type).data()));
   }
-  if (!omit_empty_value || num_chunk != 8) {
-    json_obj.set("num_chunk",
-                 ailego::JsonValue(num_chunk));
-  }
   if (!omit_empty_value || enable_rotate) {
     json_obj.set("enable_rotate", ailego::JsonValue(enable_rotate));
   }
@@ -412,7 +408,6 @@ ailego::JsonObject QuantizerParam::SerializeToJsonObject(
 bool QuantizerParam::DeserializeFromJsonObject(
     const ailego::JsonObject &json_obj) {
   DESERIALIZE_ENUM_FIELD(json_obj, type, QuantizerType);
-  DESERIALIZE_VALUE_FIELD(json_obj, num_chunk);
   DESERIALIZE_VALUE_FIELD(json_obj, enable_rotate);
   return true;
 }

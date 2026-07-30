@@ -299,12 +299,12 @@ int main(int argc, char *argv[]) {
                             : 0;
   shared_ptr<ThreadPool> pool;
   if (thread_count == 0) {
-    pool = make_shared<ThreadPool>(true);
+    pool = make_shared<ThreadPool>();
     thread_count = pool->count();
     cout << "Using CPU count as thread pool count[" << thread_count << "]"
          << endl;
   } else {
-    pool = make_shared<ThreadPool>(thread_count, true);
+    pool = make_shared<ThreadPool>(thread_count, false);
     cout << "Using thread pool count[" << thread_count << "]" << endl;
   }
 

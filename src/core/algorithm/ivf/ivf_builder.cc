@@ -839,11 +839,24 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
     record_dumped_id = [&](uint32_t id) { dumped_ids.emplace_back(id); };
   }
   if (pq_enable_) {
-    //! Per-cluster residual PQ: store uint8[num_chunk] codes.
+    //! Per-cluster residual PQ: store quantizer-defined code bytes.
     //! Header PQ fields are informational only; the authoritative quantizer
     //! config is restored from the serialized codebook blob on load.
     ivf_dumper->set_pq_meta(pq_num_chunk_, pq_use_zero_mean_ ? 1 : 0);
-    std::vector<uint8_t> code(pq_num_chunk_);
+    if (pq_quantizer_->requires_packed_codes()) {
+      //! FastScan blocks interleave exactly 32 codes; the packed layout only
+      //! works when one storage block holds one FastScan block.
+      if (block_vector_count_ != kDefaultBlockCount) {
+        LOG_ERROR(
+            "Packed-code quantizer requires block_vector_count=%zu, got %u",
+            kDefaultBlockCount, block_vector_count_);
+        return IndexError_InvalidArgument;
+      }
+      ivf_dumper->set_pq_packer(pq_quantizer_);
+    }
+    const size_t pq_code_size =
+        pq_quantizer_->quantized_datapoint_vector_length();
+    std::vector<uint8_t> code(pq_code_size);
     std::vector<float> resid(pq_dim_);
     for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
       ailego_assert_with(i < labels_.size(), "Index Overflow");
@@ -1111,12 +1124,25 @@ int IVFBuilder::prepare_pq_quantizers(IndexThreads *threads) {
   ret = pq_quantizer_->train(holder);
   ivf_check_with_msg(ret, "Failed to train shared residual PQ, ret=%d", ret);
 
-  //! Codes are uint8[num_chunk]; store them row-major.
+  //! Store the quantized codes row-major.  The per-vector code length is
+  //! quantizer-defined: uint8[num_chunk] for PqInt8Quantizer, nibble-packed
+  //! ceil(num_chunk / 2) bytes for FastScan (PqFastQuantizer).
   quantized_meta_ = meta_;
   quantized_meta_.set_reformer(std::string(), 0, ailego::Params());
   quantized_meta_.set_converter(std::string(), 0, ailego::Params());
-  quantized_meta_.set_meta(IndexMeta::DataType::DT_INT8, pq_num_chunk_);
+  const uint32_t pq_code_size =
+      static_cast<uint32_t>(pq_quantizer_->quantized_datapoint_vector_length());
+  quantized_meta_.set_meta(IndexMeta::DataType::DT_INT8, pq_code_size);
   quantized_meta_.set_major_order(IndexMeta::MO_ROW);
+
+  //! Persist the PQ config in the inverted-header meta: IVFEntity::load_pq
+  //! restores the quantizer class and num_chunk from these builder params
+  //! (falling back to the default class / header fields otherwise).
+  ailego::Params pq_builder_params;
+  pq_builder_params.set(PARAM_IVF_BUILDER_PQ_NUM_CHUNK, pq_num_chunk_);
+  pq_builder_params.set(PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS,
+                        pq_quantizer_class_);
+  quantized_meta_.set_builder("IVFBuilder", 0, std::move(pq_builder_params));
 
   LOG_INFO("Trained shared residual PQ codebook: nlist=%zu num_chunk=%u "
            "train_rows=%zu ip=%d",

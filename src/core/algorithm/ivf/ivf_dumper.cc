@@ -415,8 +415,24 @@ int IVFDumper::dump_block(void) {
     return 0;
   }
 
+  const void *data = block_.data();
   size_t size = ailego_align(block_.bytes(), 32);
-  if (dumper_->write(block_.data(), size) != size) {
+  std::vector<uint8_t> packed;
+  if (pq_packer_) {
+    //! Packed-code quantizer (FastScan): repack the plain codes into the
+    //! block layout.  The packed layout interleaves all 32 lanes (missing
+    //! tail lanes are zero-filled), so the full block is always written.
+    packed.resize(ailego_align(block_.block_size(), 32), 0);
+    int ret = pq_packer_->pack_codes(block_.data(), block_.size(),
+                                     block_.element_size(), packed.data());
+    if (ret != 0) {
+      LOG_ERROR("Failed to pack codes, ret=%d", ret);
+      return IndexError_WriteData;
+    }
+    data = packed.data();
+    size = ailego_align(block_.block_size(), 32);
+  }
+  if (dumper_->write(data, size) != size) {
     LOG_ERROR("Failed to write data into dumper %s", dumper_->name().c_str());
     return IndexError_WriteData;
   }

@@ -87,11 +87,17 @@ using PqSdcKernelFunc = void (*)(const void *a, const void *b,
 using PqBatchAdcFunc = void (*)(const void **candidates, const void *lut,
                                 size_t num, size_t num_chunk, float *out);
 
-// Batch ADC: compute distances for multiple PQ codes against a shared LUT.
-// Signature matches BatchDistanceFunc for direct assignment (no lambda).
-using PqBatchAdcFunc = void (*)(const void **candidates, const void *lut,
-                                 size_t num, size_t num_chunk,
-                                 float *out);
+// FastScan ADC kernel: LUT look-up + accumulate over one packed block of 32
+// vectors.  Codes are 4-bit and block-interleaved, the LUT is affine-quantized
+// to uint8; accumulation stays in the integer domain (callers apply
+// dist = accu32 * delta + bias) so that a future SIMD-domain top-k filter can
+// compare in the quantized domain.
+//   packed_codes: [round_up_even(num_chunk) * 16] uint8_t
+//   packed_lut:   [round_up_even(num_chunk) * 16] uint8_t
+//   accu32:       [32] int32_t, overwritten with the accumulated sums
+using PqFastScanFunc = void (*)(const void *packed_codes,
+                                const void *packed_lut, size_t num_chunk,
+                                int32_t *accu32);
 
 // ISA-dispatched rotate/unrotate kernels.
 struct RotatorKernels {
@@ -99,12 +105,21 @@ struct RotatorKernels {
   UnrotateFunc unrotate = nullptr;
 };
 
-// data_type selects the code packing layout:
-//   kInt8: one uint8 per sub-quantizer (256 centroids, stride=256)
+// quantize_type + data_type select the kernel family and the code layout:
+//   kPQ     + kInt8: one uint8 code per sub-quantizer (256 centroids)
+//   kPQ     + kInt4: two nibble-packed codes per byte (16 centroids)
+//   kPQFast + kInt4: FastScan, codes block-interleaved over 32 vectors
+//                    (16 centroids; 4-bit is the only valid width, since a
+//                    16-entry LUT is what fits one SIMD lane)
+//
+// Fields are populated per family and are mutually exclusive: kPQ fills
+// adc_distance / sdc_distance / batch_adc_distance, kPQFast fills
+// fast_scan only (FastScan supports neither SDC nor single-code lookup).
 struct PqKernels {
   PqAdcDistanceFunc adc_distance = nullptr;
   PqSdcKernelFunc sdc_distance = nullptr;
   PqBatchAdcFunc batch_adc_distance = nullptr;
+  PqFastScanFunc fast_scan = nullptr;
 };
 
 enum class MetricType {
@@ -130,7 +145,8 @@ enum class QuantizeType {
   kFp16,
   kFp32,
   kPQ,
-  kRabit
+  kRabit,
+  kPQFast  //!< 4-bit PQ with FastScan (packed codes + SIMD in-register LUT)
 };
 
 enum class RotateType : uint16_t {
@@ -179,7 +195,8 @@ RotatorKernels get_rotator_kernels(
     RotateType rotate_type, CpuArchType cpu_arch_type = CpuArchType::kAuto);
 
 // Returns all PQ kernels dispatched for the given data_type, quantize_type
-// and CPU arch.
+// and CPU arch.  See PqKernels for which fields each family populates;
+// unsupported combinations yield an all-null struct.
 PqKernels get_pq_kernels(DataType data_type,
                          QuantizeType quantize_type = QuantizeType::kPQ,
                          CpuArchType cpu_arch_type = CpuArchType::kAuto);
