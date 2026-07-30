@@ -234,6 +234,8 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
       case DataType::kFp32:
         normalize_batch(reinterpret_cast<float *>(all_data.data()), num);
         break;
+      default:
+        break;
     }
   }
 
@@ -250,6 +252,8 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
       case DataType::kFp32:
         compute_and_subtract_center(reinterpret_cast<float *>(all_data.data()),
                                     num);
+        break;
+      default:
         break;
     }
   }
@@ -284,6 +288,8 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
       break;
     case DataType::kFp32:
       submit_training(reinterpret_cast<const float *>(all_data.data()));
+      break;
+    default:
       break;
   }
 
@@ -367,6 +373,8 @@ void PqInt8Quantizer::quantize_data(const void *input, void *output) const {
         normalize_single(reinterpret_cast<float *>(norm_vec_storage.data()),
                          &vec_norm);
         break;
+      default:
+        break;
     }
     vec = norm_vec_storage.data();
   }
@@ -383,6 +391,8 @@ void PqInt8Quantizer::quantize_data(const void *input, void *output) const {
         break;
       case DataType::kFp32:
         subtract_center(reinterpret_cast<float *>(centered_vec_storage.data()));
+        break;
+      default:
         break;
     }
     vec = centered_vec_storage.data();
@@ -441,6 +451,8 @@ void PqInt8Quantizer::quantize_query(const void *input, void *output) const {
       case DataType::kFp32:
         normalize_single(reinterpret_cast<float *>(norm_query_storage.data()));
         break;
+      default:
+        break;
     }
     query = norm_query_storage.data();
   }
@@ -458,6 +470,8 @@ void PqInt8Quantizer::quantize_query(const void *input, void *output) const {
       case DataType::kFp32:
         subtract_center(
             reinterpret_cast<float *>(centered_query_storage.data()));
+        break;
+      default:
         break;
     }
     query = centered_query_storage.data();
@@ -570,6 +584,8 @@ int PqInt8Quantizer::quantize(const void *query, const IndexQueryMeta &qmeta,
     case DataType::kFp32:
       expected_unit = sizeof(float);
       break;
+    default:
+      break;
   }
   if (qmeta.unit_size() != expected_unit) {
     return kErrUnsupported;
@@ -616,6 +632,8 @@ int PqInt8Quantizer::dequantize(const void *in, const IndexQueryMeta &qmeta,
       }
       case DataType::kFp32:
         std::memcpy(result + m * d, centroid, d * sizeof(float));
+        break;
+      default:
         break;
     }
   }

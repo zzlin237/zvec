@@ -1097,19 +1097,22 @@ TEST(PqInt4Fp16, InitAndOutputMeta) {
   // input_data_type should be kFp16.
   EXPECT_EQ(q->input_data_type(), DataType::kFp16);
 
-  // Output meta: data_type = DT_INT8, dimension = num_chunk.
+  // Output meta: data_type = DT_INT4, dimension = num_chunk.
   const auto &meta = q->meta();
-  EXPECT_EQ(meta.data_type(), IndexMeta::DataType::DT_INT8);
+  EXPECT_EQ(meta.data_type(), IndexMeta::DataType::DT_INT4);
   EXPECT_EQ(meta.dimension(), 4u);
   // L2 metric: no extra meta.
   EXPECT_EQ(meta.extra_meta_size(), 0u);
-  EXPECT_EQ(meta.element_size(), 4u);
+  // INT4 packs 2 sub-codes per byte: packed_code_length(4) = 2.
+  EXPECT_EQ(meta.element_size(), 2u);
 
   // Cosine FP16: extra meta for norm storage.
+  // INT4 packs 2 sub-codes per byte, so packed_code_length = num_chunk/2.
   auto q_cos = make_pq_fp16_quantizer(32, 8, "Cosine");
   ASSERT_TRUE(q_cos);
   EXPECT_EQ(q_cos->meta().extra_meta_size(), sizeof(float));
-  EXPECT_EQ(q_cos->meta().element_size(), 8u + sizeof(float));
+  EXPECT_EQ(q_cos->meta().element_size(),
+            static_cast<uint32_t>((8 + 1) / 2) + sizeof(float));
 }
 
 // Verify basic train + encode with FP16 input.

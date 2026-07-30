@@ -16,6 +16,7 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <unordered_map>
@@ -748,7 +749,11 @@ TEST(IndexInterface, Merge) {
     {  // test reduce
       auto index3 = create_index_func(param_target, index_name + "3");
       ASSERT_NE(nullptr, index3);
-      ASSERT_TRUE(0 == index3->Merge({index1, index2}, IndexFilter()));
+      MergeOptions merge_options;
+      merge_options.write_concurrency =
+          (std::numeric_limits<uint32_t>::max)();
+      ASSERT_TRUE(0 == index3->Merge({index1, index2}, IndexFilter(),
+                                     merge_options));
       ASSERT_TRUE(3 == index3->GetDocCount());
       {
         VectorDataBuffer fetched_vector_data;
@@ -777,7 +782,13 @@ TEST(IndexInterface, Merge) {
       ASSERT_NE(nullptr, index3);
       auto filter = IndexFilter();
       filter.set([](uint64_t key) { return key == 0; });  // TODO: uint32?
-      ASSERT_TRUE(0 == index3->Merge({index1, index2}, filter));
+      zvec::ailego::ThreadPool pool(1, false);
+      MergeOptions merge_options;
+      merge_options.write_concurrency =
+          (std::numeric_limits<uint32_t>::max)();
+      merge_options.pool = &pool;
+      ASSERT_TRUE(0 ==
+                  index3->Merge({index1, index2}, filter, merge_options));
       ASSERT_TRUE(2 == index3->GetDocCount());
       {
         VectorDataBuffer fetched_vector_data;
@@ -2514,7 +2525,88 @@ TEST(IndexInterface, BuilderSetsAllBaseFields) {
   EXPECT_FALSE(param->use_id_map);
   EXPECT_TRUE(param->use_external_vector);
   EXPECT_EQ(PreprocessorType::kPCA, param->preprocess_param.type);
-  EXPECT_EQ(QuantizerType::kFP16, param->quantizer_param.type);
+  EXPECT_EQ(QuantizerType::kFP16, param->quantizer_param->type);
+}
+
+TEST(IndexInterface, QuantizerParamDefaultIsNull) {
+  auto param = FlatIndexParamBuilder()
+                   .WithMetricType(MetricType::kL2sq)
+                   .WithDimension(64)
+                   .Build();
+
+  ASSERT_NE(nullptr, param);
+  EXPECT_EQ(nullptr, param->quantizer_param);
+  EXPECT_EQ(QuantizerType::kNone, param->quantizer_type());
+  EXPECT_FALSE(param->enable_rotate());
+}
+
+TEST(IndexInterface, QuantizerParamPqFields) {
+  auto param = FlatIndexParamBuilder()
+                   .WithMetricType(MetricType::kL2sq)
+                   .WithDimension(128)
+                   .WithQuantizerParam(PqQuantizerParam(16, 8))
+                   .Build();
+
+  ASSERT_NE(nullptr, param);
+  ASSERT_NE(nullptr, param->quantizer_param);
+  EXPECT_EQ(QuantizerType::kPQ, param->quantizer_type());
+
+  // the builder must keep the concrete type instead of slicing it
+  auto pq_param =
+      std::dynamic_pointer_cast<PqQuantizerParam>(param->quantizer_param);
+  ASSERT_NE(nullptr, pq_param);
+  EXPECT_EQ(16, pq_param->num_chunk);
+  EXPECT_EQ(8, pq_param->num_bits);
+
+  // enable_rotate is a common field, setting it keeps the concrete type
+  auto rotated_param = FlatIndexParamBuilder()
+                           .WithQuantizerParam(PqQuantizerParam(16, 8))
+                           .WithEnableRotate(true)
+                           .Build();
+  ASSERT_NE(nullptr, rotated_param->quantizer_param);
+  EXPECT_TRUE(rotated_param->enable_rotate());
+  EXPECT_NE(nullptr, std::dynamic_pointer_cast<PqQuantizerParam>(
+                         rotated_param->quantizer_param));
+}
+
+TEST(IndexInterface, QuantizerParamPqJsonRoundTrip) {
+  auto param = FlatIndexParamBuilder()
+                   .WithIndexType(IndexType::kFlat)
+                   .WithMetricType(MetricType::kL2sq)
+                   .WithDimension(128)
+                   .WithDataType(DataType::DT_FP32)
+                   .WithQuantizerParam(PqQuantizerParam(32, 4))
+                   .Build();
+
+  auto deserialized_param =
+      IndexFactory::DeserializeIndexParamFromJson(param->SerializeToJson());
+  ASSERT_NE(nullptr, deserialized_param);
+  EXPECT_EQ(param->SerializeToJson(), deserialized_param->SerializeToJson());
+  EXPECT_EQ(param->SerializeToJson(true),
+            deserialized_param->SerializeToJson(true));
+
+  auto pq_param = std::dynamic_pointer_cast<PqQuantizerParam>(
+      deserialized_param->quantizer_param);
+  ASSERT_NE(nullptr, pq_param);
+  EXPECT_EQ(QuantizerType::kPQ, pq_param->type);
+  EXPECT_EQ(32, pq_param->num_chunk);
+  EXPECT_EQ(4, pq_param->num_bits);
+}
+
+TEST(IndexInterface, QuantizerParamLegacyJsonCompat) {
+  // legacy json only carries the common fields
+  const std::string json_str =
+      R"({"index_type":"kFlat","metric_type":"kL2sq","dimension":128,)"
+      R"("data_type":"DT_FP32",)"
+      R"("quantizer_param":{"type":"kInt8","enable_rotate":true}})";
+
+  auto param = IndexFactory::DeserializeIndexParamFromJson(json_str);
+  ASSERT_NE(nullptr, param);
+  ASSERT_NE(nullptr, param->quantizer_param);
+  EXPECT_EQ(QuantizerType::kInt8, param->quantizer_type());
+  EXPECT_TRUE(param->enable_rotate());
+  EXPECT_EQ(nullptr, std::dynamic_pointer_cast<PqQuantizerParam>(
+                         param->quantizer_param));
 }
 
 TEST(IndexInterface, BuilderChainingReturnsCorrectType) {
