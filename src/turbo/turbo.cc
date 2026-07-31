@@ -15,10 +15,22 @@
 #include <cassert>
 #include <ailego/internal/cpu_features.h>
 #include <zvec/turbo/turbo.h>
+#include "avx2/fp16/cosine.h"
+#include "avx2/fp16/inner_product.h"
+#include "avx2/fp16/squared_euclidean.h"
+#include "avx2/fp32/cosine.h"
+#include "avx2/fp32/inner_product.h"
+#include "avx2/fp32/squared_euclidean.h"
 #include "avx2/pq_quantizer_fast/pq_distance.h"
 #include "avx2/pq_quantizer_int4/pq_distance.h"
 #include "avx2/pq_quantizer_int8/pq_distance.h"
 #include "avx2/rotate/fht/fht.h"
+#include "avx512/fp16/cosine.h"
+#include "avx512/fp16/inner_product.h"
+#include "avx512/fp16/squared_euclidean.h"
+#include "avx512/fp32/cosine.h"
+#include "avx512/fp32/inner_product.h"
+#include "avx512/fp32/squared_euclidean.h"
 #include "avx512/pq_quantizer_int4/pq_distance.h"
 #include "avx512/pq_quantizer_int8/pq_distance.h"
 #include "avx512/rotate/fht/fht.h"
@@ -26,6 +38,12 @@
 #include "avx512_vnni/record_quantized_int8/squared_euclidean.h"
 #include "avx512_vnni/uniform_int8/quantize.h"
 #include "avx512_vnni/uniform_int8/squared_euclidean.h"
+#include "neon/fp16/cosine.h"
+#include "neon/fp16/inner_product.h"
+#include "neon/fp16/squared_euclidean.h"
+#include "neon/fp32/cosine.h"
+#include "neon/fp32/inner_product.h"
+#include "neon/fp32/squared_euclidean.h"
 #include "neon/pq_quantizer_int4/pq_distance.h"
 #include "neon/pq_quantizer_int8/pq_distance.h"
 #include "neon/rotate/fht/fht.h"
@@ -54,6 +72,42 @@ DistanceFunc get_distance_func(MetricType metric_type, DataType data_type,
   if (data_type == DataType::kFp32) {
     if (quantize_type == QuantizeType::kDefault ||
         quantize_type == QuantizeType::kFp32) {
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+        if (metric_type == MetricType::kCosine) {
+          return avx512::cosine_fp32_distance_avx512;
+        }
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx512::squared_euclidean_fp32_distance_avx512;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx512::inner_product_fp32_distance_avx512;
+        }
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+        if (metric_type == MetricType::kCosine) {
+          return avx2::cosine_fp32_distance_avx2;
+        }
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx2::squared_euclidean_fp32_distance_avx2;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx2::inner_product_fp32_distance_avx2;
+        }
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+        if (metric_type == MetricType::kCosine) {
+          return neon::cosine_fp32_distance_neon;
+        }
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return neon::squared_euclidean_fp32_distance_neon;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return neon::inner_product_fp32_distance_neon;
+        }
+      }
       if (metric_type == MetricType::kCosine) {
         return scalar::cosine_fp32_distance;
       }
@@ -69,6 +123,45 @@ DistanceFunc get_distance_func(MetricType metric_type, DataType data_type,
   if (data_type == DataType::kFp16) {
     if (quantize_type == QuantizeType::kDefault ||
         quantize_type == QuantizeType::kFp16) {
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx512::squared_euclidean_fp16_distance_avx512;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx512::inner_product_fp16_distance_avx512;
+        }
+        if (metric_type == MetricType::kCosine) {
+          return avx512::cosine_fp16_distance_avx512;
+        }
+      }
+      // The AVX2 fp16 kernels rely on F16C vcvtph2ps for the half -> float
+      // conversion, so both flags must be present at runtime.
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+          zvec::ailego::internal::CpuFeatures::static_flags_.F16C &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx2::squared_euclidean_fp16_distance_avx2;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx2::inner_product_fp16_distance_avx2;
+        }
+        if (metric_type == MetricType::kCosine) {
+          return avx2::cosine_fp16_distance_avx2;
+        }
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return neon::squared_euclidean_fp16_distance_neon;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return neon::inner_product_fp16_distance_neon;
+        }
+        if (metric_type == MetricType::kCosine) {
+          return neon::cosine_fp16_distance_neon;
+        }
+      }
       if (metric_type == MetricType::kSquaredEuclidean) {
         return scalar::squared_euclidean_fp16_distance;
       }
@@ -112,6 +205,42 @@ BatchDistanceFunc get_batch_distance_func(MetricType metric_type,
   if (data_type == DataType::kFp32) {
     if (quantize_type == QuantizeType::kDefault ||
         quantize_type == QuantizeType::kFp32) {
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+        if (metric_type == MetricType::kCosine) {
+          return avx512::cosine_fp32_batch_distance_avx512;
+        }
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx512::squared_euclidean_fp32_batch_distance_avx512;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx512::inner_product_fp32_batch_distance_avx512;
+        }
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+        if (metric_type == MetricType::kCosine) {
+          return avx2::cosine_fp32_batch_distance_avx2;
+        }
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx2::squared_euclidean_fp32_batch_distance_avx2;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx2::inner_product_fp32_batch_distance_avx2;
+        }
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+        if (metric_type == MetricType::kCosine) {
+          return neon::cosine_fp32_batch_distance_neon;
+        }
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return neon::squared_euclidean_fp32_batch_distance_neon;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return neon::inner_product_fp32_batch_distance_neon;
+        }
+      }
       if (metric_type == MetricType::kCosine) {
         return scalar::cosine_fp32_batch_distance;
       }
@@ -127,6 +256,45 @@ BatchDistanceFunc get_batch_distance_func(MetricType metric_type,
   if (data_type == DataType::kFp16) {
     if (quantize_type == QuantizeType::kDefault ||
         quantize_type == QuantizeType::kFp16) {
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx512::squared_euclidean_fp16_batch_distance_avx512;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx512::inner_product_fp16_batch_distance_avx512;
+        }
+        if (metric_type == MetricType::kCosine) {
+          return avx512::cosine_fp16_batch_distance_avx512;
+        }
+      }
+      // The AVX2 fp16 kernels rely on F16C vcvtph2ps for the half -> float
+      // conversion, so both flags must be present at runtime.
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
+          zvec::ailego::internal::CpuFeatures::static_flags_.F16C &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return avx2::squared_euclidean_fp16_batch_distance_avx2;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return avx2::inner_product_fp16_batch_distance_avx2;
+        }
+        if (metric_type == MetricType::kCosine) {
+          return avx2::cosine_fp16_batch_distance_avx2;
+        }
+      }
+      if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+        if (metric_type == MetricType::kSquaredEuclidean) {
+          return neon::squared_euclidean_fp16_batch_distance_neon;
+        }
+        if (metric_type == MetricType::kInnerProduct) {
+          return neon::inner_product_fp16_batch_distance_neon;
+        }
+        if (metric_type == MetricType::kCosine) {
+          return neon::cosine_fp16_batch_distance_neon;
+        }
+      }
       if (metric_type == MetricType::kSquaredEuclidean) {
         return scalar::squared_euclidean_fp16_batch_distance;
       }
