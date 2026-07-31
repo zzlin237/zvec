@@ -358,8 +358,18 @@ class ProximaEngineHelper {
     if (auto quantize_type =
             convert_to_engine_quantize_type(db_index_params->quantize_type());
         quantize_type.has_value()) {
-      index_param_builder->WithQuantizerParam(
-          core_interface::QuantizerParam::Create(quantize_type.value()));
+      if (quantize_type.value() == core_interface::QuantizerType::kPQ) {
+        // PQ carries extra fields (num_chunk/num_bits) on the derived param;
+        // build it explicitly so the concrete type survives Clone() in the
+        // builder and the dynamic_cast in the engine index succeeds.
+        const auto &qp = db_index_params->quantizer_param();
+        index_param_builder->WithQuantizerParam(
+            std::make_shared<core_interface::PqQuantizerParam>(
+                qp.num_chunk(), qp.num_bits(), qp.enable_rotate()));
+      } else {
+        index_param_builder->WithQuantizerParam(
+            core_interface::QuantizerParam::Create(quantize_type.value()));
+      }
     } else {
       return tl::make_unexpected(
           Status::InvalidArgument("unsupported quantize type"));
@@ -409,16 +419,6 @@ class ProximaEngineHelper {
             db_index_params->ef_construction());
         index_param_builder->WithUseContiguousMemory(
             db_index_params->use_contiguous_memory());
-
-        // Propagate num_chunk for PQ quantization.
-        if (db_index_params->quantize_type() == QuantizeType::PQ) {
-          auto engine_qt =
-              convert_to_engine_quantize_type(db_index_params->quantize_type());
-          int nsq = db_index_params->quantizer_param().num_chunk();
-          if (nsq <= 0) nsq = 8;
-          index_param_builder->WithQuantizerParam(
-              core_interface::QuantizerParam(engine_qt.value(), nsq));
-        }
 
         return index_param_builder->Build();
       }

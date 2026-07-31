@@ -185,6 +185,11 @@ class ZVEC_CORE_API Index {
   virtual int _get_coarse_search_topk(
       const BaseIndexQueryParam::Pointer &search_param);
 
+  //! Collect raw vectors from the source indexes into a train holder for
+  //! the target streamer's turbo quantizer during Merge.
+  int _build_merge_train_holder(const std::vector<Pointer> &indexes,
+                                core::IndexHolder::Pointer *holder) const;
+
   //! Helper: set group_by on context from the query param (common for all
   //! index types). Call this before set_topk() when topk depends on group
   //! state.

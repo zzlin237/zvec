@@ -548,3 +548,51 @@ TEST(ConverterTest, IVFIndexParamsWithEnableRotate) {
   auto restored2 = ProtoConverter::FromPb(pb2);
   EXPECT_FALSE(restored2->quantizer_param().enable_rotate());
 }
+
+// ==================== PQ num_chunk/num_bits roundtrip tests ==============
+
+TEST(ConverterTest, HnswIndexParamsWithPqQuantizerParam) {
+  // C++ -> PB -> C++ roundtrip with PQ fields (int4)
+  HnswIndexParams original(MetricType::L2, 16, 200, QuantizeType::PQ, false,
+                           QuantizerParam(false, 32, 4));
+
+  auto pb = ProtoConverter::ToPb(&original);
+  EXPECT_EQ(pb.base().quantizer_param().num_chunk(), 32);
+  EXPECT_EQ(pb.base().quantizer_param().num_bits(), 4);
+
+  auto restored = ProtoConverter::FromPb(pb);
+  ASSERT_NE(restored, nullptr);
+  EXPECT_EQ(restored->quantize_type(), QuantizeType::PQ);
+  EXPECT_EQ(restored->quantizer_param().num_chunk(), 32);
+  EXPECT_EQ(restored->quantizer_param().num_bits(), 4);
+  EXPECT_TRUE(restored->quantizer_param() == original.quantizer_param());
+
+  // Legacy PB without num_chunk/num_bits (zero) falls back to defaults
+  proto::HnswIndexParams legacy_pb;
+  legacy_pb.mutable_base()->set_metric_type(proto::MetricType::MT_L2);
+  legacy_pb.mutable_base()->set_quantize_type(proto::QuantizeType::QT_PQ);
+  legacy_pb.mutable_base()->mutable_quantizer_param()->set_enable_rotate(true);
+  legacy_pb.set_m(16);
+  legacy_pb.set_ef_construction(200);
+  auto legacy = ProtoConverter::FromPb(legacy_pb);
+  ASSERT_NE(legacy, nullptr);
+  EXPECT_TRUE(legacy->quantizer_param().enable_rotate());
+  EXPECT_EQ(legacy->quantizer_param().num_chunk(), 8);
+  EXPECT_EQ(legacy->quantizer_param().num_bits(), 8);
+}
+
+TEST(ConverterTest, IVFIndexParamsWithPqQuantizerParam) {
+  IVFIndexParams original(MetricType::L2, 256, 20, false, QuantizeType::PQ,
+                          QuantizerParam(false, 16, 8));
+
+  auto pb = ProtoConverter::ToPb(&original);
+  EXPECT_EQ(pb.base().quantizer_param().num_chunk(), 16);
+  EXPECT_EQ(pb.base().quantizer_param().num_bits(), 8);
+
+  auto restored = ProtoConverter::FromPb(pb);
+  ASSERT_NE(restored, nullptr);
+  EXPECT_EQ(restored->quantize_type(), QuantizeType::PQ);
+  EXPECT_EQ(restored->quantizer_param().num_chunk(), 16);
+  EXPECT_EQ(restored->quantizer_param().num_bits(), 8);
+  EXPECT_TRUE(restored->quantizer_param() == original.quantizer_param());
+}

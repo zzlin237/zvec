@@ -22,7 +22,9 @@ QuantizerParam ReadQuantizerParam(
     const proto::QuantizerParam &pb) {
   int nsq = pb.num_chunk();
   if (nsq <= 0) nsq = 8;  // backward compat: old records have 0
-  return QuantizerParam(pb.enable_rotate(), nsq);
+  int nbits = pb.num_bits();
+  if (nbits <= 0) nbits = 8;  // backward compat: old records have 0
+  return QuantizerParam(pb.enable_rotate(), nsq, nbits);
 }
 
 // Helper: write QuantizerParam to proto.
@@ -30,6 +32,7 @@ void WriteQuantizerParam(const QuantizerParam &qp,
                           proto::QuantizerParam *pb) {
   pb->set_enable_rotate(qp.enable_rotate());
   pb->set_num_chunk(qp.num_chunk());
+  pb->set_num_bits(qp.num_bits());
 }
 }  // namespace
 

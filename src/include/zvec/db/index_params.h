@@ -127,9 +127,11 @@ class ZVEC_API InvertIndexParams : public IndexParams {
 class QuantizerParam {
  public:
   QuantizerParam() = default;
-  explicit QuantizerParam(bool enable_rotate, int num_chunk = 8)
+  explicit QuantizerParam(bool enable_rotate, int num_chunk = 8,
+                          int num_bits = 8)
       : enable_rotate_(enable_rotate),
-        num_chunk_(num_chunk) {}
+        num_chunk_(num_chunk),
+        num_bits_(num_bits) {}
 
   bool enable_rotate() const {
     return enable_rotate_;
@@ -147,9 +149,17 @@ class QuantizerParam {
     num_chunk_ = v;
   }
 
+  int num_bits() const {
+    return num_bits_;
+  }
+
+  void set_num_bits(int v) {
+    num_bits_ = v;
+  }
+
   bool operator==(const QuantizerParam &other) const {
     return enable_rotate_ == other.enable_rotate_ &&
-           num_chunk_ == other.num_chunk_;
+           num_chunk_ == other.num_chunk_ && num_bits_ == other.num_bits_;
   }
 
   bool operator!=(const QuantizerParam &other) const {
@@ -163,6 +173,9 @@ class QuantizerParam {
   // Number of PQ sub-quantizers. Only effective with quantize_type=PQ.
   // Dimension must be divisible by this value. Default: 8.
   int num_chunk_{8};
+  // Bits per PQ sub-quantizer code, 8 (256 centroids) or 4 (16 centroids,
+  // nibble-packed). Only effective with quantize_type=PQ. Default: 8.
+  int num_bits_{8};
 };
 
 /*

@@ -98,6 +98,9 @@ message QuantizerParam {
   // quantize_type=PQ. The vector dimension must be divisible by this value.
   // Default: 8.
   int32 num_chunk = 2;
+  // Bits per PQ sub-quantizer code, 8 (256 centroids) or 4 (16 centroids,
+  // nibble-packed). Only effective with quantize_type=PQ. Default: 8.
+  int32 num_bits = 3;
 };
 
 message BaseIndexParams {

@@ -35,13 +35,19 @@ int IVFIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
 
   // Propagate per-cluster residual PQ configuration to the IVF builder.
   if (param_.quantizer_type() == QuantizerType::kPQ) {
-    // num_chunk lives on the PQ-specific derived param.
+    // num_chunk / num_bits live on the PQ-specific derived param.
     const auto *pq_param =
         dynamic_cast<const PqQuantizerParam *>(param_.quantizer_param.get());
     int nsq = (pq_param && pq_param->num_chunk > 0) ? pq_param->num_chunk : 8;
     proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_ENABLE, true);
     proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_NUM_CHUNK, nsq);
     proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_USE_ZERO_MEAN, true);
+    // Same dispatch rule as HNSW: the class name encodes the bit width.
+    const char *pq_class = (pq_param && pq_param->num_bits == 4)
+                               ? "PqInt4Quantizer"
+                               : "PqInt8Quantizer";
+    proxima_index_params_.set(core::PARAM_IVF_BUILDER_PQ_QUANTIZER_CLASS,
+                              pq_class);
   }
 
   // TODO: add_vector_with_id & fetch_by_id don't rely on this param

@@ -61,6 +61,11 @@ class IndexStreamer : public IndexRunner {
                              turbo::Quantizer::Pointer /*search_quantizer*/) {
     return IndexError_NotImplemented;
   }
+
+  //! Retrieve the turbo quantizer bound to the add path (nullptr if none)
+  virtual turbo::Quantizer::Pointer quantizer(void) const {
+    return nullptr;
+  }
 };
 
 }  // namespace core

@@ -73,7 +73,7 @@ int PqInt8Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
   centroids_.resize(static_cast<size_t>(num_chunk_) * kNumCentroids * sub_dim_ *
                     element_size());
 
-  // Dispatch ISA kernels (scalar only for now).
+  // Dispatch ISA kernels (AVX512 / AVX2 / NEON, scalar fallback).
   auto pq_k = get_pq_kernels(DataType::kInt8);
   adc_fn_ = pq_k.adc_distance;
   sdc_fn_ = pq_k.sdc_distance;

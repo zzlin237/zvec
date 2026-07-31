@@ -219,6 +219,30 @@ TEST(IndexParamsTest, QuantizerParamBasic) {
   EXPECT_FALSE(qp_true != QuantizerParam(true));
 }
 
+TEST(IndexParamsTest, QuantizerParamPqFields) {
+  // Defaults: num_chunk = 8, num_bits = 8
+  QuantizerParam qp_default;
+  EXPECT_EQ(qp_default.num_chunk(), 8);
+  EXPECT_EQ(qp_default.num_bits(), 8);
+
+  // Constructor with PQ fields
+  QuantizerParam qp_pq(false, 32, 4);
+  EXPECT_EQ(qp_pq.num_chunk(), 32);
+  EXPECT_EQ(qp_pq.num_bits(), 4);
+
+  // Setters
+  qp_default.set_num_chunk(16);
+  qp_default.set_num_bits(4);
+  EXPECT_EQ(qp_default.num_chunk(), 16);
+  EXPECT_EQ(qp_default.num_bits(), 4);
+
+  // Equality covers num_chunk / num_bits
+  EXPECT_TRUE(qp_pq == QuantizerParam(false, 32, 4));
+  EXPECT_FALSE(qp_pq == QuantizerParam(false, 32, 8));
+  EXPECT_FALSE(qp_pq == QuantizerParam(false, 16, 4));
+  EXPECT_TRUE(qp_pq != QuantizerParam(false, 32, 8));
+}
+
 TEST(IndexParamsTest, QuantizerParamWithVectorIndex) {
   // HnswIndexParams
   {

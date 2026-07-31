@@ -501,6 +501,39 @@ class TestQuantizerParam:
         assert qp2.enable_rotate is True
         assert qp == qp2
 
+    def test_pq_defaults(self):
+        qp = QuantizerParam()
+        assert qp.num_chunk == 8
+        assert qp.num_bits == 8
+
+    def test_pq_fields(self):
+        qp = QuantizerParam(num_chunk=32, num_bits=4)
+        assert qp.num_chunk == 32
+        assert qp.num_bits == 4
+
+    def test_pq_equality(self):
+        assert QuantizerParam(num_chunk=32, num_bits=4) == QuantizerParam(
+            num_chunk=32, num_bits=4
+        )
+        assert QuantizerParam(num_chunk=32, num_bits=4) != QuantizerParam(
+            num_chunk=32, num_bits=8
+        )
+        assert QuantizerParam(num_chunk=16) != QuantizerParam(num_chunk=32)
+
+    def test_pq_to_dict(self):
+        d = QuantizerParam(num_chunk=32, num_bits=4).to_dict()
+        assert d.get("num_chunk") == 32
+        assert d.get("num_bits") == 4
+
+    def test_pq_pickle_roundtrip(self):
+        import pickle
+
+        qp = QuantizerParam(num_chunk=32, num_bits=4)
+        qp2 = pickle.loads(pickle.dumps(qp))
+        assert qp2.num_chunk == 32
+        assert qp2.num_bits == 4
+        assert qp == qp2
+
 
 # ----------------------------
 # HnswIndexParam with QuantizerParam
@@ -522,6 +555,70 @@ class TestHnswIndexParamQuantizer:
         )
         assert param.quantizer_param.enable_rotate is True
         assert param.quantize_type == QuantizeType.INT8
+
+    def test_with_pq_quantizer_param(self):
+        qp = QuantizerParam(num_chunk=32, num_bits=4)
+        param = HnswIndexParam(
+            metric_type=MetricType.L2,
+            quantize_type=QuantizeType.PQ,
+            quantizer_param=qp,
+        )
+        assert param.quantize_type == QuantizeType.PQ
+        assert param.quantizer_param.num_chunk == 32
+        assert param.quantizer_param.num_bits == 4
+        d = param.to_dict()
+        assert d["quantizer_param"]["num_chunk"] == 32
+        assert d["quantizer_param"]["num_bits"] == 4
+
+    def test_pq_pickle_roundtrip(self):
+        import pickle
+
+        param = HnswIndexParam(
+            metric_type=MetricType.L2,
+            quantize_type=QuantizeType.PQ,
+            quantizer_param=QuantizerParam(num_chunk=16, num_bits=8),
+        )
+        param2 = pickle.loads(pickle.dumps(param))
+        assert param2.quantize_type == QuantizeType.PQ
+        assert param2.quantizer_param.num_chunk == 16
+        assert param2.quantizer_param.num_bits == 8
+
+
+# ----------------------------
+# IVFIndexParam with QuantizerParam
+# ----------------------------
+
+
+class TestIvfIndexParamQuantizer:
+    def test_with_pq_quantizer_param(self):
+        qp = QuantizerParam(num_chunk=16, num_bits=8)
+        param = IVFIndexParam(
+            metric_type=MetricType.L2,
+            n_list=100,
+            quantize_type=QuantizeType.PQ,
+            quantizer_param=qp,
+        )
+        assert param.quantize_type == QuantizeType.PQ
+        assert param.quantizer_param.num_chunk == 16
+        assert param.quantizer_param.num_bits == 8
+        d = param.to_dict()
+        assert d["quantizer_param"]["num_chunk"] == 16
+        assert d["quantizer_param"]["num_bits"] == 8
+
+    def test_pq_pickle_roundtrip(self):
+        import pickle
+
+        param = IVFIndexParam(
+            metric_type=MetricType.L2,
+            n_list=100,
+            quantize_type=QuantizeType.PQ,
+            quantizer_param=QuantizerParam(num_chunk=32, num_bits=4),
+        )
+        param2 = pickle.loads(pickle.dumps(param))
+        assert param2.quantize_type == QuantizeType.PQ
+        assert param2.n_list == 100
+        assert param2.quantizer_param.num_chunk == 32
+        assert param2.quantizer_param.num_bits == 4
 
 
 # ----------------------------

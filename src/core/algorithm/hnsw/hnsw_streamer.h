@@ -39,6 +39,11 @@ class HnswStreamer : public IndexStreamer {
   int init_quantizer(turbo::Quantizer::Pointer add_quantizer,
                      turbo::Quantizer::Pointer search_quantizer) override;
 
+  //! Retrieve the turbo quantizer bound to the add path (nullptr if none)
+  turbo::Quantizer::Pointer quantizer(void) const override {
+    return add_quantizer_;
+  }
+
  public:
   //! Retrieve the storage mode of the underlying entity. Returns
   //! HnswStorageMode::kMmap when the entity has not been initialized yet.
