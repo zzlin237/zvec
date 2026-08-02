@@ -141,12 +141,29 @@ TEST(IVFResidualCodecTest, BuildListQueryDis0Semantics) {
   ASSERT_EQ(ip.train(make_random_holder(512, dim)), 0);
   std::vector<float> lut(ip.lut_size() / sizeof(float));
   float dis0 = 0.0f;
-  ip.build_list_query(query.data(), 1, lut.data(), &dis0);
+  IVFResidualCodec::QueryState ip_state;
+  ASSERT_EQ(ip.prepare_query(query.data(), &ip_state), 0);
+  ip.build_list_query(1, &ip_state, &dis0);
+  lut.assign(ip_state.lut.begin(), ip_state.lut.end());
   double dot = 0.0;
   for (size_t d = 0; d < dim; ++d) {
     dot += static_cast<double>(query[d]) * centroids[dim + d];
   }
   EXPECT_NEAR(dis0, static_cast<float>(-dot), 1e-4f);
+
+  //! IP: the LUT is query-only, so every list must yield the identical table
+  //! and differ only in dis0.
+  float dis0_other = 0.0f;
+  ip.build_list_query(0, &ip_state, &dis0_other);
+  EXPECT_EQ(ip_state.lut.size(), lut.size());
+  for (size_t i = 0; i < lut.size(); ++i) {
+    EXPECT_FLOAT_EQ(ip_state.lut[i], lut[i]) << "LUT changed at " << i;
+  }
+  double dot2 = 0.0;
+  for (size_t d = 0; d < dim; ++d) {
+    dot2 += static_cast<double>(query[d]) * centroids[d];
+  }
+  EXPECT_NEAR(dis0_other, static_cast<float>(-dot2), 1e-4f);
 
   //! L2: LUT on the residual, dis0 = 0
   IVFResidualCodec l2;
@@ -154,9 +171,23 @@ TEST(IVFResidualCodecTest, BuildListQueryDis0Semantics) {
   ASSERT_EQ(l2.set_centroids(centroids, nlist), 0);
   ASSERT_EQ(l2.train(make_random_holder(512, dim)), 0);
   dis0 = -1.0f;
-  std::vector<float> l2_lut(l2.lut_size() / sizeof(float));
-  l2.build_list_query(query.data(), 0, l2_lut.data(), &dis0);
+  IVFResidualCodec::QueryState l2_state;
+  ASSERT_EQ(l2.prepare_query(query.data(), &l2_state), 0);
+  l2.build_list_query(0, &l2_state, &dis0);
   EXPECT_EQ(dis0, 0.0f);
+  EXPECT_EQ(l2_state.lut.size(), l2.lut_size() / sizeof(float));
+
+  //! L2: the LUT is per-list, so a different list must change it
+  std::vector<float> l2_lut0(l2_state.lut.begin(), l2_state.lut.end());
+  l2.build_list_query(1, &l2_state, &dis0);
+  bool l2_lut_differs = false;
+  for (size_t i = 0; i < l2_lut0.size(); ++i) {
+    if (l2_state.lut[i] != l2_lut0[i]) {
+      l2_lut_differs = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(l2_lut_differs) << "L2 LUT must depend on the probed list";
 }
 
 TEST(IVFResidualCodecTest, SerializeDeserializeRoundtrip) {
@@ -197,12 +228,15 @@ TEST(IVFResidualCodecTest, SerializeDeserializeRoundtrip) {
 
   std::vector<float> query(dim);
   for (auto &v : query) v = dist(gen);
-  std::vector<float> lut_a(codec.lut_size() / sizeof(float));
-  std::vector<float> lut_b(loaded.lut_size() / sizeof(float));
   float dis0_a = 0.0f, dis0_b = 0.0f;
-  codec.build_list_query(query.data(), 2, lut_a.data(), &dis0_a);
-  loaded.build_list_query(query.data(), 2, lut_b.data(), &dis0_b);
+  IVFResidualCodec::QueryState state_a, state_b;
+  ASSERT_EQ(codec.prepare_query(query.data(), &state_a), 0);
+  ASSERT_EQ(loaded.prepare_query(query.data(), &state_b), 0);
+  codec.build_list_query(2, &state_a, &dis0_a);
+  loaded.build_list_query(2, &state_b, &dis0_b);
   EXPECT_EQ(dis0_a, dis0_b);
+  const std::vector<float> &lut_a = state_a.lut;
+  const std::vector<float> &lut_b = state_b.lut;
 
   float dist_a = 0.0f, dist_b = 0.0f;
   codec.batch_distance(code_a.data(), 1, codec.code_size(), lut_a.data(),
@@ -221,4 +255,112 @@ TEST(IVFResidualCodecTest, SerializeDeserializeRoundtrip) {
     ref += diff * diff;
   }
   EXPECT_NEAR(dist_a, ref, 0.5f * ref + 0.5f);
+}
+
+//! The L2 precomputed-table decomposition must reproduce the per-list LUT
+//! path exactly (up to float reassociation): dis0 + ADC has to agree on every
+//! code of every list.  This is the main correctness guard for the fast path.
+TEST(IVFResidualCodecTest, PrecomputedTableMatchesPerListLut) {
+  const size_t dim = 32;
+  const size_t nlist = 8;
+  const size_t num_vecs = 64;
+  std::mt19937 gen(2029);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+  std::vector<float> centroids(nlist * dim);
+  for (auto &v : centroids) v = dist(gen);
+
+  //! use_zero_mean exercises the mu term of the expansion, which the IVF
+  //! builder enables in production.
+  ailego::Params params;
+  params.set("use_zero_mean", true);
+
+  //! One codec, toggled between both paths: k-means is not reproducible across
+  //! instances, so two codecs would not share a codebook and the comparison
+  //! would be meaningless.
+  IVFResidualCodec codec;
+  ASSERT_EQ(codec.init(make_meta(dim, "SquaredEuclidean"), params), 0);
+  ASSERT_EQ(codec.set_centroids(centroids, nlist), 0);
+  ASSERT_EQ(codec.train(make_random_holder(2048, dim, 5)), 0);
+
+  std::vector<uint8_t> codes(num_vecs * codec.code_size());
+  std::vector<size_t> owner(num_vecs);
+  for (size_t i = 0; i < num_vecs; ++i) {
+    std::vector<float> vec(dim);
+    for (auto &v : vec) v = dist(gen);
+    owner[i] = i % nlist;
+    codec.encode(vec.data(), owner[i], codes.data() + i * codec.code_size());
+  }
+
+  std::vector<std::vector<float>> queries(4, std::vector<float>(dim));
+  for (auto &query : queries) {
+    for (auto &v : query) v = dist(gen);
+  }
+
+  //! Collect dis0 + ADC for every (query, list, vector) under both paths.
+  auto collect = [&](bool expect_fast) {
+    std::vector<float> out;
+    out.reserve(queries.size() * nlist * num_vecs);
+    for (const auto &query : queries) {
+      IVFResidualCodec::QueryState state;
+      EXPECT_EQ(codec.prepare_query(query.data(), &state), 0);
+      EXPECT_EQ(state.use_precomputed, expect_fast);
+      for (size_t list_id = 0; list_id < nlist; ++list_id) {
+        float dis0 = 0.0f;
+        codec.build_list_query(list_id, &state, &dis0);
+        for (size_t i = 0; i < num_vecs; ++i) {
+          float adc = 0.0f;
+          codec.batch_distance(codes.data() + i * codec.code_size(), 1,
+                               codec.code_size(), state.lut.data(), &adc);
+          out.push_back(adc + dis0);
+        }
+      }
+    }
+    return out;
+  };
+
+  ASSERT_EQ(codec.build_precomputed_table(), 0);
+  ASSERT_TRUE(codec.use_precomputed_table());
+  const std::vector<float> fast_dists = collect(true);
+
+  //! A 1-byte cap must suppress the table and restore the per-list LUT path.
+  ASSERT_EQ(codec.build_precomputed_table(1), 0);
+  ASSERT_FALSE(codec.use_precomputed_table());
+  const std::vector<float> slow_dists = collect(false);
+
+  ASSERT_EQ(fast_dists.size(), slow_dists.size());
+  for (size_t i = 0; i < slow_dists.size(); ++i) {
+    //! Same algebra, different summation order: allow a relative slack.
+    const float tol = 1e-4f * std::max(1.0f, std::fabs(slow_dists[i]));
+    ASSERT_NEAR(fast_dists[i], slow_dists[i], tol) << "sample " << i;
+  }
+}
+
+//! Metrics that the decomposition does not cover must keep the table off.
+TEST(IVFResidualCodecTest, PrecomputedTableOnlyForPlainL2) {
+  const size_t dim = 32;
+  const size_t nlist = 4;
+  std::mt19937 gen(77);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+  std::vector<float> centroids(nlist * dim);
+  for (auto &v : centroids) v = dist(gen);
+
+  for (const char *metric : {"Cosine", "InnerProduct"}) {
+    IVFResidualCodec codec;
+    ASSERT_EQ(codec.init(make_meta(dim, metric), ailego::Params()), 0);
+    ASSERT_EQ(codec.set_centroids(centroids, nlist), 0);
+    ASSERT_EQ(codec.train(make_random_holder(512, dim)), 0);
+    ASSERT_EQ(codec.build_precomputed_table(), 0);
+    EXPECT_FALSE(codec.use_precomputed_table())
+        << metric << " must not use the L2 precomputed table";
+  }
+
+  //! set_centroids() after the fact must invalidate the table.
+  IVFResidualCodec l2;
+  ASSERT_EQ(l2.init(make_meta(dim, "SquaredEuclidean"), ailego::Params()), 0);
+  ASSERT_EQ(l2.set_centroids(centroids, nlist), 0);
+  ASSERT_EQ(l2.train(make_random_holder(512, dim)), 0);
+  ASSERT_EQ(l2.build_precomputed_table(), 0);
+  ASSERT_TRUE(l2.use_precomputed_table());
+  ASSERT_EQ(l2.set_centroids(centroids, nlist), 0);
+  EXPECT_FALSE(l2.use_precomputed_table());
 }

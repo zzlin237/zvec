@@ -500,6 +500,71 @@ void PqInt8Quantizer::quantize_query(const void *input, void *output) const {
   }
 }
 
+int PqInt8Quantizer::compute_code_norm_table(float *out) const {
+  // fp32-only: the callers that precompute ADC tables (IVF residual PQ) gate
+  // on this and fall back to quantize_query() otherwise.
+  if (input_data_type_ != DataType::kFp32 || centroids_.empty()) {
+    return kErrNotImplemented;
+  }
+  const float *cb = reinterpret_cast<const float *>(centroids_.data());
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
+    const float *base =
+        cb + static_cast<size_t>(m) * kNumCentroids * sub_dim_;
+    float *dst = out + static_cast<size_t>(m) * kNumCentroids;
+    for (uint32_t j = 0; j < kNumCentroids; ++j) {
+      const float *c = base + static_cast<size_t>(j) * sub_dim_;
+      float sum = 0.0f;
+      for (uint32_t d = 0; d < sub_dim_; ++d) {
+        sum += c[d] * c[d];
+      }
+      dst[j] = sum;
+    }
+  }
+  return 0;
+}
+
+int PqInt8Quantizer::compute_subspace_ip_table(const void *vec,
+                                               float *out) const {
+  if (input_data_type_ != DataType::kFp32 || centroids_.empty()) {
+    return kErrNotImplemented;
+  }
+  const float *v = reinterpret_cast<const float *>(vec);
+  const float *cb = reinterpret_cast<const float *>(centroids_.data());
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
+    const float *sub_vec = v + static_cast<size_t>(m) * sub_dim_;
+    const float *base =
+        cb + static_cast<size_t>(m) * kNumCentroids * sub_dim_;
+    float *dst = out + static_cast<size_t>(m) * kNumCentroids;
+    for (uint32_t j = 0; j < kNumCentroids; ++j) {
+      const float *c = base + static_cast<size_t>(j) * sub_dim_;
+      float sum = 0.0f;
+      for (uint32_t d = 0; d < sub_dim_; ++d) {
+        sum += sub_vec[d] * c[d];
+      }
+      dst[j] = sum;
+    }
+  }
+  return 0;
+}
+
+int PqInt8Quantizer::preprocess_query(const void *input, float *out) const {
+  if (input_data_type_ != DataType::kFp32) {
+    return kErrNotImplemented;
+  }
+  // Mirror quantize_query(): Cosine normalization first, then zero-mean
+  // centering.  Any divergence here silently breaks the precomputed-table
+  // decomposition, so the order must stay in lockstep with quantize_query().
+  const float *q = reinterpret_cast<const float *>(input);
+  std::memcpy(out, q, static_cast<size_t>(original_dim_) * sizeof(float));
+  if (meta_.metric_name() == "Cosine") {
+    normalize_single(out);
+  }
+  if (use_zero_mean_) {
+    subtract_center(out);
+  }
+  return 0;
+}
+
 float PqInt8Quantizer::calc_distance_dp_query(const void *dp,
                                               const void *query) const {
   // dp = pq_code (uint8_t[num_chunk])

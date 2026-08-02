@@ -99,6 +99,33 @@ class Quantizer {
   //! Quantize a query vector
   virtual void quantize_query(const void *input, void *output) const = 0;
 
+  //! Codebook introspection used to precompute per-partition ADC tables.
+  //! Only product quantizers implement these; the default returns
+  //! kErrNotImplemented so callers must fall back to quantize_query().
+  //!
+  //! Layout of every table below is [sub_quantizer][centroid], i.e.
+  //! out[m * num_centroids + j], sized quantized_query_vector_length().
+
+  //! out[m][j] = ||centroid_{m,j}||^2
+  virtual int compute_code_norm_table(float * /*out*/) const {
+    return kErrNotImplemented;
+  }
+
+  //! out[m][j] = dot(vec_m, centroid_{m,j}).  `vec` holds dim() values in the
+  //! quantizer's input type and is consumed as-is: no normalization and no
+  //! zero-mean centering are applied (use preprocess_query() first when the
+  //! caller needs the same treatment quantize_query() gives).
+  virtual int compute_subspace_ip_table(const void * /*vec*/,
+                                       float * /*out*/) const {
+    return kErrNotImplemented;
+  }
+
+  //! Apply exactly the preprocessing quantize_query() performs (Cosine
+  //! normalization, then zero-mean centering) and write dim() fp32 values.
+  virtual int preprocess_query(const void * /*input*/, float * /*out*/) const {
+    return kErrNotImplemented;
+  }
+
   //! Distance between a quantized datapoint and a quantized query
   virtual float calc_distance_dp_query(const void *dp,
                                        const void *query) const = 0;

@@ -49,6 +49,32 @@ class IVFResidualCodec {
   //!                              derive it from the persisted centroids)
   static constexpr const char *kDefaultQuantizerClass = "PqInt8Quantizer";
 
+  /*! Per-query scratch, reused across every probed list of one query.
+   *
+   *  Buffers keep their capacity, so a context that outlives many queries
+   *  allocates only on the first one.  Lifetime rule: call prepare_query()
+   *  once per query, then build_list_query() once per probed list.
+   */
+  struct QueryState {
+    //! ADC LUT handed to batch_distance(); num_chunk * ksub floats.
+    std::vector<float> lut;
+    //! Per-block ADC output; block_vector_count floats, sized by the caller.
+    std::vector<float> distances;
+    //! Raw query of the current query, borrowed (not owned).
+    const float *query{nullptr};
+    //! dot(w_m, centroid_{m,j}) for the current query; L2 fast path only.
+    std::vector<float> ip_table;
+    //! Preprocessed query w (normalize + zero-mean); L2 fast path only.
+    std::vector<float> query_buf;
+    //! True when `lut` depends on the query only, so build_list_query() must
+    //! not touch it (InnerProduct: the LUT is identical for every list).
+    bool lut_is_query_only{false};
+    //! True when the L2 precomputed-table decomposition is in use for this
+    //! query, so build_list_query() only does one madd plus dis0.
+    bool use_precomputed{false};
+  };
+
+
   IVFResidualCodec() {}
   ~IVFResidualCodec() {}
 
@@ -87,14 +113,22 @@ class IVFResidualCodec {
   //! Encode one datapoint of list `list_id`: residual + quantize in one step.
   void encode(const float *vec, size_t list_id, uint8_t *code) const;
 
-  //! Build the per-list ADC query state: fill `lut` with the quantized query
-  //! LUT and set `dis0` to the per-list constant added to every ADC distance.
+  //! Build the query-only part of the ADC state once per query; this must
+  //! precede every build_list_query() call for the same query.
+  //! - IP (faiss residual+dis0): the LUT is built here from the RAW query and
+  //!   is identical for every list, so build_list_query() only supplies dis0.
+  //! - L2/Cosine: the LUT depends on the per-list residual, so only the query
+  //!   pointer and the buffers are set up here.
+  int prepare_query(const void *query, QueryState *state) const;
+
+  //! Build the per-list ADC query state: leave `state->lut` ready for
+  //! batch_distance() and set `dis0` to the per-list constant added to every
+  //! ADC distance.
   //! - L2/Cosine: LUT on the residual r = (unit(q) if Cosine else q) - c,
   //!   dis0 = 0 (residual ADC directly approximates the metric distance).
-  //! - IP (faiss residual+dis0): LUT on the RAW query q; the coarse center
-  //!   contributes dis0 = -<q,c>, so dis0 + ADC = -<q,v>.
-  void build_list_query(const void *query, size_t list_id, float *lut,
-                        float *dis0) const;
+  //! - IP: LUT already built by prepare_query(); the coarse center contributes
+  //!   dis0 = -<q,c>, so dis0 + ADC = -<q,v>.
+  void build_list_query(size_t list_id, QueryState *state, float *dis0) const;
 
   //! Batched ADC distances over contiguous codes against a prebuilt LUT.
   void batch_distance(const void *codes, int num, size_t stride,
@@ -156,10 +190,47 @@ class IVFResidualCodec {
     return quantizer_->deserialize(data, len);
   }
 
+  /*! Precompute the list-dependent half of the L2 ADC table (faiss
+   *  use_precomputed_table=1).
+   *
+   *  With r' = (v - c_i) - mu the encoded residual and w = x - mu the
+   *  preprocessed query,
+   *
+   *    ||x - v_hat||^2 = ||w - c_i||^2
+   *                      + sum_m [ ||s_mj||^2 + 2<c_im, s_mj> - 2<w_m, s_mj> ]
+   *
+   *  so table_[i][m][j] = ||s_mj||^2 + 2<c_im, s_mj> depends on the list and
+   *  the codebook only, and the per-list LUT collapses to a single
+   *  lut = table_[i] - 2 * ip_table madd.
+   *
+   *  Only valid for plain L2: Cosine re-normalizes the residual inside
+   *  quantize_query(), which is non-linear and breaks the expansion, and IP
+   *  does not need it (its LUT is already query-only). Must be called after
+   *  set_centroids() and deserialize_codebook(). Returns 0 both when the table
+   *  was built and when it was skipped; call use_precomputed_table() to tell.
+   *  The table is never persisted -- rebuilding it costs
+   *  nlist * dim * ksub multiply-adds, cheaper than storing it.
+   */
+  int build_precomputed_table(size_t max_bytes = kDefaultPrecomputeMaxBytes);
+
+  //! Whether the L2 precomputed-table fast path is active.
+  bool use_precomputed_table() const {
+    return use_precomputed_table_;
+  }
+
+  //! Default cap on the precomputed table (nlist * num_chunk * ksub * 4B).
+  //! Configurations above it fall back to rebuilding the LUT per list.
+  static constexpr size_t kDefaultPrecomputeMaxBytes = 512UL << 20;
+
  private:
   //! Members
   turbo::Quantizer::Pointer quantizer_{};
   std::vector<float> centroids_{};  // nlist * dim_ (normalized if Cosine)
+  //! nlist * num_chunk * ksub, only when use_precomputed_table_.
+  std::vector<float> precomputed_table_{};
+  size_t nlist_{0};
+  size_t lut_floats_{0};  // num_chunk * ksub
+  bool use_precomputed_table_{false};
   std::string quantizer_class_{};
   uint32_t dim_{0};
   uint32_t num_chunk_{0};

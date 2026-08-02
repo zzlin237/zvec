@@ -226,6 +226,11 @@ int IVFSearcher::search_impl(const void *query, const IndexQueryMeta &qmeta,
     auto &context_stats = ctx->mutable_stats(q);
     auto &heap = ctx->mutable_result_heap();
     heap.clear();
+    // Residual PQ: build the query-only part of the ADC state once, then
+    // reuse it for every probed list of this query (no-op without PQ).
+    auto *pq_state = ctx->mutable_pq_query_state();
+    ret = entity->prepare_residual_query(query, pq_state);
+    ivf_check_error_code(ret);
     size_t total_scan_count = 0;
     for (size_t i = 0;
          i < centroids.size() && total_scan_count < ctx->max_scan_count();
@@ -233,9 +238,10 @@ int IVFSearcher::search_impl(const void *query, const IndexQueryMeta &qmeta,
       auto cid = centroids[i].key();
       uint32_t scan_count = 0;
       if (!filter.is_valid()) {
-        ret = entity->search(cid, query, &scan_count, &heap, &context_stats);
+        ret = entity->search(cid, query, &scan_count, &heap, pq_state,
+                             &context_stats);
       } else {
-        ret = entity->search(cid, query, filter, &scan_count, &heap,
+        ret = entity->search(cid, query, filter, &scan_count, &heap, pq_state,
                              &context_stats);
       }
       ivf_check_with_msg(ret, "Failed to search in entity for %s",

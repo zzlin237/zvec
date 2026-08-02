@@ -84,6 +84,12 @@ class PqInt4Quantizer : public Quantizer {
 
   void quantize_query(const void *input, void *output) const override;
 
+  int compute_code_norm_table(float *out) const override;
+
+  int compute_subspace_ip_table(const void *vec, float *out) const override;
+
+  int preprocess_query(const void *input, float *out) const override;
+
   float calc_distance_dp_query(const void *dp,
                                const void *query) const override;
 

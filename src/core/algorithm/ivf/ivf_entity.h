@@ -45,14 +45,37 @@ class IVFEntity {
   //! load the index from container
   virtual int load(const IndexStorage::Pointer &container);
 
+  //! Whether this index stores per-cluster residual PQ codes.
+  bool residual_enabled() const {
+    return residual_enabled_;
+  }
+
+  //! Build the query-only part of the residual-PQ ADC state. Callers must run
+  //! this once per query before the per-list search() overloads that take a
+  //! QueryState. No-op (success) when residual PQ is not enabled.
+  int prepare_residual_query(const void *query,
+                             IVFResidualCodec::QueryState *qs) const {
+    if (!residual_enabled_) {
+      return 0;
+    }
+    if (!residual_codec_) {
+      return IndexError_Runtime;
+    }
+    return residual_codec_->prepare_query(query, qs);
+  }
+
   //! search in inverted list with filter
+  //! `qs` carries the per-query ADC state; the caller must have run
+  //! IVFResidualCodec::prepare_query() on it for `query` first.
   int search(size_t inverted_list_id, const void *query,
              const IndexFilter &filter, uint32_t *scan_count,
-             IndexDocumentHeap *heap, IndexContext::Stats *context_stats) const;
+             IndexDocumentHeap *heap, IVFResidualCodec::QueryState *qs,
+             IndexContext::Stats *context_stats) const;
 
   //! search in inverted list without filter
   int search(size_t inverted_list_id, const void *query, uint32_t *scan_count,
-             IndexDocumentHeap *heap, IndexContext::Stats *context_stats) const;
+             IndexDocumentHeap *heap, IVFResidualCodec::QueryState *qs,
+             IndexContext::Stats *context_stats) const;
 
   //! search all inverted list with filter
   int search(const void *query, const IndexFilter &filter,
@@ -340,10 +363,11 @@ class IVFEntity {
   int load_residual_codec(const IndexStorage::Pointer &container);
 
   //! Search a single inverted list using per-cluster residual PQ ADC.
-  //! filter may be null (no filter).
+  //! filter may be null (no filter). `qs` must already be prepared for
+  //! `query` via IVFResidualCodec::prepare_query().
   int search_residual(size_t inverted_list_id, const void *query,
                 const IndexFilter *filter, uint32_t *scan_count,
-                IndexDocumentHeap *heap,
+                IndexDocumentHeap *heap, IVFResidualCodec::QueryState *qs,
                 IndexContext::Stats *context_stats) const;
 
   //! Convert the int8 quantizer scale to normalize value

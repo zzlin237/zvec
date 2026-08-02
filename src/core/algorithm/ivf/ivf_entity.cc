@@ -527,6 +527,14 @@ int IVFEntity::load_residual_codec(const IndexStorage::Pointer &container) {
     }
   }
 
+  //! Precompute the list-dependent half of the L2 ADC table when it fits;
+  //! silently stays disabled for Cosine/IP or when it would be too large.
+  ret = residual_codec_->build_precomputed_table();
+  if (ret != 0) {
+    LOG_ERROR("Failed to build PQ precomputed table, ret=%d", ret);
+    return ret;
+  }
+
   residual_enabled_ = true;
   LOG_DEBUG("Loaded shared residual PQ: nlist=%zu dim=%u num_chunk=%u",
             nlist, dim, num_chunk);
@@ -536,22 +544,27 @@ int IVFEntity::load_residual_codec(const IndexStorage::Pointer &container) {
 int IVFEntity::search_residual(size_t inverted_list_id, const void *query,
                          const IndexFilter *filter, uint32_t *scan_count,
                          IndexDocumentHeap *heap,
+                         IVFResidualCodec::QueryState *qs,
                          IndexContext::Stats *context_stats) const {
   auto list_meta = this->inverted_list_meta(inverted_list_id);
   ivf_assert(list_meta, IndexError_ReadData);
   const auto &pq = residual_codec_;  // shared codebook for all clusters
   ivf_assert(pq, IndexError_Runtime);
+  ivf_assert(qs, IndexError_InvalidArgument);
+  ivf_assert(qs->query == reinterpret_cast<const float *>(query),
+             IndexError_InvalidArgument);
 
-  std::vector<float> lut(pq->lut_size() / sizeof(float));
   float dis0 = 0.0f;
-  pq->build_list_query(query, inverted_list_id, lut.data(), &dis0);
+  pq->build_list_query(inverted_list_id, qs, &dis0);
+  float *lut = qs->lut.data();
 
   const void *data = nullptr;
   const size_t block_vecs = header_.block_vector_count;
   const size_t block_size = header_.block_size;
   const size_t code_size = pq->code_size();
   const size_t batch_size = kBatchBlocks;
-  std::vector<float> distances(block_vecs);
+  qs->distances.resize(block_vecs);
+  float *distances = qs->distances.data();
 
   for (size_t i = 0; i < list_meta->block_count; i += batch_size) {
     const size_t off = list_meta->offset + i * block_size;
@@ -578,7 +591,7 @@ int IVFEntity::search_residual(size_t inverted_list_id, const void *query,
       const char *block_data =
           static_cast<const char *>(data) + b * block_size;
       pq->batch_distance(block_data, static_cast<int>(vecs_count), code_size,
-                         lut.data(), distances.data());
+                         lut, distances);
       *(context_stats->mutable_dist_calced_count()) += vecs_count;
       const uint32_t id_off = list_meta->id_offset + (i + b) * block_vecs;
       for (size_t k = 0; k < vecs_count; ++k) {
@@ -764,12 +777,13 @@ int IVFEntity::load(const IndexStorage::Pointer &container) {
 int IVFEntity::search(size_t inverted_list_id, const void *query,
                       const IndexFilter &filter, uint32_t *scan_count,
                       IndexDocumentHeap *heap,
+                      IVFResidualCodec::QueryState *qs,
                       IndexContext::Stats *context_stats) const {
   ailego_assert_with(inverted_list_id < header_.inverted_list_count,
                      "invalid id");
   if (residual_enabled_) {
     return this->search_residual(inverted_list_id, query, &filter, scan_count, heap,
-                           context_stats);
+                           qs, context_stats);
   }
   auto list_meta = this->inverted_list_meta(inverted_list_id);
   ivf_assert(list_meta, IndexError_ReadData);
@@ -842,12 +856,13 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
 //! search in inverted list without filter
 int IVFEntity::search(size_t inverted_list_id, const void *query,
                       uint32_t *scan_count, IndexDocumentHeap *heap,
+                      IVFResidualCodec::QueryState *qs,
                       IndexContext::Stats *context_stats) const {
   ailego_assert_with(inverted_list_id < header_.inverted_list_count,
                      "invalid id");
   if (residual_enabled_) {
     return this->search_residual(inverted_list_id, query, nullptr, scan_count, heap,
-                           context_stats);
+                           qs, context_stats);
   }
   auto list_meta = inverted_list_meta(inverted_list_id);
   ivf_assert(list_meta, IndexError_ReadData);
@@ -904,9 +919,18 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
 int IVFEntity::search(const void *query, const IndexFilter &filter,
                       IndexDocumentHeap *heap,
                       IndexContext::Stats *context_stats) const {
+  // Brute-force path over every list: own the per-query ADC state locally so
+  // the query-only part is still built just once.
+  IVFResidualCodec::QueryState qs;
+  if (residual_enabled_) {
+    ivf_assert(residual_codec_, IndexError_Runtime);
+    int ret = residual_codec_->prepare_query(query, &qs);
+    ivf_check_error_code(ret);
+  }
   for (size_t i = 0; i < header_.inverted_list_count; ++i) {
     uint32_t scan_count;
-    int ret = this->search(i, query, filter, &scan_count, heap, context_stats);
+    int ret =
+        this->search(i, query, filter, &scan_count, heap, &qs, context_stats);
     if (ret != 0) {
       return ret;
     }
@@ -918,9 +942,15 @@ int IVFEntity::search(const void *query, const IndexFilter &filter,
 //! search all inverted list without filter
 int IVFEntity::search(const void *query, IndexDocumentHeap *heap,
                       IndexContext::Stats *context_stats) const {
+  IVFResidualCodec::QueryState qs;
+  if (residual_enabled_) {
+    ivf_assert(residual_codec_, IndexError_Runtime);
+    int ret = residual_codec_->prepare_query(query, &qs);
+    ivf_check_error_code(ret);
+  }
   for (size_t i = 0; i < header_.inverted_list_count; ++i) {
     uint32_t scan_count;
-    int ret = this->search(i, query, &scan_count, heap, context_stats);
+    int ret = this->search(i, query, &scan_count, heap, &qs, context_stats);
     if (ret != 0) {
       return ret;
     }

@@ -139,6 +139,12 @@ class IVFSearcherContext : public IndexSearcher::Context {
     return result_heap_;
   }
 
+  //! Per-query residual-PQ ADC state, reused across the probed lists of one
+  //! query and across queries (the buffers keep their capacity).
+  IVFResidualCodec::QueryState *mutable_pq_query_state() {
+    return &pq_query_state_;
+  }
+
   void set_fetch_vector(bool v) override {
     fetch_vector_ = v;
   }
@@ -224,6 +230,7 @@ class IVFSearcherContext : public IndexSearcher::Context {
   IVFEntity::Pointer entity_{};
   IndexSearcher::Context::Pointer centroid_searcher_ctx_{};
   IndexDocumentHeap result_heap_;
+  IVFResidualCodec::QueryState pq_query_state_{};
   std::vector<IndexDocumentList> results_{};
   std::vector<Stats> stats_vec_{};
 
