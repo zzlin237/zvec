@@ -34,7 +34,7 @@ namespace turbo {
 struct PqInt4SerPayload {
   uint32_t original_dim;
   uint32_t num_chunk;
-  uint32_t sub_dim;
+  uint32_t chunk_dim;
   uint32_t num_centroids;  // always 16 for int4
   uint8_t use_zero_mean;
   uint8_t input_data_type;  // turbo DataType: kFp32=3, kFp16=2
@@ -117,7 +117,7 @@ int PqInt4Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
 }
 
 // ---------------------------------------------------------------------------
-// Simple Lloyd's KMeans for one sub-quantizer.
+// Simple Lloyd's KMeans for one chunk.
 // ---------------------------------------------------------------------------
 
 void PqInt4Quantizer::build_centroid_ptrs_cache() {
@@ -156,7 +156,7 @@ void PqInt4Quantizer::train_subquantizer(const T *data, size_t num,
     algorithm.append(sub_vec, d);
   }
 
-  // Single-threaded pool — parallelism is at the sub-quantizer level.
+  // Single-threaded pool — parallelism is at the chunk level.
   auto local_threads = std::make_shared<SingleQueueIndexThreads>(1, false);
 
   // KMC2 centroid initialization.
@@ -239,8 +239,8 @@ int PqInt4Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
   if (meta_.metric_name() == "Cosine") {
     switch (input_data_type_) {
       case DataType::kFp16:
-        normalize_batch(
-            reinterpret_cast<ailego::Float16 *>(all_data.data()), num);
+        normalize_batch(reinterpret_cast<ailego::Float16 *>(all_data.data()),
+                        num);
         break;
       case DataType::kFp32:
         normalize_batch(reinterpret_cast<float *>(all_data.data()), num);
@@ -274,7 +274,7 @@ int PqInt4Quantizer::train(IndexHolder::Pointer holder, int thread_count) {
       static_cast<uint32_t>(thread_count), false);
   auto task_group = threads->make_group();
 
-  // Distribute sub-quantizers across threads.
+  // Distribute chunks across threads.
   std::atomic<size_t> finished{0};
   size_t pool_count = threads->count();
 
@@ -586,7 +586,7 @@ int PqInt4Quantizer::dequantize(const void *in, const IndexQueryMeta &qmeta,
   out->resize(byte_size);
   float *result = reinterpret_cast<float *>(&(*out)[0]);
 
-  // Reconstruct by concatenating the selected centroids per sub-quantizer,
+  // Reconstruct by concatenating the selected centroids per chunk,
   // in the space the codebook was trained in (normalized for Cosine).
   const size_t k = kNumCentroids;
   const size_t d = sub_dim_;
@@ -690,7 +690,7 @@ int PqInt4Quantizer::serialize(std::string *out) const {
   PqInt4SerPayload payload{};
   payload.original_dim = original_dim_;
   payload.num_chunk = num_chunk_;
-  payload.sub_dim = sub_dim_;
+  payload.chunk_dim = sub_dim_;
   payload.num_centroids = kNumCentroids;
   payload.use_zero_mean = use_zero_mean_ ? 1 : 0;
   payload.input_data_type = static_cast<uint8_t>(input_data_type_);
@@ -738,7 +738,7 @@ int PqInt4Quantizer::deserialize(const void *data, size_t len) {
 
   original_dim_ = payload.original_dim;
   num_chunk_ = payload.num_chunk;
-  sub_dim_ = payload.sub_dim;
+  sub_dim_ = payload.chunk_dim;
 
   // Restore input data type.  Old payloads have input_data_type == 0
   // (was reserved), which maps to kInt4 -- treat as kFp32 for compat.
