@@ -38,11 +38,13 @@ class HnswContext : public IndexContext {
 
   //! Construct
   HnswContext(size_t dimension, const IndexMetric::Pointer &metric,
-              const HnswEntity::Pointer &entity);
+              const HnswEntity::Pointer &entity,
+              zvec::turbo::Quantizer::Pointer quantizer = nullptr);
 
   //! Construct
   HnswContext(const IndexMetric::Pointer &metric,
-              const HnswEntity::Pointer &entity);
+              const HnswEntity::Pointer &entity,
+              zvec::turbo::Quantizer::Pointer quantizer = nullptr);
 
   //! Destructor
   ~HnswContext() override;
@@ -123,7 +125,9 @@ class HnswContext : public IndexContext {
   //! Update context, the context may be shared by different searcher/streamer
   int update_context(ContextType type, const IndexMeta &meta,
                      const IndexMetric::Pointer &metric,
-                     const HnswEntity::Pointer &entity, uint32_t magic_num);
+                     const HnswEntity::Pointer &entity, uint32_t magic_num,
+                     const zvec::turbo::Quantizer::Pointer &quantizer =
+                         nullptr);
 
   inline const HnswEntity &get_entity() const {
     return *entity_;
@@ -274,13 +278,19 @@ class HnswContext : public IndexContext {
   }
 
   inline void reset_query(const void *query) {
-    if (auto query_preprocess_func = index_metric_->get_query_preprocess_func();
-        query_preprocess_func != nullptr) {
-      size_t dim = dc_.dimension();
-      preprocess_buffer_.resize(dim);
-      memcpy(preprocess_buffer_.data(), query, dim);
-      query_preprocess_func(preprocess_buffer_.data(), dim);
-      query = preprocess_buffer_.data();
+    // When a turbo quantizer is attached, the query is already in the
+    // quantizer's expected format (e.g. a PQ LUT); skip the metric-side
+    // preprocess which operates on the raw stored-vector layout.
+    if (!dc_.has_quantizer()) {
+      if (auto query_preprocess_func =
+              index_metric_->get_query_preprocess_func();
+          query_preprocess_func != nullptr) {
+        size_t dim = dc_.dimension();
+        preprocess_buffer_.resize(dim);
+        memcpy(preprocess_buffer_.data(), query, dim);
+        query_preprocess_func(preprocess_buffer_.data(), dim);
+        query = preprocess_buffer_.data();
+      }
     }
 
     dc_.reset_query(query);
@@ -504,6 +514,16 @@ class HnswContext : public IndexContext {
       const IndexMetric::MatrixDistance &distance,
       const IndexMetric::MatrixBatchDistance &batch_distance) {
     dc_.update_distance(distance, batch_distance);
+  }
+
+  //! Swap the turbo quantizer used by the dist calculator. `symmetric`
+  //! selects dp-vs-dp (graph construction) vs dp-vs-query (search)
+  //! distance semantics. Pass a null quantizer to fall back to the
+  //! metric distance handles. Caller must then invoke reset_query
+  //! before using the calculator.
+  inline void update_dist_caculator_quantizer(
+      zvec::turbo::Quantizer::Pointer quantizer, bool symmetric) {
+    dc_.update_quantizer(std::move(quantizer), symmetric);
   }
 
   //! Get topk

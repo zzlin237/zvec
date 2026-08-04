@@ -186,6 +186,8 @@ int HnswStreamer::cleanup(void) {
 
   meta_.clear();
   metric_.reset();
+  add_quantizer_.reset();
+  search_quantizer_.reset();
   stats_.clear();
   if (entity_) {
     entity_->cleanup();
@@ -240,6 +242,22 @@ int HnswStreamer::setup_entity() {
     LOG_ERROR("Hnsw entity init failed for %s", IndexError::What(ret));
   }
   return ret;
+}
+
+int HnswStreamer::init_quantizer(zvec::turbo::Quantizer::Pointer quantizer) {
+  add_quantizer_ = quantizer;
+  search_quantizer_ = quantizer;
+
+  return 0;
+}
+
+int HnswStreamer::init_quantizer(zvec::turbo::Quantizer::Pointer add_quantizer,
+                                 zvec::turbo::Quantizer::Pointer
+                                     search_quantizer) {
+  add_quantizer_ = add_quantizer;
+  search_quantizer_ = search_quantizer;
+
+  return 0;
 }
 
 int HnswStreamer::open(IndexStorage::Pointer stg) {
@@ -437,7 +455,8 @@ IndexStreamer::Context::Pointer HnswStreamer::create_context(void) const {
     return Context::Pointer();
   }
   HnswContext *ctx =
-      new (std::nothrow) HnswContext(meta_.dimension(), metric_, entity);
+      new (std::nothrow) HnswContext(meta_.dimension(), metric_, entity,
+                                     search_quantizer_);
   if (ailego_unlikely(ctx == nullptr)) {
     LOG_ERROR("Failed to new HnswContext");
     return Context::Pointer();
@@ -494,7 +513,7 @@ int HnswStreamer::update_context(HnswContext *ctx) const {
   ctx->set_max_scan_ratio(max_scan_ratio_);
   ctx->set_bruteforce_threshold(bruteforce_threshold_);
   return ctx->update_context(HnswContext::kStreamerContext, meta_, metric_,
-                             entity, magic_);
+                             entity, magic_, search_quantizer_);
 }
 
 //! Add a vector with id into index
@@ -540,6 +559,7 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
 
   ctx->clear();
   ctx->update_dist_caculator_distance(add_distance_, add_batch_distance_);
+  ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
   ctx->reset_query(query);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
@@ -620,6 +640,7 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
 
   ctx->clear();
   ctx->update_dist_caculator_distance(add_distance_, add_batch_distance_);
+  ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
   ctx->reset_query(query);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
@@ -668,7 +689,8 @@ int HnswStreamer::search_impl(const void *query, const IndexQueryMeta &qmeta,
 int HnswStreamer::search_impl(const void *query, const IndexQueryMeta &qmeta,
                               uint32_t count,
                               IndexStreamer::Context::Pointer &context) const {
-  int ret = check_params(query, qmeta);
+  int ret =
+      check_query_params(query, qmeta, search_quantizer_ != nullptr);
   if (ailego_unlikely(ret != 0)) {
     return ret;
   }
@@ -692,6 +714,8 @@ int HnswStreamer::search_impl(const void *query, const IndexQueryMeta &qmeta,
 
   ctx->clear();
   ctx->update_dist_caculator_distance(search_distance_, search_batch_distance_);
+  ctx->update_dist_caculator_quantizer(search_quantizer_,
+                                       /*symmetric=*/false);
   ctx->resize_results(count);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
   for (size_t q = 0; q < count; ++q) {
@@ -743,7 +767,8 @@ int HnswStreamer::search_bf_impl(
 int HnswStreamer::search_bf_impl(
     const void *query, const IndexQueryMeta &qmeta, uint32_t count,
     IndexStreamer::Context::Pointer &context) const {
-  int ret = check_params(query, qmeta);
+  int ret =
+      check_query_params(query, qmeta, search_quantizer_ != nullptr);
   if (ailego_unlikely(ret != 0)) {
     return ret;
   }
@@ -762,6 +787,8 @@ int HnswStreamer::search_bf_impl(
 
   ctx->clear();
   ctx->update_dist_caculator_distance(search_distance_, search_batch_distance_);
+  ctx->update_dist_caculator_quantizer(search_quantizer_,
+                                       /*symmetric=*/false);
   ctx->resize_results(count);
 
   if (ctx->group_by_search()) {
@@ -831,7 +858,8 @@ int HnswStreamer::search_bf_by_p_keys_impl(
     const void *query, const std::vector<std::vector<uint64_t>> &p_keys,
     const IndexQueryMeta &qmeta, uint32_t count,
     Context::Pointer &context) const {
-  int ret = check_params(query, qmeta);
+  int ret =
+      check_query_params(query, qmeta, search_quantizer_ != nullptr);
   if (ailego_unlikely(ret != 0)) {
     return ret;
   }
@@ -856,6 +884,8 @@ int HnswStreamer::search_bf_by_p_keys_impl(
 
   ctx->clear();
   ctx->update_dist_caculator_distance(search_distance_, search_batch_distance_);
+  ctx->update_dist_caculator_quantizer(search_quantizer_,
+                                       /*symmetric=*/false);
   ctx->resize_results(count);
 
   if (ctx->group_by_search()) {

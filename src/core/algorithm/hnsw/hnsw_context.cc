@@ -19,14 +19,20 @@ namespace zvec {
 namespace core {
 
 HnswContext::HnswContext(size_t dimension, const IndexMetric::Pointer &metric,
-                         const HnswEntity::Pointer &entity)
+                         const HnswEntity::Pointer &entity,
+                         zvec::turbo::Quantizer::Pointer quantizer)
     : IndexContext(metric),
       entity_(entity),
-      dc_(entity_.get(), metric, dimension) {}
+      dc_(entity_.get(), quantizer, metric, dimension) {}
 
 HnswContext::HnswContext(const IndexMetric::Pointer &metric,
-                         const HnswEntity::Pointer &entity)
-    : IndexContext(metric), entity_(entity), dc_(entity_.get(), metric) {}
+                         const HnswEntity::Pointer &entity,
+                         zvec::turbo::Quantizer::Pointer quantizer)
+    : IndexContext(metric), entity_(entity), dc_(entity_.get(), metric) {
+  if (quantizer) {
+    dc_.update_quantizer(std::move(quantizer), false);
+  }
+}
 
 HnswContext::~HnswContext() {
   visit_filter_.destroy();
@@ -212,7 +218,9 @@ int HnswContext::update(const ailego::Params &params) {
 int HnswContext::update_context(ContextType type, const IndexMeta &meta,
                                 const IndexMetric::Pointer &metric,
                                 const HnswEntity::Pointer &entity,
-                                uint32_t magic_num) {
+                                uint32_t magic_num,
+                                const zvec::turbo::Quantizer::Pointer
+                                    &quantizer) {
   uint32_t doc_cnt;
 
   if (ailego_unlikely(static_cast<uint32_t>(type) != type_)) {
@@ -261,7 +269,7 @@ int HnswContext::update_context(ContextType type, const IndexMeta &meta,
   }
 
   entity_ = entity;
-  dc_.update(entity_.get(), metric, meta.dimension());
+  dc_.update(entity_.get(), quantizer, metric, meta.dimension());
   if (vector_source_) {
     entity_->set_vector_source(vector_source_);
   }

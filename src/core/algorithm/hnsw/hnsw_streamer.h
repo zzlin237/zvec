@@ -49,6 +49,14 @@ class HnswStreamer : public IndexStreamer {
   //! Cleanup Streamer
   int cleanup(void) override;
 
+  //! Initialize quantizer used for both add and search
+  int init_quantizer(zvec::turbo::Quantizer::Pointer quantizer) override;
+
+  //! Initialize separate quantizers for add and search
+  int init_quantizer(zvec::turbo::Quantizer::Pointer add_quantizer,
+                     zvec::turbo::Quantizer::Pointer search_quantizer)
+      override;
+
   //! Create a context
   Context::Pointer create_context(void) const override;
 
@@ -154,6 +162,22 @@ class HnswStreamer : public IndexStreamer {
     return 0;
   }
 
+  //! Validate a query against the storage meta, unless a quantizer is
+  //! attached: a quantized query (e.g. a PQ LUT) has its own format
+  //! defined by the quantizer and does not match the stored layout.
+  inline int check_query_params(const void *query,
+                                const IndexQueryMeta &qmeta,
+                                bool quantized) const {
+    if (quantized) {
+      if (ailego_unlikely(!query)) {
+        LOG_ERROR("null query");
+        return IndexError_InvalidArgument;
+      }
+      return 0;
+    }
+    return check_params(query, qmeta);
+  }
+
   inline int check_sparse_count_is_zero(const uint32_t *sparse_count,
                                         uint32_t count) const {
     for (uint32_t i = 0; i < count; ++i) {
@@ -202,6 +226,14 @@ class HnswStreamer : public IndexStreamer {
 
   IndexMetric::MatrixBatchDistance add_batch_distance_{};
   IndexMetric::MatrixBatchDistance search_batch_distance_{};
+
+  //! Turbo quantizers driving distance calculation. add_quantizer_ is used
+  //! in symmetric (dp-vs-dp) mode during graph construction, while
+  //! search_quantizer_ is used in asymmetric (dp-vs-query) mode during
+  //! search. Both may be null, in which case the metric distance
+  //! handles are used.
+  zvec::turbo::Quantizer::Pointer add_quantizer_{};
+  zvec::turbo::Quantizer::Pointer search_quantizer_{};
 
   Stats stats_{};
   std::mutex mutex_{};

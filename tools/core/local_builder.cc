@@ -34,8 +34,10 @@
 #include "zvec/core/framework/index_provider.h"
 #include "zvec/core/framework/index_reformer.h"
 #include "zvec/core/framework/index_streamer.h"
+#include <turbo/quantizer/quantizer.h>
 #include "index_meta_helper.h"
 #include "meta_segment_common.h"
+#include "metric/metric_params.h"
 #include "vecs_index_holder.h"
 
 #ifdef __clang__
@@ -476,7 +478,9 @@ int build_sparse_by_streamer(IndexStreamer::Pointer &streamer,
 
 int do_build_by_streamer(IndexStreamer::Pointer &streamer,
                          uint32_t thread_count, RetrievalMode retrieval_mode,
-                         const IndexStorage::Pointer &storage = nullptr) {
+                         const IndexStorage::Pointer &storage = nullptr,
+                         const turbo::Quantizer::Pointer &quantizer =
+                             nullptr) {
   int ret;
   ailego::ThreadPool pool(thread_count, false);
   thread_count = static_cast<uint32_t>(pool.count());
@@ -512,6 +516,19 @@ int do_build_by_streamer(IndexStreamer::Pointer &streamer,
 
   IndexQueryMeta qmeta(holder->data_type(), holder->dimension());
   uint32_t keep_docs = holder->count() - holder->start_cursor();
+
+  // Quantized add path: datapoints are stored in the quantizer's layout
+  // (e.g. PQ codes) and distances are computed in the quantized domain.
+  IndexQueryMeta qz_qmeta;
+  size_t qz_len = 0;
+  if (quantizer) {
+    const IndexMeta &qz_meta = quantizer->meta();
+    qz_qmeta = IndexQueryMeta(IndexMeta::MetaType::MT_DENSE,
+                              qz_meta.data_type(), 1U, qz_meta.dimension(),
+                              static_cast<uint32_t>(quantizer->type()),
+                              qz_meta.extra_meta_size());
+    qz_len = quantizer->quantized_datapoint_vector_length();
+  }
 
   std::function<int(uint64_t, const void *, const IndexQueryMeta &,
                     IndexContext::Pointer &)>

@@ -7,8 +7,8 @@ foreach(CC_SRCS ${ALL_TEST_SRCS})
   cc_gtest(
       NAME ${CC_TARGET}
       STRICT
-      LIBS zvec_ailego core_framework core_utility core_metric core_quantizer core_knn_hnsw core_knn_flat
+      LIBS zvec_ailego core_framework core_utility core_metric core_quantizer core_knn_hnsw core_knn_flat zvec_turbo
       SRCS ${CC_SRCS}
-      INCS . ${PROJECT_ROOT_DIR}/src/core ${PROJECT_ROOT_DIR}/src/core/algorithm/hnsw
+      INCS . ${PROJECT_ROOT_DIR}/src/core ${PROJECT_ROOT_DIR}/src/core/algorithm/hnsw ${PROJECT_ROOT_DIR}/src/turbo
     )
 endforeach()

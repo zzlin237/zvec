@@ -13,12 +13,20 @@
 // limitations under the License.
 #pragma once
 
+#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_meta.h>
 #include "hnsw_entity.h"
 
 namespace zvec {
 namespace core {
 
+//! Dist calculator used by HNSW. When a turbo Quantizer is attached,
+//! distances are computed directly via the quantizer's calc_* APIs:
+//! search (asymmetric) uses calc_distance_dp_query / _batch between a
+//! pre-quantized query and stored codes, while graph construction
+//! (symmetric) uses calc_distance_dp_dp between stored codes. Without
+//! a quantizer it falls back to the IndexMetric distance handles,
+//! keeping the legacy behavior unchanged.
 class HnswDistCalculator {
  public:
   typedef std::shared_ptr<HnswDistCalculator> Pointer;
@@ -63,6 +71,18 @@ class HnswDistCalculator {
         dim_(0),
         compare_cnt_(0) {}
 
+  //! Constructor with a turbo quantizer and an IndexMetric fallback
+  HnswDistCalculator(const HnswEntity *entity,
+                     const zvec::turbo::Quantizer::Pointer &quantizer,
+                     const IndexMetric::Pointer &metric, uint32_t dim)
+      : entity_(entity),
+        quantizer_(quantizer),
+        distance_(metric->distance()),
+        batch_distance_(metric->batch_distance()),
+        query_(nullptr),
+        dim_(dim),
+        compare_cnt_(0) {}
+
   void update(const HnswEntity *entity, const IndexMetric::Pointer &metric) {
     entity_ = entity;
     distance_ = metric->distance();
@@ -77,11 +97,36 @@ class HnswDistCalculator {
     dim_ = dim;
   }
 
+  void update(const HnswEntity *entity,
+              const zvec::turbo::Quantizer::Pointer &quantizer,
+              const IndexMetric::Pointer &metric, uint32_t dim) {
+    entity_ = entity;
+    quantizer_ = quantizer;
+    distance_ = metric->distance();
+    batch_distance_ = metric->batch_distance();
+    dim_ = dim;
+  }
+
   inline void update_distance(
       const IndexMetric::MatrixDistance &distance,
       const IndexMetric::MatrixBatchDistance &batch_distance) {
     distance_ = distance;
     batch_distance_ = batch_distance;
+  }
+
+  //! Replace the turbo quantizer. `symmetric` selects the distance
+  //! semantics: true for graph construction (dp-vs-dp SDC, the bound
+  //! query is a stored code), false for search (dp-vs-query ADC, the
+  //! bound query is a pre-quantized query e.g. a PQ LUT). Pass a null
+  //! quantizer to fall back to the IndexMetric path.
+  inline void update_quantizer(zvec::turbo::Quantizer::Pointer quantizer,
+                               bool symmetric) {
+    quantizer_ = std::move(quantizer);
+    symmetric_ = symmetric;
+  }
+
+  inline bool has_quantizer() const {
+    return quantizer_ != nullptr;
   }
 
   //! Reset query vector data
@@ -90,12 +135,17 @@ class HnswDistCalculator {
     query_ = query;
   }
 
-  //! Returns distance
+  //! Returns distance between two stored vectors (pairwise), computed
+  //! with dp-vs-dp distance (SDC when a PQ quantizer is attached).
   inline dist_t dist(const void *vec_lhs, const void *vec_rhs) {
     if (ailego_unlikely(vec_lhs == nullptr || vec_rhs == nullptr)) {
       LOG_ERROR("Nullptr of dense vector");
       error_ = true;
       return 0.0f;
+    }
+
+    if (quantizer_ != nullptr) {
+      return quantizer_->calc_distance_dp_dp(vec_lhs, vec_rhs);
     }
 
     float score{0.0f};
@@ -105,11 +155,32 @@ class HnswDistCalculator {
     return score;
   }
 
+  //! Returns distance between the bound query and an already-fetched
+  //! vector, without touching compare_cnt_.
+  inline dist_t dist_vs_query(const void *vec) {
+    if (ailego_unlikely(vec == nullptr || query_ == nullptr)) {
+      LOG_ERROR("Nullptr of dense vector or query");
+      error_ = true;
+      return 0.0f;
+    }
+
+    if (quantizer_ != nullptr) {
+      return symmetric_ ? quantizer_->calc_distance_dp_dp(query_, vec)
+                        : quantizer_->calc_distance_dp_query(vec, query_);
+    }
+
+    float score{0.0f};
+
+    distance_(vec, query_, dim_, &score);
+
+    return score;
+  }
+
   //! Returns distance between query and vec.
   inline dist_t dist(const void *vec) {
     compare_cnt_++;
 
-    return dist(vec, query_);
+    return dist_vs_query(vec);
   }
 
   //! Return distance between query and node id.
@@ -129,7 +200,7 @@ class HnswDistCalculator {
       return 0.0f;
     }
 
-    return dist(feat, query_);
+    return dist_vs_query(feat);
   }
 
   //! Return dist node lhs between node rhs
@@ -178,6 +249,20 @@ class HnswDistCalculator {
   void batch_dist(const void **vecs, size_t num, dist_t *distances) {
     compare_cnt_++;
 
+    if (quantizer_ != nullptr) {
+      if (!symmetric_) {
+        //! Batch ADC between stored codes and the pre-quantized query
+        quantizer_->calc_distance_dp_query_batch(
+            vecs, static_cast<int>(num), query_, distances);
+      } else {
+        //! No batch SDC kernel: per-vector dp-vs-dp distance
+        for (size_t i = 0; i < num; ++i) {
+          distances[i] = quantizer_->calc_distance_dp_dp(query_, vecs[i]);
+        }
+      }
+      return;
+    }
+
     batch_distance_(vecs, query_, num, dim_, distances);
   }
 
@@ -197,6 +282,11 @@ class HnswDistCalculator {
       error_ = true;
       return 0.0f;
     }
+
+    if (quantizer_ != nullptr) {
+      return dist_vs_query(feat);
+    }
+
     dist_t score = 0;
     batch_distance_(&feat, query_, 1, dim_, &score);
 
@@ -231,6 +321,13 @@ class HnswDistCalculator {
 
  private:
   const HnswEntity *entity_;
+
+  //! Optional turbo quantizer; when set, distances go through its
+  //! calc_* APIs instead of the IndexMetric handles below.
+  zvec::turbo::Quantizer::Pointer quantizer_{};
+  //! Distance semantics of the attached quantizer: true = graph
+  //! construction (dp-vs-dp), false = search (dp-vs-query).
+  bool symmetric_{false};
 
   IndexMetric::MatrixDistance distance_;
   IndexMetric::MatrixBatchDistance batch_distance_;
