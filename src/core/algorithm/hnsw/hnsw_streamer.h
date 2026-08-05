@@ -178,6 +178,29 @@ class HnswStreamer : public IndexStreamer {
     return check_params(query, qmeta);
   }
 
+  //! Whether incoming raw vectors/queries should be quantized inside the
+  //! streamer: a PQ quantizer is attached and both the storage meta and
+  //! the incoming query meta match the quantizer input type, i.e. the
+  //! caller passes raw vectors instead of pre-quantized codes/LUTs.
+  inline bool use_internal_quantizer(
+      const zvec::turbo::Quantizer::Pointer &quantizer,
+      const IndexQueryMeta &qmeta) const {
+    if (!quantizer ||
+        quantizer->type() != zvec::turbo::QuantizeType::kPQ) {
+      return false;
+    }
+    IndexMeta::DataType input_type = IndexMeta::DT_UNDEFINED;
+    if (quantizer->input_data_type() == zvec::turbo::DataType::kFp32) {
+      input_type = IndexMeta::DT_FP32;
+    } else if (quantizer->input_data_type() ==
+               zvec::turbo::DataType::kFp16) {
+      input_type = IndexMeta::DT_FP16;
+    }
+    return input_type != IndexMeta::DT_UNDEFINED &&
+           meta_.data_type() == input_type &&
+           qmeta.data_type() == input_type;
+  }
+
   inline int check_sparse_count_is_zero(const uint32_t *sparse_count,
                                         uint32_t count) const {
     for (uint32_t i = 0; i < count; ++i) {
@@ -193,6 +216,10 @@ class HnswStreamer : public IndexStreamer {
  private:
   //! Configure and initialize the entity with saved parameters
   int setup_entity();
+
+  //! Serialize turbo quantizer state into meta_.streamer_params_
+  //! so it is included in dump/close/flush persistence.
+  void persist_quantizer_to_meta();
 
   //! To share ctx across streamer/searcher, we need to update the context for
   //! current streamer/searcher
@@ -234,6 +261,7 @@ class HnswStreamer : public IndexStreamer {
   //! handles are used.
   zvec::turbo::Quantizer::Pointer add_quantizer_{};
   zvec::turbo::Quantizer::Pointer search_quantizer_{};
+  std::string turbo_quantizer_class_{};
 
   Stats stats_{};
   std::mutex mutex_{};

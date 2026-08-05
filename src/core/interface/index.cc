@@ -175,6 +175,16 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
             return core::IndexError_Unsupported;
           }
           break;
+        case QuantizerType::kFp32:
+          // Fp32 is handled by turbo Fp32Quantizer in streamer,
+          // no converter needed.
+          return core::IndexError_Success;
+        case QuantizerType::kPQ:
+          // PQ is handled by turbo quantizer in streamer.
+          // Cosine normalization is done inside PqInt8Quantizer,
+          // no converter needed — creating CosineNormalizeConverter would
+          // add an extra dimension (norm) and cause open() mismatch.
+          return core::IndexError_Success;
         case QuantizerType::kRabitq:
           if (index_param.data_type == DataType::DT_FP32) {
             converter_name = "CosineNormalizeConverter";
@@ -199,6 +209,13 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
     } else {
       switch (param.type) {
         case QuantizerType::kNone:
+          return core::IndexError_Success;
+        case QuantizerType::kFp32:
+          // Fp32 is handled by turbo Fp32Quantizer in streamer, no converter
+          // needed
+          return core::IndexError_Success;
+        case QuantizerType::kPQ:
+          // PQ is handled by turbo quantizer in streamer, no converter needed
           return core::IndexError_Success;
         case QuantizerType::kFP16:
           converter_name = "HalfFloatConverter";

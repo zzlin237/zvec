@@ -257,6 +257,167 @@ TEST_F(HnswStreamerTurboPqTest, TestPqInt8Cosine) {
   run_pq_index_test(dir_, "Cosine", 0.8f);
 }
 
+//! Internal quantization path: the index meta keeps the raw fp32 contract,
+//! raw vectors/queries are passed in and the streamer quantizes them
+//! internally. After close, reopening the same storage without injecting
+//! a quantizer must restore it from the persisted meta.
+TEST_F(HnswStreamerTurboPqTest, TestPqInt8InternalQuantization) {
+  const string index_path = dir_ + "pq_internal.index";
+  auto quantizer =
+      make_quantizer("PqInt8Quantizer", "SquaredEuclidean", kNumChunk);
+  ASSERT_TRUE(quantizer != nullptr);
+  ASSERT_EQ(0, quantizer->train(make_train_holder(42)));
+  const size_t code_len = quantizer->quantized_datapoint_vector_length();
+
+  std::mt19937 gen(99);
+  std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+  vector<NumericalVector<float>> raw_vecs(kDocCount,
+                                          NumericalVector<float>(kDim));
+  for (size_t i = 0; i < kDocCount; ++i) {
+    for (size_t j = 0; j < kDim; ++j) {
+      raw_vecs[i][j] = dist(gen);
+    }
+  }
+
+  IndexMeta meta;
+  meta.set_meta(IndexMeta::DataType::DT_FP32, kDim);
+  meta.set_metric("SquaredEuclidean", 0, ailego::Params());
+
+  IndexQueryMeta qmeta(IndexMeta::DataType::DT_FP32,
+                       static_cast<uint32_t>(kDim));
+
+  {
+    IndexStreamer::Pointer streamer =
+        IndexFactory::CreateStreamer("HnswStreamer");
+    ASSERT_TRUE(streamer != nullptr);
+
+    ailego::Params params;
+    set_hnsw_params(&params);
+    ASSERT_EQ(0, streamer->init(meta, params));
+    ASSERT_EQ(0, streamer->init_quantizer(quantizer));
+
+    auto storage = IndexFactory::CreateStorage("MMapFileStorage");
+    ASSERT_TRUE(storage != nullptr);
+    ailego::Params stg_params;
+    ASSERT_EQ(0, storage->init(stg_params));
+    ASSERT_EQ(0, storage->open(index_path, true));
+    ASSERT_EQ(0, streamer->open(storage));
+
+    auto ctx = streamer->create_context();
+    ASSERT_TRUE(!!ctx);
+
+    // Add raw fp32 vectors; the streamer stores PQ codes internally.
+    for (size_t i = 0; i < kDocCount; ++i) {
+      ASSERT_EQ(0, streamer->add_impl(i, raw_vecs[i].data(), qmeta, ctx));
+    }
+
+    // Search with raw fp32 queries; the streamer builds the LUT itself.
+    float recall_sum = 0.0f;
+    for (size_t q = 0; q < kQueryCount; ++q) {
+      NumericalVector<float> query(kDim);
+      for (size_t j = 0; j < kDim; ++j) {
+        query[j] = dist(gen);
+      }
+      ctx->set_topk(kTopk);
+      ASSERT_EQ(0, streamer->search_impl(query.data(), qmeta, ctx));
+      vector<uint64_t> hnsw_keys = collect_keys(ctx);
+      ASSERT_EQ(kTopk, hnsw_keys.size());
+
+      ASSERT_EQ(0, streamer->search_bf_impl(query.data(), qmeta, ctx));
+      vector<uint64_t> bf_keys = collect_keys(ctx);
+      ASSERT_EQ(kTopk, bf_keys.size());
+
+      recall_sum += calc_recall(hnsw_keys, bf_keys);
+    }
+    float avg_recall = recall_sum / static_cast<float>(kQueryCount);
+    EXPECT_GE(avg_recall, 0.8f) << "avg_recall=" << avg_recall;
+
+    // Stored layout must be PQ codes, not raw fp32 vectors.
+    const void *stored = streamer->get_vector(0);
+    ASSERT_TRUE(stored != nullptr);
+    std::string recon;
+    IndexQueryMeta code_qmeta(IndexMeta::MetaType::MT_DENSE,
+                              IndexMeta::DataType::DT_INT8, 1U,
+                              static_cast<uint32_t>(kNumChunk),
+                              static_cast<uint32_t>(quantizer->type()),
+                              quantizer->meta().extra_meta_size());
+    ASSERT_EQ(0, quantizer->dequantize(stored, code_qmeta, &recon));
+    ASSERT_EQ(kDim * sizeof(float), recon.size());
+    const float *recon_data = reinterpret_cast<const float *>(recon.data());
+    float sq_err = 0.0f;
+    float raw_norm = 0.0f;
+    for (size_t j = 0; j < kDim; ++j) {
+      float diff = recon_data[j] - raw_vecs[0][j];
+      sq_err += diff * diff;
+      raw_norm += raw_vecs[0][j] * raw_vecs[0][j];
+    }
+    EXPECT_LT(sq_err, 0.5f * raw_norm);
+
+    ASSERT_EQ(0, streamer->close());
+    ASSERT_EQ(0, streamer->cleanup());
+  }
+
+  // Reopen without injecting a quantizer: it must be restored from the
+  // persisted IndexMeta (base64 blob + entity_vector_size).
+  {
+    IndexStreamer::Pointer streamer =
+        IndexFactory::CreateStreamer("HnswStreamer");
+    ASSERT_TRUE(streamer != nullptr);
+
+    ailego::Params params;
+    set_hnsw_params(&params);
+    ASSERT_EQ(0, streamer->init(meta, params));
+
+    auto storage = IndexFactory::CreateStorage("MMapFileStorage");
+    ASSERT_TRUE(storage != nullptr);
+    ailego::Params stg_params;
+    ASSERT_EQ(0, storage->init(stg_params));
+    ASSERT_EQ(0, storage->open(index_path, false));
+    ASSERT_EQ(0, streamer->open(storage));
+
+    auto ctx = streamer->create_context();
+    ASSERT_TRUE(!!ctx);
+
+    float recall_sum = 0.0f;
+    for (size_t q = 0; q < kQueryCount; ++q) {
+      NumericalVector<float> query(kDim);
+      for (size_t j = 0; j < kDim; ++j) {
+        query[j] = dist(gen);
+      }
+      ctx->set_topk(kTopk);
+      ASSERT_EQ(0, streamer->search_impl(query.data(), qmeta, ctx));
+      vector<uint64_t> hnsw_keys = collect_keys(ctx);
+      ASSERT_EQ(kTopk, hnsw_keys.size());
+
+      ASSERT_EQ(0, streamer->search_bf_impl(query.data(), qmeta, ctx));
+      vector<uint64_t> bf_keys = collect_keys(ctx);
+      ASSERT_EQ(kTopk, bf_keys.size());
+
+      recall_sum += calc_recall(hnsw_keys, bf_keys);
+    }
+    float avg_recall = recall_sum / static_cast<float>(kQueryCount);
+    // Loose bound: PQ approximation plus graph-build randomness makes the
+    // recall fluctuate; this test mainly validates the restore path.
+    EXPECT_GE(avg_recall, 0.7f) << "avg_recall=" << avg_recall;
+
+    // The restored storage still holds PQ codes of the same length.
+    const void *stored = streamer->get_vector(0);
+    ASSERT_TRUE(stored != nullptr);
+    IndexQueryMeta code_qmeta(IndexMeta::MetaType::MT_DENSE,
+                              IndexMeta::DataType::DT_INT8, 1U,
+                              static_cast<uint32_t>(kNumChunk),
+                              static_cast<uint32_t>(quantizer->type()),
+                              quantizer->meta().extra_meta_size());
+    std::string recon;
+    ASSERT_EQ(0, quantizer->dequantize(stored, code_qmeta, &recon));
+    ASSERT_EQ(kDim * sizeof(float), recon.size());
+
+    ASSERT_EQ(0, streamer->close());
+    ASSERT_EQ(0, streamer->cleanup());
+  }
+  EXPECT_GT(code_len, 0U);
+}
+
 //! Fp32Quantizer is a pass-through quantizer: storage stays fp32 and
 //! the quantizer distance path must behave the same as the plain metric
 //! path, i.e. hnsw search reaches (nearly) full recall against brute force.

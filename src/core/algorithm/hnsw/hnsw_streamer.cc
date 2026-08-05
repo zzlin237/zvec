@@ -16,6 +16,8 @@
 #include <ailego/internal/cpu_features.h>
 #include <ailego/pattern/defer.h>
 #include <ailego/utility/memory_helper.h>
+#include <zvec/ailego/utility/base64_helper.h>
+#include <zvec/core/framework/index_helper.h>
 #include "utility/sparse_utility.h"
 #include "hnsw_algorithm.h"
 #include "hnsw_context.h"
@@ -73,6 +75,9 @@ int HnswStreamer::init(const IndexMeta &imeta, const ailego::Params &params) {
   params.get(PARAM_HNSW_STREAMER_USE_CONTIGUOUS_MEMORY,
              &use_contiguous_memory_);
   params.get(PARAM_HNSW_STREAMER_USE_EXTERNAL_VECTOR, &use_external_vector_);
+
+  params.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
+             &turbo_quantizer_class_);
 
   params.get(PARAM_HNSW_STREAMER_DOCS_SOFT_LIMIT, &docs_soft_limit_);
   if (docs_soft_limit_ > 0 && docs_soft_limit_ > docs_hard_limit_) {
@@ -188,6 +193,7 @@ int HnswStreamer::cleanup(void) {
   metric_.reset();
   add_quantizer_.reset();
   search_quantizer_.reset();
+  turbo_quantizer_class_.clear();
   stats_.clear();
   if (entity_) {
     entity_->cleanup();
@@ -227,11 +233,30 @@ int HnswStreamer::setup_entity() {
   entity_->set_l0_neighbor_cnt(l0_max_neighbor_cnt_);
   entity_->set_scaling_factor(scaling_factor_);
   entity_->set_prune_cnt(prune_cnt_);
-  // For external-vector entities the per-node vector prefix is removed; set
-  // vector_size to 0 so all inherited offset computations (key / neighbors /
-  // node_size) are correct and add_vector writes no vector bytes. The distance
-  // dimension is taken from meta.dimension(), not from vector_size().
-  entity_->set_vector_size(use_external_vector_ ? 0 : meta_.element_size());
+  // Determine the per-node vector storage size.
+  // Priority: persisted value from a previous build > live quantizer > meta.
+  // The persisted value (entity_vector_size) bridges the gap between the
+  // external IndexMeta contract (raw FP32 element_size) and the actual
+  // internal storage format (e.g. PQ codes) when no converter/reformer
+  // layer is present. For external-vector entities the per-node vector
+  // prefix is removed; vector_size stays 0 and the distance dimension is
+  // taken from meta.dimension().
+  size_t vec_size = 0;
+  auto &sp = meta_.streamer_params();
+  uint64_t persisted_vs = 0;
+  if (sp.get("entity_vector_size", &persisted_vs) && persisted_vs > 0) {
+    vec_size = static_cast<size_t>(persisted_vs);
+  } else if (!use_external_vector_ && add_quantizer_) {
+    vec_size = add_quantizer_->quantized_datapoint_vector_length();
+  } else if (use_external_vector_) {
+    vec_size = 0;
+  } else {
+    vec_size = meta_.element_size();
+  }
+  // Persist so the next open() can read it before the quantizer is restored.
+  meta_.mutable_streamer_params()->set("entity_vector_size",
+                                       static_cast<uint64_t>(vec_size));
+  entity_->set_vector_size(vec_size);
   entity_->set_chunk_size(chunk_size_);
   entity_->set_filter_same_key(filter_same_key_);
   entity_->set_get_vector(get_vector_enabled_);
@@ -244,18 +269,35 @@ int HnswStreamer::setup_entity() {
   return ret;
 }
 
+static std::string QuantizerClassName(
+    const zvec::turbo::Quantizer::Pointer &q) {
+  if (!q) return {};
+  switch (q->type()) {
+    case zvec::turbo::QuantizeType::kFp32:
+      return "Fp32Quantizer";
+    default:
+      return {};
+  }
+}
+
 int HnswStreamer::init_quantizer(zvec::turbo::Quantizer::Pointer quantizer) {
   add_quantizer_ = quantizer;
   search_quantizer_ = quantizer;
+  if (turbo_quantizer_class_.empty()) {
+    turbo_quantizer_class_ = QuantizerClassName(quantizer);
+  }
 
   return 0;
 }
 
-int HnswStreamer::init_quantizer(zvec::turbo::Quantizer::Pointer add_quantizer,
-                                 zvec::turbo::Quantizer::Pointer
-                                     search_quantizer) {
+int HnswStreamer::init_quantizer(
+    zvec::turbo::Quantizer::Pointer add_quantizer,
+    zvec::turbo::Quantizer::Pointer search_quantizer) {
   add_quantizer_ = add_quantizer;
   search_quantizer_ = search_quantizer;
+  if (turbo_quantizer_class_.empty()) {
+    turbo_quantizer_class_ = QuantizerClassName(add_quantizer);
+  }
 
   return 0;
 }
@@ -285,6 +327,23 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       break;
     }
   }
+  // For an existing index, read the persisted entity_vector_size from
+  // IndexMeta BEFORE setup_entity() so the correct internal storage
+  // vector size is used from the start (even when the turbo quantizer
+  // has not been restored yet).
+  {
+    IndexMeta stored_meta;
+    int meta_ret = IndexHelper::DeserializeFromStorage(stg.get(), &stored_meta);
+    if (meta_ret == 0 && !stored_meta.streamer_name().empty()) {
+      uint64_t persisted_vs = 0;
+      if (stored_meta.streamer_params().get("entity_vector_size",
+                                            &persisted_vs) &&
+          persisted_vs > 0) {
+        meta_.mutable_streamer_params()->set("entity_vector_size",
+                                             persisted_vs);
+      }
+    }
+  }
   int ret = setup_entity();
   if (ret != 0) {
     return ret;
@@ -297,12 +356,11 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
   IndexMeta index_meta;
   ret = entity_->get_index_meta(&index_meta);
   if (ret == IndexError_NoExist) {
-    // Set IndexMeta for the new index
-    ret = entity_->set_index_meta(meta_);
-    if (ret != 0) {
-      LOG_ERROR("Failed to set index meta for %s", IndexError::What(ret));
-      return ret;
-    }
+    // New index: defer writing meta to storage until close(), when the
+    // quantizer data has been serialized into meta_.  Writing a small meta
+    // here would allocate a small segment that cannot hold the much larger
+    // meta at close time (with base64 PQ codebook).  The in-memory meta_ is
+    // sufficient for the entity during build.
   } else if (ret != 0) {
     LOG_ERROR("Failed to get index meta for %s", IndexError::What(ret));
     return ret;
@@ -329,6 +387,12 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       meta_.set_converter(index_meta.converter_name(),
                           index_meta.converter_revision(),
                           index_meta.converter_params());
+    }
+    // Restore streamer_params (contains persisted quantizer data, etc.)
+    if (!index_meta.streamer_name().empty()) {
+      meta_.set_streamer(index_meta.streamer_name(),
+                         index_meta.streamer_revision(),
+                         index_meta.streamer_params());
     }
   }
 
@@ -363,6 +427,97 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       metric_->query_metric()->batch_distance()) {
     search_distance_ = metric_->query_metric()->distance();
     search_batch_distance_ = metric_->query_metric()->batch_distance();
+  }
+
+  // Restore turbo quantizer from persisted IndexMeta (existing index),
+  // or auto-create a fresh one for new indexes.
+  if (!add_quantizer_) {
+    std::string quantizer_class;
+    std::string quantizer_data_b64;
+    auto &sp = meta_.streamer_params();
+    bool has_class =
+        sp.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, &quantizer_class);
+    bool has_data = sp.get("turbo_quantizer_data_b64", &quantizer_data_b64);
+    bool has_persisted = has_class && has_data;
+
+    if (has_persisted && !quantizer_class.empty() &&
+        !quantizer_data_b64.empty()) {
+      // Base64-decode the binary quantizer data.
+      std::string quantizer_data =
+          ailego::Base64Helper::Decode(quantizer_data_b64);
+      // Restore quantizer from serialized state in IndexMeta.
+      add_quantizer_ = IndexFactory::CreateQuantizer(quantizer_class);
+      if (add_quantizer_) {
+        // Init BEFORE deserialize so the metric context (normalization,
+        // extra-meta size, distance function) flows from the current meta_
+        // exactly as it does for a fresh index.  The construction params
+        // (num_chunk, use_zero_mean) were persisted in streamer_params at
+        // build time and restored above, so init() can reconstruct the same
+        // configuration; deserialize() then loads the codebook on top.
+        ailego::Params quantizer_params;
+        int nsq = 0;
+        if (sp.get("num_chunk", &nsq)) {
+          quantizer_params.set("num_chunk", nsq);
+        }
+        bool use_zero_mean = false;
+        if (sp.get("use_zero_mean", &use_zero_mean)) {
+          quantizer_params.set("use_zero_mean", use_zero_mean);
+        }
+        ret = add_quantizer_->init(meta_, quantizer_params);
+        if (ret != 0) {
+          LOG_ERROR(
+              "Failed to init turbo quantizer '%s' before restore, "
+              "ret=%d",
+              quantizer_class.c_str(), ret);
+          add_quantizer_.reset();
+        } else {
+          ret = add_quantizer_->deserialize(quantizer_data);
+          if (ret != 0) {
+            LOG_ERROR("Failed to deserialize turbo quantizer '%s', ret=%d",
+                      quantizer_class.c_str(), ret);
+            add_quantizer_.reset();
+          } else {
+            turbo_quantizer_class_ = quantizer_class;
+            search_quantizer_ = add_quantizer_;
+            LOG_INFO("HnswStreamer: restored turbo quantizer '%s' from index",
+                     quantizer_class.c_str());
+          }
+        }
+      }
+    } else if (!turbo_quantizer_class_.empty()) {
+      // New index: create and init a fresh quantizer.
+      add_quantizer_ = IndexFactory::CreateQuantizer(turbo_quantizer_class_);
+      if (add_quantizer_) {
+        ailego::Params quantizer_params;
+        int nsq = 0;
+        if (sp.get("num_chunk", &nsq)) {
+          quantizer_params.set("num_chunk", nsq);
+        }
+        bool use_zero_mean = false;
+        if (sp.get("use_zero_mean", &use_zero_mean)) {
+          quantizer_params.set("use_zero_mean", use_zero_mean);
+        }
+        ret = add_quantizer_->init(meta_, quantizer_params);
+        if (ret != 0) {
+          LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
+                    turbo_quantizer_class_.c_str(), ret);
+          add_quantizer_.reset();
+        } else {
+          search_quantizer_ = add_quantizer_;
+          LOG_INFO("HnswStreamer: using turbo quantizer '%s'",
+                   turbo_quantizer_class_.c_str());
+        }
+      } else {
+        LOG_WARN(
+            "HnswStreamer: failed to create quantizer '%s', "
+            "falling back to metric distance",
+            turbo_quantizer_class_.c_str());
+      }
+    } else {
+      LOG_INFO(
+          "HnswStreamer: no turbo quantizer configured, "
+          "using legacy metric distance path");
+    }
   }
 
   // Create algorithm based on entity storage mode
@@ -406,11 +561,31 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
   return 0;
 }
 
+void HnswStreamer::persist_quantizer_to_meta() {
+  if (!add_quantizer_) {
+    return;
+  }
+  std::string quantizer_data;
+  int qret = add_quantizer_->serialize(&quantizer_data);
+  if (qret == 0) {
+    // Base64-encode binary data so it survives JSON serialization in Params.
+    std::string encoded = ailego::Base64Helper::Encode(quantizer_data.data(),
+                                                       quantizer_data.size());
+    meta_.mutable_streamer_params()->set(
+        PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, turbo_quantizer_class_);
+    meta_.mutable_streamer_params()->set("turbo_quantizer_data_b64",
+                                         std::move(encoded));
+  } else {
+    LOG_ERROR("Failed to serialize turbo quantizer, ret=%d", qret);
+  }
+}
+
 int HnswStreamer::close(void) {
   LOG_INFO("HnswStreamer close");
 
   stats_.clear();
   meta_.set_metric(metric_->name(), 0, metric_->params());
+  persist_quantizer_to_meta();
   entity_->set_index_meta(meta_);
   int ret = entity_->close();
   if (ret != 0) {
@@ -425,6 +600,7 @@ int HnswStreamer::flush(uint64_t checkpoint) {
   LOG_INFO("HnswStreamer flush checkpoint=%zu", (size_t)checkpoint);
 
   meta_.set_metric(metric_->name(), 0, metric_->params());
+  persist_quantizer_to_meta();
   entity_->set_index_meta(meta_);
   return entity_->flush(checkpoint);
 }
@@ -434,6 +610,8 @@ int HnswStreamer::dump(const IndexDumper::Pointer &dumper) {
 
   shared_mutex_.lock();
   AILEGO_DEFER([&]() { shared_mutex_.unlock(); });
+
+  persist_quantizer_to_meta();
 
   int ret = IndexHelper::SerializeToDumper(meta_, dumper.get());
   if (ret != 0) {
@@ -454,9 +632,8 @@ IndexStreamer::Context::Pointer HnswStreamer::create_context(void) const {
     LOG_ERROR("CreateContext clone init failed");
     return Context::Pointer();
   }
-  HnswContext *ctx =
-      new (std::nothrow) HnswContext(meta_.dimension(), metric_, entity,
-                                     search_quantizer_);
+  HnswContext *ctx = new (std::nothrow)
+      HnswContext(meta_.dimension(), metric_, entity, search_quantizer_);
   if (ailego_unlikely(ctx == nullptr)) {
     LOG_ERROR("Failed to new HnswContext");
     return Context::Pointer();
@@ -560,7 +737,6 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
   ctx->clear();
   ctx->update_dist_caculator_distance(add_distance_, add_batch_distance_);
   ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
-  ctx->reset_query(query);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
   if (metric_->support_train()) {
@@ -573,8 +749,20 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
     }
   }
 
+  // Encode the raw vector into a PQ code for storage and for symmetric
+  // (code-vs-code) distance computation during graph construction when
+  // the turbo quantizer works internally.
+  const void *store_data = query;
+  std::string pq_code_buf;
+  if (use_internal_quantizer(add_quantizer_, qmeta)) {
+    pq_code_buf.resize(add_quantizer_->quantized_datapoint_vector_length());
+    add_quantizer_->quantize_data(query, &pq_code_buf[0]);
+    store_data = pq_code_buf.data();
+  }
+  ctx->reset_query(store_data);
+
   level_t level = alg_->get_random_level();
-  ret = entity_->add_vector_with_id(level, id, query);
+  ret = entity_->add_vector_with_id(level, id, store_data);
   if (ailego_unlikely(ret != 0)) {
     LOG_ERROR("Hnsw streamer add vector failed");
     (*stats_.mutable_discarded_count())++;
@@ -641,7 +829,6 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
   ctx->clear();
   ctx->update_dist_caculator_distance(add_distance_, add_batch_distance_);
   ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
-  ctx->reset_query(query);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
   if (metric_->support_train()) {
@@ -654,9 +841,21 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
     }
   }
 
+  // Encode the raw vector into a PQ code for storage and for symmetric
+  // (code-vs-code) distance computation during graph construction when
+  // the turbo quantizer works internally.
+  const void *store_data = query;
+  std::string pq_code_buf;
+  if (use_internal_quantizer(add_quantizer_, qmeta)) {
+    pq_code_buf.resize(add_quantizer_->quantized_datapoint_vector_length());
+    add_quantizer_->quantize_data(query, &pq_code_buf[0]);
+    store_data = pq_code_buf.data();
+  }
+  ctx->reset_query(store_data);
+
   level_t level = alg_->get_random_level();
   node_id_t id;
-  ret = entity_->add_vector(level, pkey, query, &id);
+  ret = entity_->add_vector(level, pkey, store_data, &id);
   if (ailego_unlikely(ret != 0)) {
     LOG_ERROR("Hnsw streamer add vector failed");
     (*stats_.mutable_discarded_count())++;
@@ -689,8 +888,7 @@ int HnswStreamer::search_impl(const void *query, const IndexQueryMeta &qmeta,
 int HnswStreamer::search_impl(const void *query, const IndexQueryMeta &qmeta,
                               uint32_t count,
                               IndexStreamer::Context::Pointer &context) const {
-  int ret =
-      check_query_params(query, qmeta, search_quantizer_ != nullptr);
+  int ret = check_query_params(query, qmeta, search_quantizer_ != nullptr);
   if (ailego_unlikely(ret != 0)) {
     return ret;
   }
@@ -718,8 +916,19 @@ int HnswStreamer::search_impl(const void *query, const IndexQueryMeta &qmeta,
                                        /*symmetric=*/false);
   ctx->resize_results(count);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
+  // Convert raw fp32 queries into the quantized query form (e.g. a PQ LUT)
+  // internally when the storage holds PQ codes.
+  const bool internal_quant = use_internal_quantizer(search_quantizer_, qmeta);
+  std::string quant_query_buf;
   for (size_t q = 0; q < count; ++q) {
-    ctx->reset_query(query);
+    const void *qdata = query;
+    if (internal_quant) {
+      quant_query_buf.resize(
+          search_quantizer_->quantized_query_vector_length());
+      search_quantizer_->quantize_query(query, &quant_query_buf[0]);
+      qdata = quant_query_buf.data();
+    }
+    ctx->reset_query(qdata);
     ret = alg_->search(ctx);
     if (ailego_unlikely(ret != 0)) {
       LOG_ERROR("Hnsw searcher fast search failed");
@@ -767,8 +976,7 @@ int HnswStreamer::search_bf_impl(
 int HnswStreamer::search_bf_impl(
     const void *query, const IndexQueryMeta &qmeta, uint32_t count,
     IndexStreamer::Context::Pointer &context) const {
-  int ret =
-      check_query_params(query, qmeta, search_quantizer_ != nullptr);
+  int ret = check_query_params(query, qmeta, search_quantizer_ != nullptr);
   if (ailego_unlikely(ret != 0)) {
     return ret;
   }
@@ -791,6 +999,11 @@ int HnswStreamer::search_bf_impl(
                                        /*symmetric=*/false);
   ctx->resize_results(count);
 
+  // Convert raw fp32 queries into the quantized query form (e.g. a PQ LUT)
+  // internally when the storage holds PQ codes.
+  const bool internal_quant = use_internal_quantizer(search_quantizer_, qmeta);
+  std::string quant_query_buf;
+
   if (ctx->group_by_search()) {
     if (!ctx->group_by().is_valid()) {
       LOG_ERROR("Invalid group-by function");
@@ -802,7 +1015,14 @@ int HnswStreamer::search_bf_impl(
     };
 
     for (size_t q = 0; q < count; ++q) {
-      ctx->reset_query(query);
+      const void *qdata = query;
+      if (internal_quant) {
+        quant_query_buf.resize(
+            search_quantizer_->quantized_query_vector_length());
+        search_quantizer_->quantize_query(query, &quant_query_buf[0]);
+        qdata = quant_query_buf.data();
+      }
+      ctx->reset_query(qdata);
       ctx->group_topk_heaps().clear();
 
       for (node_id_t id = 0; id < entity_->doc_cnt(); ++id) {
@@ -830,7 +1050,14 @@ int HnswStreamer::search_bf_impl(
     auto &topk = ctx->topk_heap();
 
     for (size_t q = 0; q < count; ++q) {
-      ctx->reset_query(query);
+      const void *qdata = query;
+      if (internal_quant) {
+        quant_query_buf.resize(
+            search_quantizer_->quantized_query_vector_length());
+        search_quantizer_->quantize_query(query, &quant_query_buf[0]);
+        qdata = quant_query_buf.data();
+      }
+      ctx->reset_query(qdata);
       topk.clear();
       for (node_id_t id = 0; id < entity_->doc_cnt(); ++id) {
         if (entity_->get_key(id) == kInvalidKey) {
@@ -858,8 +1085,7 @@ int HnswStreamer::search_bf_by_p_keys_impl(
     const void *query, const std::vector<std::vector<uint64_t>> &p_keys,
     const IndexQueryMeta &qmeta, uint32_t count,
     Context::Pointer &context) const {
-  int ret =
-      check_query_params(query, qmeta, search_quantizer_ != nullptr);
+  int ret = check_query_params(query, qmeta, search_quantizer_ != nullptr);
   if (ailego_unlikely(ret != 0)) {
     return ret;
   }
@@ -888,6 +1114,11 @@ int HnswStreamer::search_bf_by_p_keys_impl(
                                        /*symmetric=*/false);
   ctx->resize_results(count);
 
+  // Convert raw fp32 queries into the quantized query form (e.g. a PQ LUT)
+  // internally when the storage holds PQ codes.
+  const bool internal_quant = use_internal_quantizer(search_quantizer_, qmeta);
+  std::string quant_query_buf;
+
   if (ctx->group_by_search()) {
     if (!ctx->group_by().is_valid()) {
       LOG_ERROR("Invalid group-by function");
@@ -899,7 +1130,14 @@ int HnswStreamer::search_bf_by_p_keys_impl(
     };
 
     for (size_t q = 0; q < count; ++q) {
-      ctx->reset_query(query);
+      const void *qdata = query;
+      if (internal_quant) {
+        quant_query_buf.resize(
+            search_quantizer_->quantized_query_vector_length());
+        search_quantizer_->quantize_query(query, &quant_query_buf[0]);
+        qdata = quant_query_buf.data();
+      }
+      ctx->reset_query(qdata);
       ctx->group_topk_heaps().clear();
 
       for (size_t idx = 0; idx < p_keys[q].size(); ++idx) {
@@ -926,7 +1164,14 @@ int HnswStreamer::search_bf_by_p_keys_impl(
     auto &topk = ctx->topk_heap();
 
     for (size_t q = 0; q < count; ++q) {
-      ctx->reset_query(query);
+      const void *qdata = query;
+      if (internal_quant) {
+        quant_query_buf.resize(
+            search_quantizer_->quantized_query_vector_length());
+        search_quantizer_->quantize_query(query, &quant_query_buf[0]);
+        qdata = quant_query_buf.data();
+      }
+      ctx->reset_query(qdata);
       topk.clear();
       for (size_t idx = 0; idx < p_keys[q].size(); ++idx) {
         key_t pk = p_keys[q][idx];

@@ -87,6 +87,7 @@ enum class MetricType {
 
 enum class QuantizerType {
   kNone,
+  kFp32,      // FP32 passthrough (turbo Fp32Quantizer)
   kPQ,        // Product Quantization
   kQuickADC,  // TODO: +refiner ? // should be a type of index?
   kAQ,

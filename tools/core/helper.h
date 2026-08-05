@@ -124,14 +124,10 @@ int parse_and_load_index_param(
       core_interface::Index::Pointer reference_index = nullptr;
       auto refiner_param = std::make_shared<core_interface::RefinerParam>();
 
-      // QueryConfig.RefinerConfig.ScaleFactor
+      // QueryConfig.RefinerConfig.ScaleFactor (optional, no effect for HNSW)
       if (auto scale_factor_config = refiner_config["ScaleFactor"];
           scale_factor_config) {
-        auto scale_factor = scale_factor_config.as<float>();
-        refiner_param->scale_factor_ = scale_factor;
-      } else {
-        LOG_ERROR("QueryConfig.RefinerConfig.ScaleFactor config is required");
-        return -1;
+        refiner_param->scale_factor_ = scale_factor_config.as<float>();
       }
 
       // QueryConfig.RefinerConfig.ReferenceIndex
