@@ -14,6 +14,7 @@
 #include "ivf_builder.h"
 #include <ailego/pattern/defer.h>
 #include <zvec/ailego/utility/base64_helper.h>
+#include <zvec/ailego/utility/float_helper.h>
 #include <zvec/ailego/utility/string_helper.h>
 #include "algorithm/cluster/cluster_params.h"
 #include "ivf_dumper.h"
@@ -210,6 +211,13 @@ int IVFBuilder::cleanup(void) {
   quantizers_.clear();
   turbo_quantizer_.reset();
 
+  use_residual_ = false;
+  residual_cosine_ = false;
+  residual_meta_ = meta_;
+  centroid_data_.clear();
+  normalized_holder_.reset();
+  residual_holder_.reset();
+
   error_ = false;
   err_code_ = 0;
 
@@ -254,6 +262,15 @@ int IVFBuilder::train(IndexThreads::Pointer threads,
                        converter_->name().c_str());
     converted_meta_ = converter_->meta();
     holder = converter_->result();
+  }
+
+  //! Residual Cosine: normalize before clustering so centroids live in the
+  //! normalized space.
+  if (residual_cosine_) {
+    RandomAccessIndexHolder::Pointer norm_holder;
+    int norm_ret = this->normalize_holder(holder, &norm_holder);
+    ivf_check_with_msg(norm_ret, "Failed to normalize holder for residual");
+    holder = std::move(norm_holder);
   }
 
   ailego::Params train_params;
@@ -325,6 +342,12 @@ int IVFBuilder::train(const IndexTrainer::Pointer &trainer) {
 
   ret = centroid_index_->build(centroid_list);
   ivf_check_with_msg(ret, "Failed to build centroid index");
+
+  if (use_residual_) {
+    //! Keep the raw leaf centroid vectors for residual dump/search.
+    ret = this->save_centroids(centroid_list);
+    ivf_check_with_msg(ret, "Failed to save residual centroids");
+  }
 
   if (params_.has(PARAM_IVF_BUILDER_OPTIMIZER_QUANTIZER_CLASS)) {
     //! Quantize the centroids for searcher
@@ -401,6 +424,15 @@ int IVFBuilder::build(IndexThreads::Pointer threads,
     converted_holder = converter_->result();
   }
 
+  //! Residual Cosine: cluster on normalized data so the label assignment
+  //! matches the centroids kept in the normalized space.
+  if (residual_cosine_) {
+    int norm_ret = this->normalize_holder(holder_, &normalized_holder_);
+    ivf_check_with_msg(norm_ret,
+                       "Failed to normalize holder for residual Cosine");
+    converted_holder = normalized_holder_;
+  }
+
   labels_.resize(centroid_index_->centroids_count());
   int ret = this->build_label_index(threads.get(), converted_holder);
   ivf_check_with_msg(ret, "Failed to build index for %s",
@@ -410,6 +442,10 @@ int IVFBuilder::build(IndexThreads::Pointer threads,
       params_.has(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS)) {
     ret = this->prepare_turbo_quantizer();
   } else {
+    if (use_residual_) {
+      LOG_ERROR("use_residual is only supported on the turbo quantizer path");
+      return IndexError_Unsupported;
+    }
     ret = this->prepare_quantizer(threads.get());
   }
   ivf_check_error_code(ret);
@@ -433,6 +469,10 @@ int IVFBuilder::dump(const IndexDumper::Pointer &dumper) {
   ailego::ElapsedTime timer;
   int ret = this->dump_index(dumper);
   ivf_check_with_msg(ret, "Failed to dump index with ret=%d", ret);
+
+  //! Residual holders are only needed during dump, release them now.
+  residual_holder_.reset();
+  normalized_holder_.reset();
 
   // the fitting function for the follow points: 1000000(0.02) 10000000(0.01)
   // 50000000(0.005) 100000000(0.001)
@@ -574,11 +614,33 @@ int IVFBuilder::parse_general_params(const ailego::Params &params) {
   params.get(PARAM_IVF_BUILDER_STORE_ORIGINAL_FEATURES,
              &store_original_features_);
 
+  params.get(PARAM_IVF_BUILDER_USE_RESIDUAL, &use_residual_);
+  if (use_residual_) {
+    //! Residuals break inner-product ordering (a per-list correction term
+    //! would be needed), only L2 and Cosine are supported.
+    if (meta_.metric_name() != kL2MetricName &&
+        meta_.metric_name() != kCosineMetricName) {
+      LOG_ERROR("use_residual only supports metric %s or %s, got %s",
+                kL2MetricName, kCosineMetricName, meta_.metric_name().c_str());
+      return IndexError_Unsupported;
+    }
+    residual_cosine_ = (meta_.metric_name() == kCosineMetricName);
+    //! The residual space has an intrinsic L2 metric, whatever the
+    //! quantizer is.
+    residual_meta_ = meta_;
+    residual_meta_.set_metric(kL2MetricName, 0, ailego::Params());
+  }
+
   //! Prepare Converter for training
   if (meta_.metric_name() == kIPMetricName) {
     converter_class_ = kMipsConverterName;
   }
   params.get(PARAM_IVF_BUILDER_CONVERTER_CLASS, &converter_class_);
+  if (use_residual_ && !converter_class_.empty()) {
+    LOG_ERROR("use_residual is incompatible with converter %s",
+              converter_class_.c_str());
+    return IndexError_Unsupported;
+  }
   if (!converter_class_.empty()) {
     ailego::Params converter_params;
     params_.get(PARAM_IVF_BUILDER_CONVERTER_PARAMS, &converter_params);
@@ -706,8 +768,10 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   }
   int ret = 0;
   if (turbo_quantizer_) {
-    //! Quantize the original vectors with the turbo quantizer and dump the
-    //! codes row-major into the posting lists.
+    //! Quantize the original vectors (or residuals in residual mode) with
+    //! the turbo quantizer and dump the codes row-major into the posting
+    //! lists.
+    const auto &vec_holder = use_residual_ ? residual_holder_ : holder_;
     std::string code(turbo_quantizer_->quantized_datapoint_vector_length(),
                      '\0');
     for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
@@ -715,7 +779,7 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
       for (size_t j = 0; j < labels_[i].size(); ++j) {
         auto id = labels_[i][j];
         record_dumped_id(id);
-        turbo_quantizer_->quantize_data(holder_->element(id), code.data());
+        turbo_quantizer_->quantize_data(vec_holder->element(id), code.data());
         ret =
             ivf_dumper->dump_inverted_vector(i, holder_->key(id), code.data());
         ivf_check_error_code(ret);
@@ -772,6 +836,13 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   ret = ivf_dumper->dump_centroid_index(centroid_index->data(),
                                         centroid_index->size());
   ivf_check_with_msg(ret, "Failed to dump CentroidIndex");
+
+  if (use_residual_) {
+    //! Raw leaf centroids so the searcher can build per-list residual LUTs.
+    ret = ivf_dumper->dump_residual_centroids(centroid_data_.data(),
+                                              centroid_data_.size());
+    ivf_check_with_msg(ret, "Failed to dump residual centroids");
+  }
 
   if (store_original_features_) {
     for (size_t i = 0; i < dumped_ids.size(); ++i) {
@@ -905,7 +976,10 @@ int IVFBuilder::prepare_turbo_quantizer() {
       quantizer_params.set("use_zero_mean",
                            params_.get_as_bool("use_zero_mean"));
     }
-    int ret = turbo_quantizer_->init(meta_, quantizer_params);
+    //! Residual mode: the quantizer sees residual vectors, whose intrinsic
+    //! metric is L2 regardless of the quantizer type.
+    int ret = turbo_quantizer_->init(use_residual_ ? residual_meta_ : meta_,
+                                     quantizer_params);
     if (ret != 0) {
       LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
                 quantizer_class.c_str(), ret);
@@ -920,12 +994,24 @@ int IVFBuilder::prepare_turbo_quantizer() {
         "state cannot be persisted",
         PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS.c_str());
     return IndexError_InvalidArgument;
+  } else if (use_residual_) {
+    //! An injected quantizer is already initialized with its own meta and
+    //! cannot be re-initialized with the residual (L2) meta.
+    LOG_ERROR("use_residual is not supported with an injected quantizer");
+    return IndexError_Unsupported;
   }
 
   //! Train after clustering to keep the pipeline order:
   //! normalize -> cluster -> quantize -> dump.
-  if (turbo_quantizer_->require_train() && holder_ && holder_->count() > 0) {
-    int ret = turbo_quantizer_->train(holder_);
+  if (use_residual_) {
+    int ret = this->build_residual_holder();
+    ivf_check_error_code(ret);
+  }
+  IndexHolder::Pointer train_holder =
+      use_residual_ ? residual_holder_ : holder_;
+  if (turbo_quantizer_->require_train() && train_holder &&
+      train_holder->count() > 0) {
+    int ret = turbo_quantizer_->train(train_holder);
     if (ret != 0) {
       LOG_ERROR("Failed to train turbo quantizer '%s', ret=%d",
                 quantizer_class.c_str(), ret);
@@ -953,6 +1039,154 @@ int IVFBuilder::prepare_turbo_quantizer() {
 
   LOG_INFO("IVFBuilder turbo quantizer '%s' prepared, code_len=%zu",
            quantizer_class.c_str(), code_len);
+  return 0;
+}
+
+//! Normalize holder vectors (L2 norm) into a new holder with the same meta.
+//! Used by Cosine residual mode: clustering and residual computation happen
+//! in the normalized space. Zero vectors are kept unchanged.
+int IVFBuilder::normalize_holder(const IndexHolder::Pointer &src,
+                                 RandomAccessIndexHolder::Pointer *dst) {
+  if (!src || !dst) {
+    return IndexError_InvalidArgument;
+  }
+  auto out = std::make_shared<RandomAccessIndexHolder>(meta_);
+  if (!out) {
+    return IndexError_NoMemory;
+  }
+  const uint32_t dim = meta_.dimension();
+  const size_t elem_size = meta_.element_size();
+  if (src->count() > 0) {
+    out->reserve(src->count());
+  }
+  std::vector<float> vec(dim);
+  std::vector<uint16_t> out16;
+  if (meta_.data_type() == IndexMeta::DataType::DT_FP16) {
+    out16.resize(dim);
+  }
+  auto iter = src->create_iterator();
+  for (; iter && iter->is_valid(); iter->next()) {
+    const void *data = iter->data();
+    float norm = 0.0f;
+    if (meta_.data_type() == IndexMeta::DataType::DT_FP16) {
+      ailego::FloatHelper::ToFP32(reinterpret_cast<const uint16_t *>(data), dim,
+                                  vec.data());
+    } else {
+      std::memcpy(vec.data(), data, elem_size);
+    }
+    for (uint32_t i = 0; i < dim; ++i) {
+      norm += vec[i] * vec[i];
+    }
+    norm = std::sqrt(norm);
+    if (norm > 0.0f) {
+      for (uint32_t i = 0; i < dim; ++i) {
+        vec[i] /= norm;
+      }
+    }
+    if (meta_.data_type() == IndexMeta::DataType::DT_FP16) {
+      ailego::FloatHelper::ToFP16(vec.data(), dim, out16.data());
+      out->emplace(iter->key(), out16.data());
+    } else {
+      out->emplace(iter->key(), vec.data());
+    }
+  }
+  *dst = std::move(out);
+  return 0;
+}
+
+//! Flatten the leaf centroid (converted-space type) in DFS order, mirroring
+//! CentroidsIndexHolder::get_leaf_features, so the i-th centroid matches the
+//! i-th inverted list.
+int IVFBuilder::save_centroids(
+    const IndexCluster::CentroidList &centroid_list) {
+  centroid_data_.clear();
+  const size_t elem_size = converted_meta_.element_size();
+  std::function<void(const IndexCluster::CentroidList &)> collect =
+      [&](const IndexCluster::CentroidList &cents) {
+        for (const auto &it : cents) {
+          if (it.subitems().empty()) {
+            centroid_data_.append(reinterpret_cast<const char *>(it.feature()),
+                                  elem_size);
+          } else {
+            collect(it.subitems());
+          }
+        }
+      };
+  collect(centroid_list);
+  const size_t count = centroid_data_.size() / elem_size;
+  if (count != centroid_index_->centroids_count()) {
+    LOG_ERROR("Residual centroid count %zu mismatches inverted list count %zu",
+              count, centroid_index_->centroids_count());
+    return IndexError_Runtime;
+  }
+  return 0;
+}
+
+//! Build the residual dataset: for each vector v (normalized first in Cosine
+//! residual mode), residual = v - centroid[label]. Elements are emplaced in
+//! the same id order as holder_, so element(id)/key(id) stay aligned.
+int IVFBuilder::build_residual_holder() {
+  const auto &src = residual_cosine_ ? normalized_holder_ : holder_;
+  if (!src) {
+    LOG_ERROR("Missing data holder while building residual holder");
+    return IndexError_Runtime;
+  }
+  auto out = std::make_shared<RandomAccessIndexHolder>(meta_);
+  if (!out) {
+    return IndexError_NoMemory;
+  }
+  const size_t count = src->count();
+  if (count > 0) {
+    out->reserve(count);
+  }
+  //! Inverted map: vector id -> centroid id.
+  std::vector<uint32_t> id_to_centroid(count, 0);
+  std::vector<bool> labeled(count, false);
+  for (size_t i = 0; i < labels_.size(); ++i) {
+    for (size_t j = 0; j < labels_[i].size(); ++j) {
+      const uint32_t id = labels_[i][j];
+      ailego_assert_with(id < count, "Label id overflow");
+      id_to_centroid[id] = static_cast<uint32_t>(i);
+      labeled[id] = true;
+    }
+  }
+
+  const uint32_t dim = meta_.dimension();
+  const size_t centroid_elem_size = converted_meta_.element_size();
+  std::vector<float> residual(dim);
+  std::vector<uint16_t> out16;
+  if (meta_.data_type() == IndexMeta::DataType::DT_FP16) {
+    out16.resize(dim);
+  }
+  for (size_t id = 0; id < count; ++id) {
+    if (!labeled[id]) {
+      LOG_ERROR("Vector id=%zu has no centroid label", id);
+      return IndexError_Runtime;
+    }
+    const char *centroid =
+        centroid_data_.data() +
+        static_cast<size_t>(id_to_centroid[id]) * centroid_elem_size;
+    if (meta_.data_type() == IndexMeta::DataType::DT_FP16) {
+      ailego::FloatHelper::ToFP32(
+          reinterpret_cast<const uint16_t *>(src->element(id)), dim,
+          residual.data());
+      for (uint32_t i = 0; i < dim; ++i) {
+        residual[i] -= ailego::FloatHelper::ToFP32(
+            reinterpret_cast<const uint16_t *>(centroid)[i]);
+      }
+      ailego::FloatHelper::ToFP16(residual.data(), dim, out16.data());
+      out->emplace(src->key(id), out16.data());
+    } else {
+      const float *vec = reinterpret_cast<const float *>(src->element(id));
+      const float *cent = reinterpret_cast<const float *>(centroid);
+      for (uint32_t i = 0; i < dim; ++i) {
+        residual[i] = vec[i] - cent[i];
+      }
+      out->emplace(src->key(id), residual.data());
+    }
+  }
+  residual_holder_ = std::move(out);
+  LOG_INFO("IVFBuilder built residual holder, count=%zu", count);
   return 0;
 }
 

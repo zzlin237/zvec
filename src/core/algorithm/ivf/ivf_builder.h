@@ -239,6 +239,19 @@ class IVFBuilder : public IndexBuilder {
   //! meta used for dumping codes.
   int prepare_turbo_quantizer();
 
+  //! Residual mode helpers (only used when use_residual_ is on):
+  //! Normalize holder vectors (L2) into dst, used by Cosine residual mode.
+  int normalize_holder(const IndexHolder::Pointer &src,
+                       RandomAccessIndexHolder::Pointer *dst);
+
+  //! Save the leaf centroid vectors (converted-space type) into
+  //! centroid_data_, one vector per inverted list in order.
+  int save_centroids(const IndexCluster::CentroidList &centroid_list);
+
+  //! Build the residual dataset (v - centroid[label]) used to train the
+  //! turbo quantizer and to quantize vectors at dump time.
+  int build_residual_holder();
+
   //! Serialize the trained turbo quantizer state into the builder params of
   //! meta_ as base64 (key: turbo_quantizer_data_b64), so the codebook is
   //! persisted within the index meta like the HNSW streamer does.
@@ -316,6 +329,14 @@ class IVFBuilder : public IndexBuilder {
   IndexMeta quantized_meta_{};
   std::vector<IndexConverter::Pointer> quantizers_{};
   zvec::turbo::Quantizer::Pointer turbo_quantizer_{};
+
+  //! Residual mode state
+  bool use_residual_{false};
+  bool residual_cosine_{false};
+  IndexMeta residual_meta_{};    //! meta of the residual space (L2 metric)
+  std::string centroid_data_{};  //! leaf centroid vectors, converted type
+  RandomAccessIndexHolder::Pointer normalized_holder_{};  //! Cosine residual
+  RandomAccessIndexHolder::Pointer residual_holder_{};
 
   std::atomic_bool error_{false};
   int err_code_{0};

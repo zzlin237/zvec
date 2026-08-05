@@ -40,12 +40,24 @@ class IVFTurboQuantizerTest : public testing::Test {
   void build_dump_load(const Params &builder_params, IVFSearcher *searcher,
                        IndexStorage::Pointer *container);
 
+  //! Generate well-separated clusters so residual quantization can show
+  //! its advantage over raw-vector quantization.
+  void prepare_clustered_data();
+
   //! Brute-force ground truth ids for the stored base vectors.
   vector<uint64_t> brute_force_topk(const float *query, size_t topk,
                                     bool cosine) const;
 
   void recall_at(const Params &builder_params, size_t topk, bool cosine,
                  float *recall);
+
+  //! Recall against the stored base vectors using an already loaded (or
+  //! in-memory) searcher.
+  float recall_with_searcher(IVFSearcher *searcher, size_t topk, bool cosine);
+
+  //! Search all queries and collect (key, score) pairs per query.
+  void search_scored(IVFSearcher *searcher, size_t topk,
+                     vector<vector<pair<uint64_t, float>>> *results);
 
   uint32_t dimension_{32};
   uint32_t base_num_{1000};
@@ -54,6 +66,7 @@ class IVFTurboQuantizerTest : public testing::Test {
   vector<float> query_data_{};
   string index_path_{};
   IndexHolder::Pointer holder_{};
+  std::string build_metric_{};  //! metric override for build_dump_load
 };
 
 void IVFTurboQuantizerTest::SetUp() {
@@ -76,8 +89,9 @@ void IVFTurboQuantizerTest::TearDown() {
 }
 
 void IVFTurboQuantizerTest::prepare_holder(uint32_t num) {
-  auto holder = std::make_shared<MultiPassIndexHolder<
-      IndexMeta::DataType::DT_FP32>>(dimension_);
+  auto holder =
+      std::make_shared<MultiPassIndexHolder<IndexMeta::DataType::DT_FP32>>(
+          dimension_);
   for (uint32_t i = 0; i < num; ++i) {
     NumericalVector<float> vec(dimension_);
     for (uint32_t j = 0; j < dimension_; ++j) {
@@ -88,15 +102,38 @@ void IVFTurboQuantizerTest::prepare_holder(uint32_t num) {
   holder_ = holder;
 }
 
-void IVFTurboQuantizerTest::build_dump_load(
-    const Params &builder_params, IVFSearcher *searcher,
-    IndexStorage::Pointer *container) {
+void IVFTurboQuantizerTest::prepare_clustered_data() {
+  //! 16 well-separated Gaussian clusters: residuals are tiny compared to
+  //! raw vectors, so residual PQ should clearly beat raw PQ.
+  std::mt19937 gen(54321);
+  std::uniform_real_distribution<float> center_dist(-8.0f, 8.0f);
+  std::normal_distribution<float> noise(0.0f, 0.2f);
+  const uint32_t cluster_num = 16;
+  vector<float> centers(cluster_num * dimension_);
+  for (auto &v : centers) {
+    v = center_dist(gen);
+  }
+  base_data_.resize(base_num_ * dimension_);
+  for (uint32_t i = 0; i < base_num_; ++i) {
+    const float *center = &centers[(i % cluster_num) * dimension_];
+    for (uint32_t j = 0; j < dimension_; ++j) {
+      base_data_[i * dimension_ + j] = center[j] + noise(gen);
+    }
+  }
+}
+
+void IVFTurboQuantizerTest::build_dump_load(const Params &builder_params,
+                                            IVFSearcher *searcher,
+                                            IndexStorage::Pointer *container) {
   IndexMeta meta;
   meta.set_meta(IndexMeta::DataType::DT_FP32, dimension_);
-  meta.set_metric(builder_params.has(PARAM_IVF_BUILDER_CONVERTER_CLASS)
-                      ? "Cosine"
-                      : "SquaredEuclidean",
-                  0, Params());
+  std::string metric = build_metric_;
+  if (metric.empty()) {
+    metric = builder_params.has(PARAM_IVF_BUILDER_CONVERTER_CLASS)
+                 ? "Cosine"
+                 : "SquaredEuclidean";
+  }
+  meta.set_metric(metric, 0, Params());
 
   IVFBuilder builder;
   ASSERT_EQ(0, builder.init(meta, builder_params));
@@ -162,24 +199,27 @@ vector<uint64_t> IVFTurboQuantizerTest::brute_force_topk(const float *query,
   return gt;
 }
 
-void IVFTurboQuantizerTest::recall_at(const Params &builder_params,
-                                      size_t topk, bool cosine,
-                                      float *recall) {
+void IVFTurboQuantizerTest::recall_at(const Params &builder_params, size_t topk,
+                                      bool cosine, float *recall) {
   IVFSearcher searcher;
   IndexStorage::Pointer container;
   build_dump_load(builder_params, &searcher, &container);
+  *recall = this->recall_with_searcher(&searcher, topk, cosine);
+}
 
-  auto context = searcher.create_context();
-  ASSERT_TRUE(!!context);
+float IVFTurboQuantizerTest::recall_with_searcher(IVFSearcher *searcher,
+                                                  size_t topk, bool cosine) {
+  auto context = searcher->create_context();
+  EXPECT_TRUE(!!context);
   context->set_topk(topk);
 
   IndexQueryMeta qmeta(IndexMeta::DataType::DT_FP32, dimension_);
   size_t hit = 0;
   for (uint32_t q = 0; q < query_num_; ++q) {
     const float *query = &query_data_[q * dimension_];
-    ASSERT_EQ(0, searcher.search_impl(query, qmeta, context));
+    EXPECT_EQ(0, searcher->search_impl(query, qmeta, context));
     const IndexDocumentList &result = context->result(0);
-    ASSERT_EQ(topk, result.size());
+    EXPECT_EQ(topk, result.size());
     auto gt = brute_force_topk(query, topk, cosine);
     std::set<uint64_t> gt_set(gt.begin(), gt.end());
     for (size_t i = 0; i < result.size(); ++i) {
@@ -188,7 +228,27 @@ void IVFTurboQuantizerTest::recall_at(const Params &builder_params,
       }
     }
   }
-  *recall = static_cast<float>(hit) / (query_num_ * topk);
+  return static_cast<float>(hit) / (query_num_ * topk);
+}
+
+void IVFTurboQuantizerTest::search_scored(
+    IVFSearcher *searcher, size_t topk,
+    vector<vector<pair<uint64_t, float>>> *results) {
+  auto context = searcher->create_context();
+  EXPECT_TRUE(!!context);
+  context->set_topk(topk);
+
+  IndexQueryMeta qmeta(IndexMeta::DataType::DT_FP32, dimension_);
+  results->assign(query_num_, {});
+  for (uint32_t q = 0; q < query_num_; ++q) {
+    const float *query = &query_data_[q * dimension_];
+    EXPECT_EQ(0, searcher->search_impl(query, qmeta, context));
+    const IndexDocumentList &result = context->result(0);
+    EXPECT_EQ(topk, result.size());
+    for (size_t i = 0; i < result.size(); ++i) {
+      (*results)[q].emplace_back(result[i].key(), result[i].score());
+    }
+  }
 }
 
 TEST_F(IVFTurboQuantizerTest, TestL2PqInt8) {
@@ -236,8 +296,8 @@ TEST_F(IVFTurboQuantizerTest, TestBatchSearchAndQuantizerRestore) {
   IndexQueryMeta qmeta(IndexMeta::DataType::DT_FP32, dimension_);
   // Batch search: multi-query pointer advancement over the LUT buffer must
   // stay consistent with per-query results.
-  ASSERT_EQ(0, searcher.search_impl(query_data_.data(), qmeta, query_num_,
-                                    context));
+  ASSERT_EQ(
+      0, searcher.search_impl(query_data_.data(), qmeta, query_num_, context));
   for (uint32_t q = 0; q < query_num_; ++q) {
     const IndexDocumentList &batch_result = context->result(q);
     ASSERT_EQ(topk, batch_result.size());
@@ -279,3 +339,154 @@ TEST_F(IVFTurboQuantizerTest, TestLegacyIndexNotAffected) {
   EXPECT_EQ(gt[0], result[0].key());
 }
 
+namespace {
+Params make_turbo_params(bool use_residual) {
+  Params params;
+  params.set(PARAM_IVF_BUILDER_CENTROID_COUNT, "16");
+  params.set(PARAM_IVF_BUILDER_CLUSTER_CLASS, "KmeansCluster");
+  params.set(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, "PqInt8Quantizer");
+  params.set("num_chunk", 8);
+  if (use_residual) {
+    params.set(PARAM_IVF_BUILDER_USE_RESIDUAL, true);
+  }
+  return params;
+}
+}  // namespace
+
+TEST_F(IVFTurboQuantizerTest, TestL2PqInt8Residual) {
+  //! On well-separated clusters the residual vectors are much smaller than
+  //! the raw vectors, so residual PQ must not lose recall against raw PQ.
+  //! Fewer vectors per cluster widen the top-k distance gaps relative to
+  //! the PQ distortion of the (tiny) residuals.
+  base_num_ = 320;
+  prepare_clustered_data();
+
+  float recall_plain = 0.0f;
+  recall_at(make_turbo_params(false), 10, false, &recall_plain);
+
+  float recall_residual = 0.0f;
+  recall_at(make_turbo_params(true), 10, false, &recall_residual);
+
+  //! IVF contract: with the same quantizer and the same data, feeding
+  //! residuals instead of raw vectors must not lose recall. The absolute
+  //! floor only guards the driver quantizer's baseline quality.
+  EXPECT_GE(recall_residual, recall_plain);
+  EXPECT_GT(recall_residual, 0.85f);
+}
+
+TEST_F(IVFTurboQuantizerTest, TestCosinePqInt8Residual) {
+  //! Cosine residual mode: IVF normalizes internally (no converter), the
+  //! quantizer works in the residual space with an L2 metric.
+  base_num_ = 320;
+  prepare_clustered_data();
+  build_metric_ = "Cosine";
+
+  float recall_plain = 0.0f;
+  recall_at(make_turbo_params(false), 10, true, &recall_plain);
+
+  float recall_residual = 0.0f;
+  recall_at(make_turbo_params(true), 10, true, &recall_residual);
+
+  //! On normalized data raw PQ already works well; residual must stay on
+  //! par (the gap is within the kmeans/PQ run-to-run noise).
+  EXPECT_GE(recall_residual, recall_plain - 0.05f);
+  EXPECT_GT(recall_residual, 0.85f);
+
+  //! Score semantics: residual scores must be cosine distances (1 - cos).
+  IVFSearcher searcher;
+  IndexStorage::Pointer container;
+  build_dump_load(make_turbo_params(true), &searcher, &container);
+  vector<vector<pair<uint64_t, float>>> results;
+  search_scored(&searcher, 10, &results);
+  for (uint32_t q = 0; q < query_num_; ++q) {
+    const float *query = &query_data_[q * dimension_];
+    double qnorm = 0.0;
+    for (uint32_t j = 0; j < dimension_; ++j) {
+      qnorm += query[j] * query[j];
+    }
+    for (const auto &it : results[q]) {
+      const float *vec = &base_data_[it.first * dimension_];
+      double dot = 0.0, vnorm = 0.0;
+      for (uint32_t j = 0; j < dimension_; ++j) {
+        dot += query[j] * vec[j];
+        vnorm += vec[j] * vec[j];
+      }
+      const double denom = std::sqrt(qnorm * vnorm);
+      const float cos_dist =
+          static_cast<float>(denom == 0.0 ? 1.0 : 1.0 - dot / denom);
+      //! Loose tolerance: scores are PQ-approximated cosine distances.
+      EXPECT_NEAR(it.second, cos_dist, 0.25f);
+    }
+  }
+}
+
+TEST_F(IVFTurboQuantizerTest, TestResidualRestore) {
+  //! A dumped residual index must restore the use_residual switch and the
+  //! quantizer metric conversion (L2) through the meta: reloading the same
+  //! file must reproduce the exact same results with high recall.
+  base_num_ = 320;
+  prepare_clustered_data();
+  const size_t topk = 10;
+
+  for (int cosine = 0; cosine <= 1; ++cosine) {
+    build_metric_ = cosine ? "Cosine" : "SquaredEuclidean";
+    Params params = make_turbo_params(true);
+
+    IVFSearcher searcher;
+    IndexStorage::Pointer container;
+    build_dump_load(params, &searcher, &container);
+    const float recall = recall_with_searcher(&searcher, topk, cosine != 0);
+    EXPECT_GT(recall, 0.85f) << "metric=" << build_metric_;
+
+    vector<vector<pair<uint64_t, float>>> first;
+    search_scored(&searcher, topk, &first);
+    searcher.cleanup();
+    container.reset();
+
+    //! Reload the dumped file from scratch.
+    IVFSearcher reloaded;
+    Params searcher_params;
+    searcher_params.set(PARAM_IVF_SEARCHER_SCAN_RATIO, 1.0);
+    searcher_params.set(PARAM_IVF_SEARCHER_BRUTE_FORCE_THRESHOLD, 0);
+    ASSERT_EQ(0, reloaded.init(searcher_params));
+    IndexStorage::Pointer container2 =
+        IndexFactory::CreateStorage("MMapFileReadStorage");
+    ASSERT_TRUE(!!container2);
+    Params container_params;
+    container_params.set("proxima.mmap_file.container.memory_warmup", true);
+    container2->init(container_params);
+    ASSERT_EQ(0, container2->open(index_path_, false));
+    ASSERT_EQ(0, reloaded.load(container2, IndexMetric::Pointer()));
+
+    vector<vector<pair<uint64_t, float>>> second;
+    search_scored(&reloaded, topk, &second);
+    ASSERT_EQ(first.size(), second.size());
+    for (size_t q = 0; q < first.size(); ++q) {
+      ASSERT_EQ(first[q].size(), second[q].size());
+      for (size_t i = 0; i < first[q].size(); ++i) {
+        EXPECT_EQ(first[q][i].first, second[q][i].first);
+        EXPECT_NEAR(first[q][i].second, second[q][i].second, 1e-5f);
+      }
+    }
+  }
+}
+
+TEST_F(IVFTurboQuantizerTest, TestResidualRejectIp) {
+  //! Residuals break inner-product ordering, IP must be rejected.
+  IndexMeta ip_meta;
+  ip_meta.set_meta(IndexMeta::DataType::DT_FP32, dimension_);
+  ip_meta.set_metric("InnerProduct", 0, Params());
+
+  IVFBuilder builder;
+  EXPECT_NE(0, builder.init(ip_meta, make_turbo_params(true)));
+
+  //! The converter chain is orthogonal to residual and must be rejected.
+  IndexMeta l2_meta;
+  l2_meta.set_meta(IndexMeta::DataType::DT_FP32, dimension_);
+  l2_meta.set_metric("SquaredEuclidean", 0, Params());
+  Params conv_params = make_turbo_params(true);
+  conv_params.set(PARAM_IVF_BUILDER_CONVERTER_CLASS,
+                  "CosineNormalizeConverter");
+  IVFBuilder builder2;
+  EXPECT_NE(0, builder2.init(l2_meta, conv_params));
+}

@@ -14,8 +14,8 @@
 #pragma once
 
 #include <core/quantizer/quantizer_params.h>
-#include <zvec/core/framework/index_framework.h>
 #include <turbo/quantizer/quantizer.h>
+#include <zvec/core/framework/index_framework.h>
 #include "metric/metric_params.h"
 #include "ivf_distance_calculator.h"
 #include "ivf_index_format.h"
@@ -200,16 +200,19 @@ class IVFEntity {
   //! Transform a query
   int transform(const void *query, const IndexQueryMeta &qmeta,
                 const void **out, IndexQueryMeta *ometa) const {
-    if (quantizer_) {
+    if (quantizer_ && !use_residual_) {
       return this->transform_quantized(query, qmeta, 1, out, ometa);
     }
+    //! Residual mode: a global LUT is invalid (each list needs its own
+    //! residual query), pass the query through and let search() build the
+    //! per-list LUT.
     return reformer_.transform(query, qmeta, out, ometa);
   }
 
   //! Transform queries
   int transform(const void *query, const IndexQueryMeta &qmeta, uint32_t count,
                 const void **out, IndexQueryMeta *ometa) const {
-    if (quantizer_) {
+    if (quantizer_ && !use_residual_) {
       return this->transform_quantized(query, qmeta, count, out, ometa);
     }
     return reformer_.transform(query, qmeta, count, out, ometa);
@@ -256,13 +259,29 @@ class IVFEntity {
   //! Attach a turbo quantizer (opaque base pointer; the entity never
   //! inspects the concrete type). When set, inverted codes are decoded with
   //! the quantizer instead of the metric-based distance calculator.
-  void set_quantizer(zvec::turbo::Quantizer::Pointer quantizer) {
+  //! @param index_meta original vector-space meta: quantizers may rewrite
+  //!        their own meta to the code representation, so the residual
+  //!        query meta must be derived from the index meta instead.
+  void set_quantizer(zvec::turbo::Quantizer::Pointer quantizer,
+                     const IndexMeta &index_meta) {
     quantizer_ = std::move(quantizer);
+    if (quantizer_ && use_residual_) {
+      //! meta_ is a pseudo code meta; derive the residual query meta from
+      //! the original vector-space meta (data type/dimension as trained).
+      residual_query_meta_.set_meta(index_meta.data_type(),
+                                    index_meta.dimension());
+      residual_input_element_size_ = index_meta.element_size();
+    }
   }
 
   //! Retrieve the turbo quantizer
   const zvec::turbo::Quantizer::Pointer &quantizer(void) const {
     return quantizer_;
+  }
+
+  //! Whether the inverted codes store residuals (v - centroid[label])
+  bool use_residual(void) const {
+    return use_residual_;
   }
 
   /*! Index Reformer Wrapper
@@ -359,6 +378,11 @@ class IVFEntity {
                           uint32_t count, const void **out,
                           IndexQueryMeta *ometa) const;
 
+  //! Residual mode: build the per-list residual query (normalize for Cosine,
+  //! then subtract the list centroid) and quantize it into the LUT buffer
+  //! residual_query_.
+  int prepare_residual_query(size_t inverted_list_id, const void *query) const;
+
   //! Compute distances of a block of codes against a quantized query (LUT)
   void quantized_block_distance(const void *query, const void *block_data,
                                 size_t vecs_count, float *distances) const;
@@ -378,6 +402,15 @@ class IVFEntity {
   mutable IVFReformerWrapper reformer_{};
   zvec::turbo::Quantizer::Pointer quantizer_{};
   mutable std::string quantized_query_{};  // LUT buffer for turbo quantizer
+
+  //! Residual mode state
+  bool use_residual_{false};              //! inverted codes store residuals
+  bool residual_normalize_query_{false};  //! original metric is Cosine
+  IndexStorage::Segment::Pointer residual_centroids_{};
+  mutable std::string residual_query_{};      //! per-list LUT buffer
+  mutable std::string residual_query_vec_{};  //! residual query vector buffer
+  IndexQueryMeta residual_query_meta_{};      //! meta of the residual space
+  size_t residual_input_element_size_{0};     //! centroid/query element size
   IVFDistanceCalculator::Pointer calculator_{};
   IndexStorage::Pointer container_{};
   IndexStorage::Segment::Pointer inverted_{};

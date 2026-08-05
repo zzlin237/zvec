@@ -208,6 +208,11 @@ class IVFDumper {
   //! Dump the original vector, which doesnot been quantized
   int dump_original_vector(const void *data, size_t size);
 
+  //! Dump raw centroid vectors (residual mode only)
+  int dump_residual_centroids(const void *data, size_t size) {
+    return dump_segment(IVF_RESIDUAL_CENTROIDS_SEG_ID, data, size);
+  }
+
   //! Retrieve total dumped size
   size_t dumped_size(void) const {
     return dumped_size_;

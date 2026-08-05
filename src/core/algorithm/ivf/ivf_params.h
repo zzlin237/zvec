@@ -63,6 +63,12 @@ static const std::string PARAM_IVF_BUILDER_BLOCK_VECTOR_COUNT(
 //! use_zero_mean) are read from the same flat builder params.
 static const std::string PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS(
     "proxima.ivf.builder.turbo_quantizer_class");
+//! Enable residual quantization for the turbo quantizer path: vectors are
+//! quantized as (v - centroid[label]) and queries build per-list LUTs with
+//! (q - centroid[list]). Supported metrics: SquaredEuclidean and Cosine
+//! (normalized to L2 internally). Defaults to false.
+static const std::string PARAM_IVF_BUILDER_USE_RESIDUAL(
+    "proxima.ivf.builder.use_residual");
 
 // searcher params
 static const std::string PARAM_IVF_SEARCHER_SCAN_RATIO(
@@ -82,6 +88,7 @@ static const std::string PARAM_IVF_SEARCHER_NPROBE(
 static constexpr char const *kIPMetricName = "InnerProduct";
 static constexpr char const *kMipsMetricName = "MipsSquaredEuclidean";
 static constexpr char const *kL2MetricName = "SquaredEuclidean";
+static constexpr char const *kCosineMetricName = "Cosine";
 static constexpr char const *kMipsConverterName = "MipsConverter";
 static constexpr char const *kMipsRevConverterName = "MipsReverseConverter";
 static constexpr char const *kMipsReformerName = "MipsReformer";

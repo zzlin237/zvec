@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <zvec/ailego/utility/base64_helper.h>
+#include <zvec/ailego/utility/float_helper.h>
 #include "ivf_utility.h"
 namespace zvec {
 namespace core {
@@ -593,6 +594,23 @@ int IVFEntity::load(const IndexStorage::Pointer &container) {
     }
   }
 
+  //! Residual mode is detected by the presence of the residual centroids
+  //! segment dumped by IVFBuilder.
+  if (container_->get(IVF_RESIDUAL_CENTROIDS_SEG_ID)) {
+    residual_centroids_ = load_segment(IVF_RESIDUAL_CENTROIDS_SEG_ID, 0);
+    if (!residual_centroids_) {
+      return IndexError_InvalidFormat;
+    }
+    use_residual_ = true;
+    residual_normalize_query_ = (meta_.metric_name() == kCosineMetricName);
+    if (residual_normalize_query_) {
+      //! The residual LUT yields 2*(1-cos); scale by 0.5 so heap scores
+      //! match the cosine distance (1-cos) semantics of the non-residual
+      //! Cosine path.
+      norm_value_ *= 0.5f;
+    }
+  }
+
   LOG_DEBUG(
       "Load inverted index done, docs=%u invertedListCnt=%u "
       "elementSize=%u metric=%s reformer=%s",
@@ -641,6 +659,103 @@ int IVFEntity::transform_quantized(const void *query,
   return 0;
 }
 
+//! Residual mode: build the per-list residual query and quantize it into
+//! the LUT buffer. The query is in the original vector space; in Cosine
+//! residual mode it is L2-normalized first (the index was built in the
+//! normalized space), then the list centroid is subtracted.
+int IVFEntity::prepare_residual_query(size_t inverted_list_id,
+                                      const void *query) const {
+  if (!quantizer_ || !residual_centroids_) {
+    LOG_ERROR("Residual query needs a quantizer and residual centroids");
+    return IndexError_Runtime;
+  }
+  const size_t elem_size = residual_input_element_size_;
+  if (inverted_list_id >= header_.inverted_list_count ||
+      residual_centroids_->data_size() < (inverted_list_id + 1) * elem_size) {
+    LOG_ERROR("Invalid residual centroid access, list=%zu size=%zu",
+              inverted_list_id, residual_centroids_->data_size());
+    return IndexError_ReadData;
+  }
+  const void *centroid = nullptr;
+  if (residual_centroids_->read(inverted_list_id * elem_size, &centroid,
+                                elem_size) != elem_size) {
+    LOG_ERROR("Failed to read residual centroid, list=%zu", inverted_list_id);
+    return IndexError_ReadData;
+  }
+
+  residual_query_vec_.resize(elem_size);
+  std::memcpy(&residual_query_vec_[0], query, elem_size);
+
+  const auto &qmeta = residual_query_meta_;
+  const uint32_t dim = qmeta.dimension();
+  std::vector<float> scratch;
+  std::vector<uint16_t> out16;
+  const bool fp16 = (qmeta.data_type() == IndexMeta::DataType::DT_FP16);
+  char *vec = &residual_query_vec_[0];
+  if (residual_normalize_query_) {
+    float norm = 0.0f;
+    if (fp16) {
+      scratch.resize(dim);
+      ailego::FloatHelper::ToFP32(reinterpret_cast<const uint16_t *>(vec), dim,
+                                  scratch.data());
+      for (uint32_t i = 0; i < dim; ++i) {
+        norm += scratch[i] * scratch[i];
+      }
+      norm = std::sqrt(norm);
+      if (norm > 0.0f) {
+        for (uint32_t i = 0; i < dim; ++i) {
+          scratch[i] /= norm;
+        }
+        out16.resize(dim);
+        ailego::FloatHelper::ToFP16(scratch.data(), dim, out16.data());
+        std::memcpy(vec, out16.data(), elem_size);
+      }
+    } else {
+      float *f = reinterpret_cast<float *>(vec);
+      for (uint32_t i = 0; i < dim; ++i) {
+        norm += f[i] * f[i];
+      }
+      norm = std::sqrt(norm);
+      if (norm > 0.0f) {
+        for (uint32_t i = 0; i < dim; ++i) {
+          f[i] /= norm;
+        }
+      }
+    }
+  }
+
+  //! Subtract the list centroid in the residual space.
+  if (fp16) {
+    if (scratch.empty()) {
+      scratch.resize(dim);
+      ailego::FloatHelper::ToFP32(reinterpret_cast<const uint16_t *>(vec), dim,
+                                  scratch.data());
+    }
+    const uint16_t *cent16 = reinterpret_cast<const uint16_t *>(centroid);
+    for (uint32_t i = 0; i < dim; ++i) {
+      scratch[i] -= ailego::FloatHelper::ToFP32(cent16[i]);
+    }
+    out16.resize(dim);
+    ailego::FloatHelper::ToFP16(scratch.data(), dim, out16.data());
+    std::memcpy(vec, out16.data(), elem_size);
+  } else {
+    float *f = reinterpret_cast<float *>(vec);
+    const float *cent = reinterpret_cast<const float *>(centroid);
+    for (uint32_t i = 0; i < dim; ++i) {
+      f[i] -= cent[i];
+    }
+  }
+
+  IndexQueryMeta lut_meta;
+  int ret = quantizer_->quantize(vec, qmeta, &residual_query_, &lut_meta);
+  if (ret != 0) {
+    LOG_ERROR("Failed to quantize residual query, list=%zu ret=%d",
+              inverted_list_id, ret);
+    return ret;
+  }
+  return 0;
+}
+
 //! Compute distances of a block of codes against a quantized query (LUT).
 //! The block stores codes back to back with element_size() stride.
 void IVFEntity::quantized_block_distance(const void *query,
@@ -673,6 +788,13 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
   const size_t batch_size = kBatchBlocks;
   const size_t block_size = header_.block_size;
   const auto norm_val = this->inverted_list_normalize_value(inverted_list_id);
+  if (use_residual_ && quantizer_) {
+    //! The transformed query is the original vector in residual mode; build
+    //! the per-list residual LUT before scanning blocks.
+    int ret = this->prepare_residual_query(inverted_list_id, query);
+    ivf_check_error_code(ret);
+    query = residual_query_.data();
+  }
   for (size_t i = 0; i < list_meta->block_count; i += batch_size) {
     //! Read vecs
     const size_t off = list_meta->offset + i * block_size;
@@ -752,6 +874,13 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
   const size_t batch_size = kBatchBlocks;
   const size_t block_size = header_.block_size;
   const auto norm_val = this->inverted_list_normalize_value(inverted_list_id);
+  if (use_residual_ && quantizer_) {
+    //! The transformed query is the original vector in residual mode; build
+    //! the per-list residual LUT before scanning blocks.
+    int ret = this->prepare_residual_query(inverted_list_id, query);
+    ivf_check_error_code(ret);
+    query = residual_query_.data();
+  }
   for (size_t i = 0; i < list_meta->block_count; i += batch_size) {
     //! Read vecs
     const size_t off = list_meta->offset + i * block_size;
@@ -1036,6 +1165,12 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
   entity->norm_value_ = this->norm_value_;
   entity->norm_value_sqrt_ = this->norm_value_sqrt_;
 
+  entity->use_residual_ = this->use_residual_;
+  entity->residual_normalize_query_ = this->residual_normalize_query_;
+  entity->residual_centroids_ = this->residual_centroids_;
+  entity->residual_query_meta_ = this->residual_query_meta_;
+  entity->residual_input_element_size_ = this->residual_input_element_size_;
+
   return entity;
 }
 
@@ -1074,7 +1209,14 @@ int IVFUtility::RestoreTurboQuantizer(const IndexMeta &meta,
     quantizer_params.set("use_zero_mean",
                          builder_params.get_as_bool("use_zero_mean"));
   }
-  int ret = quantizer->init(meta, quantizer_params);
+  //! Residual mode: the quantizer was initialized with the residual space
+  //! meta, whose intrinsic metric is L2 regardless of the quantizer type.
+  //! Keep this aligned with the builder side.
+  IndexMeta init_meta = meta;
+  if (builder_params.get_as_bool(PARAM_IVF_BUILDER_USE_RESIDUAL)) {
+    init_meta.set_metric(kL2MetricName, 0, ailego::Params());
+  }
+  int ret = quantizer->init(init_meta, quantizer_params);
   if (ret != 0) {
     LOG_ERROR("Failed to init turbo quantizer '%s' before restore, ret=%d",
               quantizer_class.c_str(), ret);
@@ -1096,7 +1238,10 @@ int IVFUtility::RestoreTurboQuantizer(const IndexMeta &meta,
     return ret;
   }
 
-  entity->set_quantizer(quantizer);
+  //! The quantizer may rewrite its meta to the code representation during
+  //! deserialize; pass the original vector-space meta for the residual
+  //! query meta derivation.
+  entity->set_quantizer(quantizer, meta);
   LOG_INFO("IVFEntity restored turbo quantizer '%s' from index meta",
            quantizer_class.c_str());
   return 0;
