@@ -1015,6 +1015,92 @@ int Index::_sparse_search(const VectorData &vector_data,
   return 0;
 }
 
+int Index::_build_merge_train_holder(
+    const std::vector<Index::Pointer> &indexes,
+    core::IndexHolder::Pointer *holder) const {
+  const uint32_t dim = input_vector_meta_.dimension();
+  const size_t raw_element_size = input_vector_meta_.element_size();
+  auto collect = [&](auto value_tag, auto typed_holder) -> int {
+    using ValueType = decltype(value_tag);
+    for (const auto &index : indexes) {
+      if (index->streamer_ == nullptr) {
+        continue;
+      }
+      // A quantized source hands out codes instead of vectors, so its data
+      // cannot be used to train another quantizer.
+      if (index->streamer_->quantizer() != nullptr) {
+        LOG_ERROR(
+            "Cannot train turbo quantizer during merge: source index is "
+            "already quantized");
+        return core::IndexError_Unsupported;
+      }
+      auto provider = index->streamer_->create_provider();
+      if (provider == nullptr) {
+        continue;
+      }
+      // A reformed source (e.g. CosineNormalizeConverter, which normalizes
+      // and appends the norm) stores transformed vectors; revert them the
+      // same way MixedStreamerReducer::read_vec feeds the target streamer,
+      // so training sees the same raw vectors the add path will quantize.
+      const auto &reformer = index->reformer_;
+      const bool need_revert = reformer != nullptr;
+      const core::IndexQueryMeta source_meta{
+          index->streamer_->meta().data_type(),
+          index->streamer_->meta().dimension()};
+      if (!need_revert && provider->element_size() != raw_element_size) {
+        LOG_ERROR("Cannot train turbo quantizer during merge: source element "
+                  "size %zu mismatches target %zu",
+                  provider->element_size(), raw_element_size);
+        return core::IndexError_Mismatch;
+      }
+      auto iterator = provider->create_iterator();
+      std::string reverted;
+      for (; iterator->is_valid(); iterator->next()) {
+        const void *raw = iterator->data();
+        if (need_revert) {
+          reverted.clear();
+          if (reformer->revert(iterator->data(), source_meta, &reverted) !=
+              0) {
+            LOG_ERROR("Failed to revert vector for quantizer training");
+            return core::IndexError_Runtime;
+          }
+          if (reverted.size() != raw_element_size) {
+            LOG_ERROR("Reverted vector size %zu mismatches target %zu",
+                      reverted.size(), raw_element_size);
+            return core::IndexError_Mismatch;
+          }
+          raw = reverted.data();
+        }
+        ailego::NumericalVector<ValueType> vec;
+        vec.assign(static_cast<const ValueType *>(raw), dim);
+        if (!typed_holder->emplace(iterator->key(), std::move(vec))) {
+          LOG_ERROR("Failed to append training vector");
+          return core::IndexError_Runtime;
+        }
+      }
+    }
+    *holder = typed_holder;
+    return 0;
+  };
+
+  switch (input_vector_meta_.data_type()) {
+    case core::IndexMeta::DataType::DT_FP32:
+      return collect(
+          float{},
+          std::make_shared<
+              core::MultiPassIndexHolder<core::IndexMeta::DataType::DT_FP32>>(
+              dim));
+    case core::IndexMeta::DataType::DT_FP16:
+      return collect(
+          ailego::Float16{},
+          std::make_shared<
+              core::MultiPassIndexHolder<core::IndexMeta::DataType::DT_FP16>>(
+              dim));
+    default:
+      LOG_ERROR("Unsupported data type for turbo quantizer training");
+      return core::IndexError_Unsupported;
+  }
+}
 
 int Index::Merge(const std::vector<Index::Pointer> &indexes,
                  const IndexFilter &filter, const MergeOptions &options) {
@@ -1069,6 +1155,31 @@ int Index::Merge(const std::vector<Index::Pointer> &indexes,
                                              index->reformer_) != 0) {
       LOG_ERROR("Failed to feed streamer");
       return core::IndexError_Runtime;
+    }
+  }
+
+  // Train the target streamer's turbo quantizer (e.g. PQ codebook) before
+  // reduce() starts feeding vectors through quantize_data().
+  if (streamer_ != nullptr) {
+    auto quantizer = streamer_->quantizer();
+    if (quantizer != nullptr && quantizer->require_train()) {
+      core::IndexHolder::Pointer train_holder;
+      int tret = _build_merge_train_holder(indexes, &train_holder);
+      if (tret != 0) {
+        return tret;
+      }
+      if (train_holder == nullptr || train_holder->count() == 0) {
+        LOG_ERROR("No training data available for turbo quantizer");
+        return core::IndexError_Runtime;
+      }
+      tret = quantizer->train(train_holder,
+                              static_cast<int>(effective_write_concurrency));
+      if (tret != 0) {
+        LOG_ERROR("Failed to train turbo quantizer, ret=%d", tret);
+        return core::IndexError_Runtime;
+      }
+      LOG_INFO("Trained turbo quantizer with %zu vectors during merge",
+               train_holder->count());
     }
   }
   if (reducer->reduce(filter) != 0) {

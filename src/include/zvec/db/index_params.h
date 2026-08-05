@@ -121,13 +121,17 @@ class ZVEC_API InvertIndexParams : public IndexParams {
 
 /*
  * Quantizer parameters for vector indexes.
- * Encapsulates quantization-related settings such as enable_rotate.
- * Designed for future extensibility (e.g., num_bits, calibration_size).
+ * Encapsulates quantization-related settings such as enable_rotate and
+ * num_chunk. Designed for future extensibility.
  */
 class QuantizerParam {
  public:
   QuantizerParam() = default;
-  explicit QuantizerParam(bool enable_rotate) : enable_rotate_(enable_rotate) {}
+  explicit QuantizerParam(bool enable_rotate, int num_chunk = 8,
+                          int num_bits = 8)
+      : enable_rotate_(enable_rotate),
+        num_chunk_(num_chunk),
+        num_bits_(num_bits) {}
 
   bool enable_rotate() const {
     return enable_rotate_;
@@ -137,8 +141,25 @@ class QuantizerParam {
     enable_rotate_ = v;
   }
 
+  int num_chunk() const {
+    return num_chunk_;
+  }
+
+  void set_num_chunk(int v) {
+    num_chunk_ = v;
+  }
+
+  int num_bits() const {
+    return num_bits_;
+  }
+
+  void set_num_bits(int v) {
+    num_bits_ = v;
+  }
+
   bool operator==(const QuantizerParam &other) const {
-    return enable_rotate_ == other.enable_rotate_;
+    return enable_rotate_ == other.enable_rotate_ &&
+           num_chunk_ == other.num_chunk_ && num_bits_ == other.num_bits_;
   }
 
   bool operator!=(const QuantizerParam &other) const {
@@ -146,9 +167,16 @@ class QuantizerParam {
   }
 
  private:
-  // When enabled, vectors are rotated before INT8 quantization to reduce
-  // quantization error. Only effective with quantize_type=INT8.
+  // When enabled, vectors are rotated before INT8/INT4 quantization to reduce
+  // quantization error. Only effective with quantize_type=INT8 or INT4.
   bool enable_rotate_{false};
+  // Number of PQ sub-quantizers (codebooks). Only effective with
+  // quantize_type=PQ. The vector dimension must be divisible by this value.
+  // Default: 8.
+  int num_chunk_{8};
+  // Bits per PQ sub-quantizer code, 8 (256 centroids) or 4 (16 centroids,
+  // nibble-packed). Only effective with quantize_type=PQ. Default: 8.
+  int num_bits_{8};
 };
 
 /*

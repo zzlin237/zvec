@@ -39,7 +39,7 @@ constexpr const int kRabitqCompiledAvx512 = 0;
 std::unordered_map<DataType, std::set<QuantizeType>> quantize_type_map = {
     {DataType::VECTOR_FP32,
      {QuantizeType::FP16, QuantizeType::INT4, QuantizeType::INT8,
-      QuantizeType::RABITQ}},
+      QuantizeType::RABITQ, QuantizeType::PQ}},
     // {DataType::VECTOR_FP64, {QuantizeType::FP16}},
     {DataType::SPARSE_VECTOR_FP32, {QuantizeType::FP16}},
 };
@@ -238,6 +238,33 @@ Status FieldSchema::validate() const {
                 QuantizeTypeCodeBook::AsString(
                     vector_index_params->quantize_type()));
           }
+        }
+      }
+      if (vector_index_params->quantize_type() == QuantizeType::PQ) {
+        // Turbo PQ quantizers are only wired into the HNSW streamer and the
+        // IVF builder; other index types would silently ignore them.
+        if (index_params_->type() != IndexType::HNSW &&
+            index_params_->type() != IndexType::IVF) {
+          return Status::InvalidArgument(
+              "schema validate failed: PQ quantize only supports HNSW|IVF "
+              "index, but field[",
+              name_, "]'s index_type is ",
+              IndexTypeCodeBook::AsString(index_params_->type()));
+        }
+        const auto &qp = vector_index_params->quantizer_param();
+        if (qp.num_bits() != 4 && qp.num_bits() != 8) {
+          return Status::InvalidArgument(
+              "schema validate failed: PQ num_bits must be 4 or 8, but "
+              "field[",
+              name_, "]'s num_bits is ", qp.num_bits());
+        }
+        if (qp.num_chunk() <= 0 ||
+            dimension_ % static_cast<uint32_t>(qp.num_chunk()) != 0) {
+          return Status::InvalidArgument(
+              "schema validate failed: PQ requires dimension divisible by "
+              "num_chunk, but field[",
+              name_, "]'s dimension is ", dimension_, " and num_chunk is ",
+              qp.num_chunk());
         }
       }
       if (index_params_->type() == IndexType::IVF &&

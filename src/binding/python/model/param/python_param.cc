@@ -70,6 +70,8 @@ static std::string quantize_type_to_string(const QuantizeType type) {
       return "FP16";
     case QuantizeType::RABITQ:
       return "RABITQ";
+    case QuantizeType::PQ:
+      return "PQ";
     default:
       return "UNDEFINED";
   }
@@ -386,20 +388,34 @@ Args:
       m, "QuantizerParam", R"pbdoc(
 Parameters for quantizer configuration.
 
-Encapsulates quantization-related settings such as enable_rotate.
-Designed for future extensibility.
+Encapsulates quantization-related settings such as enable_rotate and
+num_chunk. Designed for future extensibility.
 
 Attributes:
     enable_rotate (bool): Whether to apply random rotation before INT8/INT4
         quantization to reduce quantization error.
         Only effective with quantize_type=INT8 or INT4. Defaults to False.
+    num_chunk (int): Number of PQ sub-quantizers (codebooks).
+        Only effective with quantize_type=PQ. The vector dimension must be
+        divisible by this value. Defaults to 8.
+    num_bits (int): Bits per PQ sub-quantizer code, 8 (256 centroids) or
+        4 (16 centroids, nibble-packed). Only effective with
+        quantize_type=PQ. Defaults to 8.
 
 Examples:
     >>> qp = QuantizerParam(enable_rotate=True)
     >>> print(qp.enable_rotate)
     True
+    >>> qp_pq = QuantizerParam(num_chunk=32)
+    >>> print(qp_pq.num_chunk)
+    32
+    >>> qp_pq4 = QuantizerParam(num_chunk=32, num_bits=4)
+    >>> print(qp_pq4.num_bits)
+    4
 )pbdoc");
-  quantizer_param.def(py::init<bool>(), py::arg("enable_rotate") = false)
+  quantizer_param
+      .def(py::init<bool, int, int>(), py::arg("enable_rotate") = false,
+           py::arg("num_chunk") = 8, py::arg("num_bits") = 8)
       .def_property_readonly(
           "enable_rotate",
           [](const QuantizerParam &self) -> bool {
@@ -407,18 +423,36 @@ Examples:
           },
           "bool: Whether random rotation is enabled before INT8/INT4 "
           "quantization.")
+      .def_property_readonly(
+          "num_chunk",
+          [](const QuantizerParam &self) -> int {
+            return self.num_chunk();
+          },
+          "int: Number of PQ sub-quantizers. Only effective with "
+          "quantize_type=PQ.")
+      .def_property_readonly(
+          "num_bits",
+          [](const QuantizerParam &self) -> int {
+            return self.num_bits();
+          },
+          "int: Bits per PQ sub-quantizer code (4 or 8). Only effective "
+          "with quantize_type=PQ.")
       .def(
           "to_dict",
           [](const QuantizerParam &self) -> py::dict {
             py::dict dict;
             dict["enable_rotate"] = self.enable_rotate();
+            dict["num_chunk"] = self.num_chunk();
+            dict["num_bits"] = self.num_bits();
             return dict;
           },
           "Convert to dictionary with all fields")
       .def("__repr__",
            [](const QuantizerParam &self) -> std::string {
              return "{\"enable_rotate\":" +
-                    std::string(self.enable_rotate() ? "true" : "false") + "}";
+                    std::string(self.enable_rotate() ? "true" : "false") +
+                    ", \"num_chunk\":" + std::to_string(self.num_chunk()) +
+                    ", \"num_bits\":" + std::to_string(self.num_bits()) + "}";
            })
       .def(
           "__eq__",
@@ -429,12 +463,16 @@ Examples:
           py::is_operator())
       .def(py::pickle(
           [](const QuantizerParam &self) {
-            return py::make_tuple(self.enable_rotate());
+            return py::make_tuple(self.enable_rotate(), self.num_chunk(),
+                                  self.num_bits());
           },
           [](py::tuple t) {
-            if (t.size() != 1)
+            if (t.size() < 1 || t.size() > 3)
               throw std::runtime_error("Invalid state for QuantizerParam");
-            return std::make_shared<QuantizerParam>(t[0].cast<bool>());
+            int num_chunk = (t.size() >= 2) ? t[1].cast<int>() : 8;
+            int num_bits = (t.size() >= 3) ? t[2].cast<int>() : 8;
+            return std::make_shared<QuantizerParam>(t[0].cast<bool>(),
+                                                    num_chunk, num_bits);
           }));
 
   // binding base vector index params
@@ -514,8 +552,9 @@ Attributes:
         neighbors during index construction. Larger values yield better
         graph quality at the cost of slower build time. Default is 500.
     quantize_type (QuantizeType): Optional quantization type for vector
-        compression (e.g., FP16, INT8). Default is `QuantizeType.UNDEFINED` to
-        disable quantization.
+        compression (e.g., FP16, INT8, PQ). Default is `QuantizeType.UNDEFINED`
+        to disable quantization. When using PQ, configure num_chunk and
+        num_bits via ``quantizer_param``.
 
 Examples:
     >>> from zvec.typing import MetricType, QuantizeType
@@ -528,6 +567,15 @@ Examples:
     ... )
     >>> print(params)
     {'metric_type': 'IP', 'm': 16, 'ef_construction': 200, 'quantize_type': 'INT8', 'use_contiguous_memory': True}
+
+    >>> # HNSW + PQ example (num_bits=8 -> PqInt8, num_bits=4 -> PqInt4)
+    >>> pq_params = HnswIndexParam(
+    ...     metric_type=MetricType.L2,
+    ...     m=15,
+    ...     ef_construction=500,
+    ...     quantize_type=QuantizeType.PQ,
+    ...     quantizer_param=QuantizerParam(num_chunk=32, num_bits=8),
+    ... )
 )pbdoc");
   hnsw_params
       .def(py::init([](MetricType metric_type, int m, int ef_construction,
@@ -568,6 +616,8 @@ Examples:
             dict["use_contiguous_memory"] = self.use_contiguous_memory();
             py::dict qp_dict;
             qp_dict["enable_rotate"] = self.quantizer_param().enable_rotate();
+            qp_dict["num_chunk"] = self.quantizer_param().num_chunk();
+            qp_dict["num_bits"] = self.quantizer_param().num_bits();
             dict["quantizer_param"] = qp_dict;
             return dict;
           },
@@ -587,19 +637,27 @@ Examples:
                    (self.use_contiguous_memory() ? "true" : "false") +
                    ", \"quantizer_param\":{" + "\"enable_rotate\":" +
                    (self.quantizer_param().enable_rotate() ? "true" : "false") +
-                   "}}";
+                   ", \"num_chunk\":" +
+                   std::to_string(self.quantizer_param().num_chunk()) +
+                   ", \"num_bits\":" +
+                   std::to_string(self.quantizer_param().num_bits()) + "}}";
           })
       .def(py::pickle(
           [](const HnswIndexParams &self) {
-            return py::make_tuple(self.metric_type(), self.m(),
-                                  self.ef_construction(), self.quantize_type(),
-                                  self.use_contiguous_memory(),
-                                  self.quantizer_param().enable_rotate());
+            return py::make_tuple(
+                self.metric_type(), self.m(), self.ef_construction(),
+                self.quantize_type(), self.use_contiguous_memory(),
+                self.quantizer_param().enable_rotate(),
+                self.quantizer_param().num_chunk(),
+                self.quantizer_param().num_bits());
           },
           [](py::tuple t) {
-            if (t.size() != 5 && t.size() != 6)
+            if (t.size() < 5 || t.size() > 8)
               throw std::runtime_error("Invalid state for HnswIndexParams");
-            QuantizerParam qp(t.size() >= 6 ? t[5].cast<bool>() : false);
+            bool er = (t.size() >= 6) ? t[5].cast<bool>() : false;
+            int num_chunk = (t.size() >= 7) ? t[6].cast<int>() : 8;
+            int num_bits = (t.size() >= 8) ? t[7].cast<int>() : 8;
+            QuantizerParam qp(er, num_chunk, num_bits);
             return std::make_shared<HnswIndexParams>(
                 t[0].cast<MetricType>(), t[1].cast<int>(), t[2].cast<int>(),
                 t[3].cast<QuantizeType>(), t[4].cast<bool>(), qp);
@@ -958,7 +1016,8 @@ Attributes:
     use_soar (bool): Whether to enable SOAR (Scalable Optimized Adaptive Routing)
         for improved IVF search performance. Default is False.
     quantize_type (QuantizeType): Optional quantization type for vector
-        compression (e.g., FP16, INT8). Default is ``QuantizeType.UNDEFINED``.
+        compression (e.g., FP16, INT8, PQ). Default is ``QuantizeType.UNDEFINED``.
+        When using PQ, configure num_chunk and num_bits via ``quantizer_param``.
 
 Examples:
     >>> from zvec.typing import MetricType, QuantizeType
@@ -971,6 +1030,14 @@ Examples:
     ... )
     >>> print(params.n_list)
     100
+
+    >>> # IVF + PQ example (PQ on original vectors)
+    >>> pq_params = IVFIndexParam(
+    ...     metric_type=MetricType.L2,
+    ...     n_list=100,
+    ...     quantize_type=QuantizeType.PQ,
+    ...     quantizer_param=QuantizerParam(num_chunk=16, num_bits=8),
+    ... )
 )pbdoc");
   ivf_params
       .def(py::init([](MetricType metric_type, int n_list, int n_iters,
@@ -1019,6 +1086,8 @@ Args:
                 quantize_type_to_string(self.quantize_type());
             py::dict qp_dict;
             qp_dict["enable_rotate"] = self.quantizer_param().enable_rotate();
+            qp_dict["num_chunk"] = self.quantizer_param().num_chunk();
+            qp_dict["num_bits"] = self.quantizer_param().num_bits();
             dict["quantizer_param"] = qp_dict;
             return dict;
           },
@@ -1036,19 +1105,27 @@ Args:
                    quantize_type_to_string(self.quantize_type()) +
                    ", \"quantizer_param\":{" + "\"enable_rotate\":" +
                    (self.quantizer_param().enable_rotate() ? "true" : "false") +
-                   "}}";
+                   ", \"num_chunk\":" +
+                   std::to_string(self.quantizer_param().num_chunk()) +
+                   ", \"num_bits\":" +
+                   std::to_string(self.quantizer_param().num_bits()) + "}}";
           })
       .def(py::pickle(
           [](const IVFIndexParams &self) {
             return py::make_tuple(self.metric_type(), self.n_list(),
                                   self.n_iters(), self.use_soar(),
                                   self.quantize_type(),
-                                  self.quantizer_param().enable_rotate());
+                                  self.quantizer_param().enable_rotate(),
+                                  self.quantizer_param().num_chunk(),
+                                  self.quantizer_param().num_bits());
           },
           [](py::tuple t) {
-            if (t.size() != 5 && t.size() != 6)
+            if (t.size() < 5 || t.size() > 8)
               throw std::runtime_error("Invalid state for IVFIndexParams");
-            QuantizerParam qp(t.size() >= 6 ? t[5].cast<bool>() : false);
+            bool er = (t.size() >= 6) ? t[5].cast<bool>() : false;
+            int num_chunk = (t.size() >= 7) ? t[6].cast<int>() : 8;
+            int num_bits = (t.size() >= 8) ? t[7].cast<int>() : 8;
+            QuantizerParam qp(er, num_chunk, num_bits);
             return std::make_shared<IVFIndexParams>(
                 t[0].cast<MetricType>(), t[1].cast<int>(), t[2].cast<int>(),
                 t[3].cast<bool>(), t[4].cast<QuantizeType>(), qp);

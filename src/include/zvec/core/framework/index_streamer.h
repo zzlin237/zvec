@@ -61,6 +61,11 @@ class IndexStreamer : public IndexRunner {
 
   //! Retrieve meta of index
   virtual const IndexMeta &meta(void) const = 0;
+
+  //! Retrieve the turbo quantizer bound to the add path (nullptr if none)
+  virtual turbo::Quantizer::Pointer quantizer(void) const {
+    return nullptr;
+  }
 };
 
 }  // namespace core

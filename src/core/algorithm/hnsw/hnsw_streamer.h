@@ -42,6 +42,11 @@ class HnswStreamer : public IndexStreamer {
     return entity_->storage_mode();
   }
 
+  //! Retrieve the turbo quantizer bound to the add path (nullptr if none)
+  zvec::turbo::Quantizer::Pointer quantizer(void) const override {
+    return add_quantizer_;
+  }
+
  protected:
   //! Initialize Streamer
   int init(const IndexMeta &imeta, const ailego::Params &params) override;

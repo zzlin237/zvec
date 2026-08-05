@@ -295,6 +295,8 @@ class ProximaEngineHelper {
         return core_interface::QuantizerType::kInt4;
       case QuantizeType::RABITQ:
         return core_interface::QuantizerType::kRabitq;
+      case QuantizeType::PQ:
+        return core_interface::QuantizerType::kPQ;
       default:
         return tl::make_unexpected(
             Status::InvalidArgument("unsupported quantize type"));
@@ -356,8 +358,18 @@ class ProximaEngineHelper {
     if (auto quantize_type =
             convert_to_engine_quantize_type(db_index_params->quantize_type());
         quantize_type.has_value()) {
-      index_param_builder->WithQuantizerParam(
-          core_interface::QuantizerParam::Create(quantize_type.value()));
+      if (quantize_type.value() == core_interface::QuantizerType::kPQ) {
+        // PQ carries extra fields (num_chunk/num_bits) on the derived param;
+        // build it explicitly so the concrete type survives Clone() in the
+        // builder and the dynamic_cast in the engine index succeeds.
+        const auto &qp = db_index_params->quantizer_param();
+        index_param_builder->WithQuantizerParam(
+            std::make_shared<core_interface::PqQuantizerParam>(
+                qp.num_chunk(), qp.num_bits(), qp.enable_rotate()));
+      } else {
+        index_param_builder->WithQuantizerParam(
+            core_interface::QuantizerParam::Create(quantize_type.value()));
+      }
     } else {
       return tl::make_unexpected(
           Status::InvalidArgument("unsupported quantize type"));
