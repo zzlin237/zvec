@@ -165,10 +165,34 @@ class CosineReformer : public IndexReformer {
   }
 
   //! Transform queries
-  int transform(const void * /*query*/, const IndexQueryMeta & /*qmeta*/,
-                uint32_t /*count*/, std::string * /*out*/,
-                IndexQueryMeta * /*ometa*/) const override {
-    return IndexError_Unsupported;
+  //! Implemented on top of the single-query transform so that centroid
+  //! probing (which always uses the batch entry point) works with cosine.
+  int transform(const void *query, const IndexQueryMeta &qmeta,
+                uint32_t count, std::string *out,
+                IndexQueryMeta *ometa) const override {
+    if (count == 0) {
+      return 0;
+    }
+    const size_t in_size = qmeta.element_size();
+    const char *cur = static_cast<const char *>(query);
+    std::string one;
+    IndexQueryMeta one_meta;
+    out->clear();
+    for (uint32_t i = 0; i < count; ++i) {
+      int ret = this->transform(cur, qmeta, &one, &one_meta);
+      if (ret != 0) {
+        return ret;
+      }
+      if (i == 0) {
+        *ometa = one_meta;
+        out->reserve(one.size() * count);
+      } else if (one.size() != ometa->element_size()) {
+        return IndexError_Runtime;
+      }
+      out->append(one);
+      cur += in_size;
+    }
+    return 0;
   }
 
   //! Convert records

@@ -33,6 +33,32 @@ int IVFIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
   proxima_index_params_.set(core::PARAM_IVF_BUILDER_CENTROID_COUNT,
                             param_.nlist);
 
+  // Map quantizer_param.type to turbo quantizer class name. The IVFBuilder
+  // creates/trains the quantizer itself and persists it with the index.
+  switch (param_.quantizer_type()) {
+    case QuantizerType::kFp32:
+      proxima_index_params_.set(
+          core::PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, "Fp32Quantizer");
+      break;
+    case QuantizerType::kPQ: {
+      // num_chunk / num_bits live on the PQ-specific derived param.
+      const auto *pq_param = dynamic_cast<const PqQuantizerParam *>(
+          param_.quantizer_param.get());
+      if (!pq_param) {
+        break;
+      }
+      const char *pq_class =
+          (pq_param->num_bits == 4) ? "PqInt4Quantizer" : "PqInt8Quantizer";
+      proxima_index_params_.set(core::PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS,
+                                pq_class);
+      proxima_index_params_.set("num_chunk", pq_param->num_chunk);
+      break;
+    }
+    default:
+      // kNone or unsupported type -> plain IVF (legacy metric distance path)
+      break;
+  }
+
   // TODO: add_vector_with_id & fetch_by_id don't rely on this param
   builder_ = core::IndexFactory::CreateBuilder("IVFBuilder");
   streamer_ = core::IndexFactory::CreateStreamer("IVFStreamer");

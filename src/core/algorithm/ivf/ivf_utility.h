@@ -22,6 +22,11 @@
 #include <zvec/ailego/utility/time_helper.h>
 
 namespace zvec {
+
+namespace turbo {
+class Quantizer;
+}  // namespace turbo
+
 namespace core {
 
 #ifndef ivf_check_error_code
@@ -133,6 +138,17 @@ class IVFUtility {
       reinterpret_cast<T *>(dst)[i] = reinterpret_cast<const T *>(src)[i * M];
     }
   }
+
+  //! Restore a turbo quantizer persisted by IVFBuilder and attach it to the
+  //! entity. The class name and quantizer-specific options (num_chunk,
+  //! use_zero_mean) are read from meta.builder_params(); the codebook state
+  //! is deserialized from the IVF_TURBO_QUANTIZER_SEG_ID segment. Returns 0
+  //! without touching the entity when the index has no turbo quantizer.
+  static int RestoreTurboQuantizer(const class IndexMeta &meta,
+                                   const std::shared_ptr<class IndexStorage>
+                                       &storage,
+                                   const std::shared_ptr<class IVFEntity>
+                                       &entity);
 };
 
 void IVFUtility::Transpose(size_t align_size, const void *src, size_t m,

@@ -15,6 +15,7 @@
 
 #include <zvec/core/framework/index_builder.h>
 #include <zvec/core/framework/index_meta.h>
+#include <turbo/quantizer/quantizer.h>
 #include "ivf_centroid_index.h"
 
 namespace zvec {
@@ -63,6 +64,12 @@ class IVFBuilder : public IndexBuilder {
   IVFCentroidIndex::Pointer centroid_index() const {
     return centroid_index_;
   }
+
+  //! Inject a turbo quantizer (opaque base pointer; the builder never
+  //! inspects the concrete type). The class name must also be present in
+  //! params (PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS) so it can be persisted
+  //! with the index meta and restored at load time.
+  int init_quantizer(zvec::turbo::Quantizer::Pointer quantizer);
 
  public:
   /*! Random Access Index Holder
@@ -227,6 +234,11 @@ class IVFBuilder : public IndexBuilder {
   //! Prepare the quantizer for inverted index
   int prepare_quantizer(IndexThreads *threads);
 
+  //! Prepare the turbo quantizer for inverted index: create it from params
+  //! if not injected, train it (after clustering) and derive the quantized
+  //! meta used for dumping codes.
+  int prepare_turbo_quantizer();
+
   //! Quantize the centrods list
   int quantize_centroids();
 
@@ -298,6 +310,7 @@ class IVFBuilder : public IndexBuilder {
   IndexConverter::Pointer converter_{};
   IndexMeta quantized_meta_{};
   std::vector<IndexConverter::Pointer> quantizers_{};
+  zvec::turbo::Quantizer::Pointer turbo_quantizer_{};
 
   std::atomic_bool error_{false};
   int err_code_{0};

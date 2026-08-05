@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "ivf_entity.h"
+#include <cstring>
 #include <iostream>
 #include "ivf_utility.h"
 namespace zvec {
@@ -600,6 +601,62 @@ int IVFEntity::load(const IndexStorage::Pointer &container) {
   return 0;
 }
 
+//! Transform queries into quantizer LUTs via the turbo quantizer.
+//! The LUTs of all queries are concatenated into a single buffer, and the
+//! output meta is set so that element_size() equals one LUT in bytes, which
+//! keeps the per-query pointer advancement in searchers correct.
+int IVFEntity::transform_quantized(const void *query,
+                                   const IndexQueryMeta &qmeta,
+                                   uint32_t count, const void **out,
+                                   IndexQueryMeta *ometa) const {
+  const size_t lut_bytes = quantizer_->quantized_query_vector_length();
+  if (lut_bytes == 0 || lut_bytes % sizeof(float) != 0) {
+    LOG_ERROR("Invalid quantized query length=%zu", lut_bytes);
+    return IndexError_Runtime;
+  }
+  quantized_query_.resize(lut_bytes * count);
+  const char *cur = static_cast<const char *>(query);
+  for (uint32_t q = 0; q < count; ++q) {
+    std::string lut;
+    IndexQueryMeta lut_meta;
+    int ret = quantizer_->quantize(cur, qmeta, &lut, &lut_meta);
+    if (ret != 0) {
+      LOG_ERROR("Failed to quantize query, ret=%d", ret);
+      return ret;
+    }
+    if (lut.size() != lut_bytes) {
+      LOG_ERROR("Quantized query size=%zu mismatch with expected=%zu",
+                lut.size(), lut_bytes);
+      return IndexError_Runtime;
+    }
+    memcpy(&quantized_query_[q * lut_bytes], lut.data(), lut_bytes);
+    cur += qmeta.element_size();
+  }
+  *out = quantized_query_.data();
+  *ometa = qmeta;
+  ometa->set_extra_meta_size(0);
+  ometa->set_meta(IndexMeta::DataType::DT_FP32,
+                  static_cast<uint32_t>(lut_bytes / sizeof(float)));
+  return 0;
+}
+
+//! Compute distances of a block of codes against a quantized query (LUT).
+//! The block stores codes back to back with element_size() stride.
+void IVFEntity::quantized_block_distance(const void *query,
+                                         const void *block_data,
+                                         size_t vecs_count,
+                                         float *distances) const {
+  const size_t stride = meta_.element_size();
+  const char *base = static_cast<const char *>(block_data);
+  //! block_vector_count is capped by the keeps bitmap (< 64) in search()
+  const void *dp_list[64];
+  for (size_t k = 0; k < vecs_count; ++k) {
+    dp_list[k] = base + k * stride;
+  }
+  quantizer_->calc_distance_dp_query_batch(dp_list, static_cast<int>(vecs_count),
+                                           query, distances);
+}
+
 int IVFEntity::search(size_t inverted_list_id, const void *query,
                       const IndexFilter &filter, uint32_t *scan_count,
                       IndexDocumentHeap *heap,
@@ -654,8 +711,13 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
       }
 
       const void *block_data = static_cast<const char *>(data) + b * block_size;
-      calculator_->query_features_distance(query, block_data, vecs_count,
-                                           distances.data());
+      if (quantizer_) {
+        this->quantized_block_distance(query, block_data, vecs_count,
+                                       distances.data());
+      } else {
+        calculator_->query_features_distance(query, block_data, vecs_count,
+                                             distances.data());
+      }
 
       *(context_stats->mutable_dist_calced_count()) += vecs_count;
 
@@ -715,8 +777,13 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
           std::min(block_vecs, list_meta->vector_count - (i + b) * block_vecs);
       auto block_keys = keys + b * block_vecs;
       const void *block_data = static_cast<const char *>(data) + b * block_size;
-      calculator_->query_features_distance(query, block_data, vecs_count,
-                                           distances.data());
+      if (quantizer_) {
+        this->quantized_block_distance(query, block_data, vecs_count,
+                                       distances.data());
+      } else {
+        calculator_->query_features_distance(query, block_data, vecs_count,
+                                             distances.data());
+      }
       for (size_t k = 0; k < vecs_count; ++k) {
         if (block_keys[k] != kInvalidKey) {
           uint32_t id = list_meta->id_offset + (i + b) * block_vecs + k;
@@ -953,6 +1020,7 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
 
   entity->meta_ = this->meta_;
   entity->reformer_ = this->reformer_;
+  entity->quantizer_ = this->quantizer_;
   entity->calculator_ = this->calculator_;
   entity->header_ = this->header_;
   entity->container_ = this->container_;
@@ -968,6 +1036,75 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
   entity->norm_value_sqrt_ = this->norm_value_sqrt_;
 
   return entity;
+}
+
+//! Restore a turbo quantizer persisted by IVFBuilder and attach it to the
+//! entity. Follows the init-before-deserialize contract: init() rebuilds the
+//! metric context from the original meta, then deserialize() loads the
+//! trained state (codebooks) from the dedicated segment.
+int IVFUtility::RestoreTurboQuantizer(
+    const IndexMeta &meta, const IndexStorage::Pointer &storage,
+    const IVFEntity::Pointer &entity) {
+  std::string quantizer_class;
+  if (!meta.builder_params().get(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS,
+                                 &quantizer_class) ||
+      quantizer_class.empty()) {
+    //! Legacy index without a turbo quantizer
+    return 0;
+  }
+  if (!storage || !entity) {
+    LOG_ERROR("Invalid storage or entity");
+    return IndexError_InvalidArgument;
+  }
+
+  auto quantizer = IndexFactory::CreateQuantizer(quantizer_class);
+  if (!quantizer) {
+    LOG_ERROR("Failed to create turbo quantizer '%s'",
+              quantizer_class.c_str());
+    return IndexError_NoExist;
+  }
+
+  ailego::Params quantizer_params;
+  auto &builder_params = meta.builder_params();
+  uint32_t num_chunk = builder_params.get_as_uint32("num_chunk");
+  if (num_chunk > 0) {
+    quantizer_params.set("num_chunk", num_chunk);
+  }
+  if (builder_params.has("use_zero_mean")) {
+    quantizer_params.set("use_zero_mean",
+                         builder_params.get_as_bool("use_zero_mean"));
+  }
+  int ret = quantizer->init(meta, quantizer_params);
+  if (ret != 0) {
+    LOG_ERROR("Failed to init turbo quantizer '%s' before restore, ret=%d",
+              quantizer_class.c_str(), ret);
+    return ret;
+  }
+
+  auto seg = storage->get(IVF_TURBO_QUANTIZER_SEG_ID, 0);
+  if (!seg) {
+    LOG_ERROR("Failed to get segment %s",
+              IVF_TURBO_QUANTIZER_SEG_ID.c_str());
+    return IndexError_InvalidFormat;
+  }
+  const size_t size = seg->data_size();
+  const void *data = nullptr;
+  if (seg->read(0, &data, size) != size || !data) {
+    LOG_ERROR("Failed to read segment %s",
+              IVF_TURBO_QUANTIZER_SEG_ID.c_str());
+    return IndexError_ReadData;
+  }
+  ret = quantizer->deserialize(data, size);
+  if (ret != 0) {
+    LOG_ERROR("Failed to deserialize turbo quantizer '%s', ret=%d",
+              quantizer_class.c_str(), ret);
+    return ret;
+  }
+
+  entity->set_quantizer(quantizer);
+  LOG_INFO("IVFEntity restored turbo quantizer '%s' from segment %s",
+           quantizer_class.c_str(), IVF_TURBO_QUANTIZER_SEG_ID.c_str());
+  return 0;
 }
 
 IndexStorage::Segment::Pointer IVFEntity::load_segment(

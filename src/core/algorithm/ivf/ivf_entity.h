@@ -15,6 +15,7 @@
 
 #include <core/quantizer/quantizer_params.h>
 #include <zvec/core/framework/index_framework.h>
+#include <turbo/quantizer/quantizer.h>
 #include "metric/metric_params.h"
 #include "ivf_distance_calculator.h"
 #include "ivf_index_format.h"
@@ -199,12 +200,18 @@ class IVFEntity {
   //! Transform a query
   int transform(const void *query, const IndexQueryMeta &qmeta,
                 const void **out, IndexQueryMeta *ometa) const {
+    if (quantizer_) {
+      return this->transform_quantized(query, qmeta, 1, out, ometa);
+    }
     return reformer_.transform(query, qmeta, out, ometa);
   }
 
   //! Transform queries
   int transform(const void *query, const IndexQueryMeta &qmeta, uint32_t count,
                 const void **out, IndexQueryMeta *ometa) const {
+    if (quantizer_) {
+      return this->transform_quantized(query, qmeta, count, out, ometa);
+    }
     return reformer_.transform(query, qmeta, count, out, ometa);
   }
 
@@ -244,6 +251,18 @@ class IVFEntity {
   //! Retrieve reformer
   const IVFReformerWrapper &reformer(void) const {
     return reformer_;
+  }
+
+  //! Attach a turbo quantizer (opaque base pointer; the entity never
+  //! inspects the concrete type). When set, inverted codes are decoded with
+  //! the quantizer instead of the metric-based distance calculator.
+  void set_quantizer(zvec::turbo::Quantizer::Pointer quantizer) {
+    quantizer_ = std::move(quantizer);
+  }
+
+  //! Retrieve the turbo quantizer
+  const zvec::turbo::Quantizer::Pointer &quantizer(void) const {
+    return quantizer_;
   }
 
   /*! Index Reformer Wrapper
@@ -335,6 +354,15 @@ class IVFEntity {
   //! Load the header segment
   int load_header(const IndexStorage::Pointer &container);
 
+  //! Transform queries into quantizer LUTs via the turbo quantizer
+  int transform_quantized(const void *query, const IndexQueryMeta &qmeta,
+                          uint32_t count, const void **out,
+                          IndexQueryMeta *ometa) const;
+
+  //! Compute distances of a block of codes against a quantized query (LUT)
+  void quantized_block_distance(const void *query, const void *block_data,
+                                size_t vecs_count, float *distances) const;
+
   //! Convert the int8 quantizer scale to normalize value
   float convert_to_normalize_value(float scale) const {
     auto v = scale == 0.0 ? 1.0 : (1.0 / scale);
@@ -348,6 +376,8 @@ class IVFEntity {
   //! Members
   IndexMeta meta_{};
   mutable IVFReformerWrapper reformer_{};
+  zvec::turbo::Quantizer::Pointer quantizer_{};
+  mutable std::string quantized_query_{};  // LUT buffer for turbo quantizer
   IVFDistanceCalculator::Pointer calculator_{};
   IndexStorage::Pointer container_{};
   IndexStorage::Segment::Pointer inverted_{};

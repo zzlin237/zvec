@@ -103,6 +103,10 @@ int IVFStreamer::open(IndexStorage::Pointer storage) {
   ret = entity_->load(storage);
   ivf_check_error_code(ret);
 
+  //! Restore the turbo quantizer (no-op for legacy indexes)
+  ret = IVFUtility::RestoreTurboQuantizer(meta_, storage, entity_);
+  ivf_check_error_code(ret);
+
   magic_ = IndexContext::GenerateMagic();
 
   stats_.set_loaded_count(entity_->vector_count());

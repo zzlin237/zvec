@@ -115,6 +115,19 @@ IVFBuilder::~IVFBuilder() {
   this->cleanup();
 }
 
+int IVFBuilder::init_quantizer(zvec::turbo::Quantizer::Pointer quantizer) {
+  if (state_ == INIT) {
+    LOG_ERROR("Init the builder before injecting the turbo quantizer");
+    return IndexError_Runtime;
+  }
+  if (!quantizer) {
+    LOG_ERROR("Invalid turbo quantizer");
+    return IndexError_InvalidArgument;
+  }
+  turbo_quantizer_ = std::move(quantizer);
+  return 0;
+}
+
 int IVFBuilder::init(const IndexMeta &meta, const ailego::Params &params) {
   LOG_INFO("Begin IVFBuilder::init!");
 
@@ -194,6 +207,7 @@ int IVFBuilder::cleanup(void) {
   converter_.reset();
   quantized_meta_ = meta_;
   quantizers_.clear();
+  turbo_quantizer_.reset();
 
   error_ = false;
   err_code_ = 0;
@@ -391,7 +405,12 @@ int IVFBuilder::build(IndexThreads::Pointer threads,
   ivf_check_with_msg(ret, "Failed to build index for %s",
                      IndexError::What(ret));
 
-  ret = this->prepare_quantizer(threads.get());
+  if (turbo_quantizer_ ||
+      params_.has(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS)) {
+    ret = this->prepare_turbo_quantizer();
+  } else {
+    ret = this->prepare_quantizer(threads.get());
+  }
   ivf_check_error_code(ret);
 
   stats_.set_built_costtime(timer.milli_seconds());
@@ -650,8 +669,19 @@ int IVFBuilder::build_label_index(IndexThreads *threads,
 }
 
 int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
-  int ret = CheckAndUpdateMajorOrder(quantized_meta_);
-  ivf_check_error_code(ret);
+  if (turbo_quantizer_) {
+    //! Quantized codes carry no metric meaning; skip the column-major
+    //! probing and keep the codes row-major, only checking block alignment.
+    if (block_vector_count_ * quantized_meta_.element_size() % 32 != 0) {
+      LOG_ERROR(
+          "block_vector_count * quantized_element_size not align with 32 "
+          "bytes.");
+      return IndexError_InvalidArgument;
+    }
+  } else {
+    int ret = CheckAndUpdateMajorOrder(quantized_meta_);
+    ivf_check_error_code(ret);
+  }
 
   IVFDumper::Pointer ivf_dumper = std::make_shared<IVFDumper>(
       quantized_meta_, dumper, centroid_index_->centroids_count(),
@@ -668,7 +698,24 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
     dumped_ids.reserve(holder_->count());
     record_dumped_id = [&](uint32_t id) { dumped_ids.emplace_back(id); };
   }
-  if (quantizers_.size() == 0) {
+  int ret = 0;
+  if (turbo_quantizer_) {
+    //! Quantize the original vectors with the turbo quantizer and dump the
+    //! codes row-major into the posting lists.
+    std::string code(
+        turbo_quantizer_->quantized_datapoint_vector_length(), '\0');
+    for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
+      ailego_assert_with(i < labels_.size(), "Index Overflow");
+      for (size_t j = 0; j < labels_[i].size(); ++j) {
+        auto id = labels_[i][j];
+        record_dumped_id(id);
+        turbo_quantizer_->quantize_data(holder_->element(id), code.data());
+        ret = ivf_dumper->dump_inverted_vector(i, holder_->key(id),
+                                               code.data());
+        ivf_check_error_code(ret);
+      }
+    }
+  } else if (quantizers_.size() == 0) {
     //! No quantizer for inverted vectors
     for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
       ailego_assert_with(i < labels_.size(), "Index Overflow");
@@ -706,8 +753,19 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   ret = ivf_dumper->dump_inverted_vector_finished();
   ivf_check_error_code(ret);
 
-  ret = ivf_dumper->dump_quantizer_params(quantizers_);
-  ivf_check_error_code(ret);
+  if (turbo_quantizer_) {
+    //! Persist the quantizer state (codebook etc.) into a dedicated segment;
+    //! the class name travels with the builder params in the index meta.
+    std::string quantizer_data;
+    ret = turbo_quantizer_->serialize(&quantizer_data);
+    ivf_check_error_code(ret);
+    ret = ivf_dumper->dump_turbo_quantizer(quantizer_data.data(),
+                                           quantizer_data.size());
+    ivf_check_error_code(ret);
+  } else {
+    ret = ivf_dumper->dump_quantizer_params(quantizers_);
+    ivf_check_error_code(ret);
+  }
 
   auto centroid_index =
       searcher_centroid_index_ ? searcher_centroid_index_ : centroid_index_;
@@ -820,6 +878,84 @@ int IVFBuilder::prepare_quantizer(IndexThreads *threads) {
     quantized_meta_ = quantizers_[0]->meta();
   }
 
+  return 0;
+}
+
+int IVFBuilder::prepare_turbo_quantizer() {
+  std::string quantizer_class;
+  params_.get(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, &quantizer_class);
+  if (!turbo_quantizer_) {
+    if (quantizer_class.empty()) {
+      LOG_ERROR("Missing param %s",
+                PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS.c_str());
+      return IndexError_InvalidArgument;
+    }
+    turbo_quantizer_ = IndexFactory::CreateQuantizer(quantizer_class);
+    if (!turbo_quantizer_) {
+      LOG_ERROR("Failed to create turbo quantizer '%s'",
+                quantizer_class.c_str());
+      return IndexError_NoExist;
+    }
+    ailego::Params quantizer_params;
+    uint32_t num_chunk = params_.get_as_uint32("num_chunk");
+    if (num_chunk > 0) {
+      quantizer_params.set("num_chunk", num_chunk);
+    }
+    if (params_.has("use_zero_mean")) {
+      quantizer_params.set("use_zero_mean",
+                           params_.get_as_bool("use_zero_mean"));
+    }
+    int ret = turbo_quantizer_->init(meta_, quantizer_params);
+    if (ret != 0) {
+      LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
+                quantizer_class.c_str(), ret);
+      turbo_quantizer_.reset();
+      return ret;
+    }
+  } else if (quantizer_class.empty()) {
+    //! Without the class name in params the quantizer state cannot be
+    //! restored when the index is reopened.
+    LOG_ERROR(
+        "Turbo quantizer injected but param %s is missing; the quantizer "
+        "state cannot be persisted",
+        PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS.c_str());
+    return IndexError_InvalidArgument;
+  }
+
+  //! Train after clustering to keep the pipeline order:
+  //! normalize -> cluster -> quantize -> dump.
+  if (turbo_quantizer_->require_train() && holder_ &&
+      holder_->count() > 0) {
+    int ret = turbo_quantizer_->train(holder_);
+    if (ret != 0) {
+      LOG_ERROR("Failed to train turbo quantizer '%s', ret=%d",
+                quantizer_class.c_str(), ret);
+      return ret;
+    }
+  }
+
+  //! Codes are opaque bytes stored row-major; expose them through a pseudo
+  //! fp32 meta so the block layout (alignment/transpose helpers) keeps
+  //! working. The original metric name is kept for meta consistency.
+  const size_t code_len =
+      turbo_quantizer_->quantized_datapoint_vector_length();
+  if (code_len % sizeof(float) != 0) {
+    LOG_ERROR("Quantized code length %zu is not aligned to 4 bytes",
+              code_len);
+    return IndexError_Unsupported;
+  }
+  if (block_vector_count_ * code_len % 32 != 0) {
+    LOG_ERROR(
+        "block_vector_count * quantized code length not align with 32 "
+        "bytes.");
+    return IndexError_InvalidArgument;
+  }
+  quantized_meta_.set_meta(IndexMeta::DataType::DT_FP32,
+                           static_cast<uint32_t>(code_len / sizeof(float)));
+  quantized_meta_.set_major_order(IndexMeta::MO_ROW);
+
+  LOG_INFO("IVFBuilder turbo quantizer '%s' prepared, code_len=%zu",
+           quantizer_class.c_str(), code_len);
   return 0;
 }
 

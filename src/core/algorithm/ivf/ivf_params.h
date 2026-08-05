@@ -58,6 +58,11 @@ static const std::string PARAM_IVF_BUILDER_OPTIMIZER_QUANTIZER_PARAMS(
     "proxima.ivf.builder.optimizer_quantizer_params");
 static const std::string PARAM_IVF_BUILDER_BLOCK_VECTOR_COUNT(
     "proxima.ivf.builder.block_vector_count");
+//! Class name of the turbo quantizer (e.g. "PqInt8Quantizer") used to
+//! quantize inverted vectors. Quantizer-specific options (e.g. num_chunk,
+//! use_zero_mean) are read from the same flat builder params.
+static const std::string PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS(
+    "proxima.ivf.builder.turbo_quantizer_class");
 
 // searcher params
 static const std::string PARAM_IVF_SEARCHER_SCAN_RATIO(
