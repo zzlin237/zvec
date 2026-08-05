@@ -104,7 +104,7 @@ int IVFSearcher::load(IndexStorage::Pointer container,
   ivf_check_error_code(ret);
 
   //! Restore the turbo quantizer (no-op for legacy indexes)
-  ret = IVFUtility::RestoreTurboQuantizer(meta_, container, entity_);
+  ret = IVFUtility::RestoreTurboQuantizer(meta_, entity_);
   ivf_check_error_code(ret);
 
   magic_ = IndexContext::GenerateMagic();

@@ -13,9 +13,9 @@
 // limitations under the License.
 #pragma once
 
+#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_builder.h>
 #include <zvec/core/framework/index_meta.h>
-#include <turbo/quantizer/quantizer.h>
 #include "ivf_centroid_index.h"
 
 namespace zvec {
@@ -238,6 +238,11 @@ class IVFBuilder : public IndexBuilder {
   //! if not injected, train it (after clustering) and derive the quantized
   //! meta used for dumping codes.
   int prepare_turbo_quantizer();
+
+  //! Serialize the trained turbo quantizer state into the builder params of
+  //! meta_ as base64 (key: turbo_quantizer_data_b64), so the codebook is
+  //! persisted within the index meta like the HNSW streamer does.
+  int persist_quantizer_to_meta();
 
   //! Quantize the centrods list
   int quantize_centroids();

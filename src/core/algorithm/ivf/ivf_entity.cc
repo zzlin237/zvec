@@ -14,6 +14,7 @@
 #include "ivf_entity.h"
 #include <cstring>
 #include <iostream>
+#include <zvec/ailego/utility/base64_helper.h>
 #include "ivf_utility.h"
 namespace zvec {
 namespace core {
@@ -606,8 +607,8 @@ int IVFEntity::load(const IndexStorage::Pointer &container) {
 //! output meta is set so that element_size() equals one LUT in bytes, which
 //! keeps the per-query pointer advancement in searchers correct.
 int IVFEntity::transform_quantized(const void *query,
-                                   const IndexQueryMeta &qmeta,
-                                   uint32_t count, const void **out,
+                                   const IndexQueryMeta &qmeta, uint32_t count,
+                                   const void **out,
                                    IndexQueryMeta *ometa) const {
   const size_t lut_bytes = quantizer_->quantized_query_vector_length();
   if (lut_bytes == 0 || lut_bytes % sizeof(float) != 0) {
@@ -653,8 +654,8 @@ void IVFEntity::quantized_block_distance(const void *query,
   for (size_t k = 0; k < vecs_count; ++k) {
     dp_list[k] = base + k * stride;
   }
-  quantizer_->calc_distance_dp_query_batch(dp_list, static_cast<int>(vecs_count),
-                                           query, distances);
+  quantizer_->calc_distance_dp_query_batch(
+      dp_list, static_cast<int>(vecs_count), query, distances);
 }
 
 int IVFEntity::search(size_t inverted_list_id, const void *query,
@@ -1041,10 +1042,10 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
 //! Restore a turbo quantizer persisted by IVFBuilder and attach it to the
 //! entity. Follows the init-before-deserialize contract: init() rebuilds the
 //! metric context from the original meta, then deserialize() loads the
-//! trained state (codebooks) from the dedicated segment.
-int IVFUtility::RestoreTurboQuantizer(
-    const IndexMeta &meta, const IndexStorage::Pointer &storage,
-    const IVFEntity::Pointer &entity) {
+//! trained state (codebooks) base64-decoded from meta.builder_params(),
+//! mirroring the HNSW streamer restore path.
+int IVFUtility::RestoreTurboQuantizer(const IndexMeta &meta,
+                                      const IVFEntity::Pointer &entity) {
   std::string quantizer_class;
   if (!meta.builder_params().get(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS,
                                  &quantizer_class) ||
@@ -1052,15 +1053,14 @@ int IVFUtility::RestoreTurboQuantizer(
     //! Legacy index without a turbo quantizer
     return 0;
   }
-  if (!storage || !entity) {
-    LOG_ERROR("Invalid storage or entity");
+  if (!entity) {
+    LOG_ERROR("Invalid entity");
     return IndexError_InvalidArgument;
   }
 
   auto quantizer = IndexFactory::CreateQuantizer(quantizer_class);
   if (!quantizer) {
-    LOG_ERROR("Failed to create turbo quantizer '%s'",
-              quantizer_class.c_str());
+    LOG_ERROR("Failed to create turbo quantizer '%s'", quantizer_class.c_str());
     return IndexError_NoExist;
   }
 
@@ -1081,20 +1081,15 @@ int IVFUtility::RestoreTurboQuantizer(
     return ret;
   }
 
-  auto seg = storage->get(IVF_TURBO_QUANTIZER_SEG_ID, 0);
-  if (!seg) {
-    LOG_ERROR("Failed to get segment %s",
-              IVF_TURBO_QUANTIZER_SEG_ID.c_str());
+  std::string quantizer_data_b64;
+  if (!builder_params.get("turbo_quantizer_data_b64", &quantizer_data_b64) ||
+      quantizer_data_b64.empty()) {
+    LOG_ERROR("Missing turbo_quantizer_data_b64 in builder params");
     return IndexError_InvalidFormat;
   }
-  const size_t size = seg->data_size();
-  const void *data = nullptr;
-  if (seg->read(0, &data, size) != size || !data) {
-    LOG_ERROR("Failed to read segment %s",
-              IVF_TURBO_QUANTIZER_SEG_ID.c_str());
-    return IndexError_ReadData;
-  }
-  ret = quantizer->deserialize(data, size);
+  // Base64-decode the binary quantizer data.
+  std::string quantizer_data = ailego::Base64Helper::Decode(quantizer_data_b64);
+  ret = quantizer->deserialize(quantizer_data.data(), quantizer_data.size());
   if (ret != 0) {
     LOG_ERROR("Failed to deserialize turbo quantizer '%s', ret=%d",
               quantizer_class.c_str(), ret);
@@ -1102,8 +1097,8 @@ int IVFUtility::RestoreTurboQuantizer(
   }
 
   entity->set_quantizer(quantizer);
-  LOG_INFO("IVFEntity restored turbo quantizer '%s' from segment %s",
-           quantizer_class.c_str(), IVF_TURBO_QUANTIZER_SEG_ID.c_str());
+  LOG_INFO("IVFEntity restored turbo quantizer '%s' from index meta",
+           quantizer_class.c_str());
   return 0;
 }
 

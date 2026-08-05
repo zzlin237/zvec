@@ -13,6 +13,7 @@
 // limitations under the License.
 #include "ivf_builder.h"
 #include <ailego/pattern/defer.h>
+#include <zvec/ailego/utility/base64_helper.h>
 #include <zvec/ailego/utility/string_helper.h>
 #include "algorithm/cluster/cluster_params.h"
 #include "ivf_dumper.h"
@@ -444,6 +445,11 @@ int IVFBuilder::dump(const IndexDumper::Pointer &dumper) {
   meta_.set_searcher("IVFSearcher", 0, std::move(params));
   meta_.set_builder("IVFBuilder", 0, std::move(params_));
 
+  //! Persist the turbo quantizer state (codebook etc.) as base64 in the
+  //! builder params, mirroring the HNSW streamer meta persistence.
+  ret = this->persist_quantizer_to_meta();
+  ivf_check_error_code(ret);
+
   ret = IndexHelper::SerializeToDumper(meta_, dumper.get());
   if (ret != 0) {
     LOG_ERROR("Failed to serialize meta into dumper.");
@@ -702,16 +708,16 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   if (turbo_quantizer_) {
     //! Quantize the original vectors with the turbo quantizer and dump the
     //! codes row-major into the posting lists.
-    std::string code(
-        turbo_quantizer_->quantized_datapoint_vector_length(), '\0');
+    std::string code(turbo_quantizer_->quantized_datapoint_vector_length(),
+                     '\0');
     for (size_t i = 0; i < centroid_index_->centroids_count(); ++i) {
       ailego_assert_with(i < labels_.size(), "Index Overflow");
       for (size_t j = 0; j < labels_[i].size(); ++j) {
         auto id = labels_[i][j];
         record_dumped_id(id);
         turbo_quantizer_->quantize_data(holder_->element(id), code.data());
-        ret = ivf_dumper->dump_inverted_vector(i, holder_->key(id),
-                                               code.data());
+        ret =
+            ivf_dumper->dump_inverted_vector(i, holder_->key(id), code.data());
         ivf_check_error_code(ret);
       }
     }
@@ -753,16 +759,10 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
   ret = ivf_dumper->dump_inverted_vector_finished();
   ivf_check_error_code(ret);
 
-  if (turbo_quantizer_) {
-    //! Persist the quantizer state (codebook etc.) into a dedicated segment;
-    //! the class name travels with the builder params in the index meta.
-    std::string quantizer_data;
-    ret = turbo_quantizer_->serialize(&quantizer_data);
-    ivf_check_error_code(ret);
-    ret = ivf_dumper->dump_turbo_quantizer(quantizer_data.data(),
-                                           quantizer_data.size());
-    ivf_check_error_code(ret);
-  } else {
+  if (!turbo_quantizer_) {
+    //! Integer reformer (int8/int4) params per inverted list.  The turbo
+    //! quantizer state is persisted into the index meta (base64 builder
+    //! params) at dump time instead, see persist_quantizer_to_meta().
     ret = ivf_dumper->dump_quantizer_params(quantizers_);
     ivf_check_error_code(ret);
   }
@@ -924,8 +924,7 @@ int IVFBuilder::prepare_turbo_quantizer() {
 
   //! Train after clustering to keep the pipeline order:
   //! normalize -> cluster -> quantize -> dump.
-  if (turbo_quantizer_->require_train() && holder_ &&
-      holder_->count() > 0) {
+  if (turbo_quantizer_->require_train() && holder_ && holder_->count() > 0) {
     int ret = turbo_quantizer_->train(holder_);
     if (ret != 0) {
       LOG_ERROR("Failed to train turbo quantizer '%s', ret=%d",
@@ -937,11 +936,9 @@ int IVFBuilder::prepare_turbo_quantizer() {
   //! Codes are opaque bytes stored row-major; expose them through a pseudo
   //! fp32 meta so the block layout (alignment/transpose helpers) keeps
   //! working. The original metric name is kept for meta consistency.
-  const size_t code_len =
-      turbo_quantizer_->quantized_datapoint_vector_length();
+  const size_t code_len = turbo_quantizer_->quantized_datapoint_vector_length();
   if (code_len % sizeof(float) != 0) {
-    LOG_ERROR("Quantized code length %zu is not aligned to 4 bytes",
-              code_len);
+    LOG_ERROR("Quantized code length %zu is not aligned to 4 bytes", code_len);
     return IndexError_Unsupported;
   }
   if (block_vector_count_ * code_len % 32 != 0) {
@@ -956,6 +953,27 @@ int IVFBuilder::prepare_turbo_quantizer() {
 
   LOG_INFO("IVFBuilder turbo quantizer '%s' prepared, code_len=%zu",
            quantizer_class.c_str(), code_len);
+  return 0;
+}
+
+//! Serialize the trained turbo quantizer state into meta_.builder_params()
+//! as base64, mirroring HnswStreamer::persist_quantizer_to_meta().  Must be
+//! called after set_builder() in dump() so it lands in the final meta.
+int IVFBuilder::persist_quantizer_to_meta() {
+  if (!turbo_quantizer_) {
+    return 0;
+  }
+  std::string quantizer_data;
+  int ret = turbo_quantizer_->serialize(&quantizer_data);
+  if (ret != 0) {
+    LOG_ERROR("Failed to serialize turbo quantizer, ret=%d", ret);
+    return ret;
+  }
+  // Base64-encode binary data so it survives JSON serialization in Params.
+  std::string encoded = ailego::Base64Helper::Encode(quantizer_data.data(),
+                                                     quantizer_data.size());
+  meta_.mutable_builder_params()->set("turbo_quantizer_data_b64",
+                                      std::move(encoded));
   return 0;
 }
 

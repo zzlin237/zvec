@@ -402,6 +402,11 @@ class IndexMeta {
     return builder_params_;
   }
 
+  //! Retrieve mutable builder params
+  ailego::Params *mutable_builder_params(void) {
+    return &builder_params_;
+  }
+
   //! Retrieve reducer params
   const ailego::Params &reducer_params(void) const {
     return reducer_params_;

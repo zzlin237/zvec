@@ -201,9 +201,6 @@ class IVFDumper {
   //! Dump the centroids index
   int dump_centroid_index(const void *data, size_t size);
 
-  //! Dump the serialized turbo quantizer state (codebook etc.)
-  int dump_turbo_quantizer(const void *data, size_t size);
-
   //! Dump params for each inverted list quantizer
   int dump_quantizer_params(
       const std::vector<IndexConverter::Pointer> &quantizers);

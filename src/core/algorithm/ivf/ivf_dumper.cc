@@ -194,13 +194,6 @@ int IVFDumper::dump_centroid_index(const void *data, size_t size) {
   return 0;
 }
 
-int IVFDumper::dump_turbo_quantizer(const void *data, size_t size) {
-  int ret = this->dump_segment(IVF_TURBO_QUANTIZER_SEG_ID, data, size);
-  ivf_check_error_code(ret);
-
-  return 0;
-}
-
 int IVFDumper::dump_quantizer_params(
     const std::vector<IndexConverter::Pointer> &quantizers) {
   if (meta_.reformer_name() != kInt8ReformerName &&
