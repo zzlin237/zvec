@@ -644,3 +644,119 @@ TEST_F(IVFTurboQuantizerTest, TestResidualRejectIp) {
   IVFBuilder builder2;
   EXPECT_NE(0, builder2.init(l2_meta, conv_params));
 }
+
+namespace {
+Params make_pq_fast_params(bool use_residual) {
+  Params params;
+  params.set(PARAM_IVF_BUILDER_CENTROID_COUNT, "16");
+  params.set(PARAM_IVF_BUILDER_CLUSTER_CLASS, "KmeansCluster");
+  params.set(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, "PqFastQuantizer");
+  params.set("num_chunk", 8);
+  if (use_residual) {
+    params.set(PARAM_IVF_BUILDER_USE_RESIDUAL, true);
+  }
+  return params;
+}
+}  // namespace
+
+TEST_F(IVFTurboQuantizerTest, TestL2PqFast) {
+  //! FastScan stores codes in packed 32-vector blocks; plain L2 recall
+  //! must stay on par with the gather-style 4-bit PQ (the extra u8 LUT
+  //! affine quantization only costs a little).
+  Params int4_params;
+  int4_params.set(PARAM_IVF_BUILDER_CENTROID_COUNT, "16");
+  int4_params.set(PARAM_IVF_BUILDER_CLUSTER_CLASS, "KmeansCluster");
+  int4_params.set(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, "PqInt4Quantizer");
+  int4_params.set("num_chunk", 8);
+  float recall_int4 = 0.0f;
+  recall_at(int4_params, 10, false, &recall_int4);
+
+  float recall_fast = 0.0f;
+  recall_at(make_pq_fast_params(false), 10, false, &recall_fast);
+
+  EXPECT_GT(recall_fast, recall_int4 - 0.1f);
+  EXPECT_GT(recall_fast, 0.3f);
+}
+
+TEST_F(IVFTurboQuantizerTest, TestL2PqFastResidualPrecompute) {
+  //! Residual + precomputed table on/off equivalence for the packed-u8
+  //! FastScan path.  Both paths affine-quantize the LUT to u8, so scores
+  //! only agree within the combined rounding tolerance (looser than the
+  //! float-table quantizers).
+  base_num_ = 320;
+  prepare_clustered_data();
+  const size_t topk = 10;
+
+  IVFSearcher on_searcher;
+  IndexStorage::Pointer on_container;
+  build_dump_load(make_pq_fast_params(true), &on_searcher, &on_container);
+
+  Params off_params;
+  off_params.set(PARAM_IVF_SEARCHER_USE_PRECOMPUTE_TABLE, false);
+  IVFSearcher off_searcher;
+  IndexStorage::Pointer off_container;
+  load_dumped(&off_searcher, off_params, &off_container);
+
+  vector<vector<pair<uint64_t, float>>> on_results, off_results;
+  search_scored(&on_searcher, topk, &on_results);
+  search_scored(&off_searcher, topk, &off_results);
+
+  //! Both paths affine-quantize the LUT to u8 with different delta/bias,
+  //! so near-tie keys may swap; the sorted score lists must still agree
+  //! pointwise within the combined rounding bound (relative to the score
+  //! magnitude), and key overlap must stay high.
+  ASSERT_EQ(on_results.size(), off_results.size());
+  for (size_t q = 0; q < on_results.size(); ++q) {
+    ASSERT_EQ(on_results[q].size(), off_results[q].size());
+    for (size_t i = 0; i < topk; ++i) {
+      const float tol = 0.005f * std::abs(off_results[q][i].second) + 0.5f;
+      EXPECT_NEAR(on_results[q][i].second, off_results[q][i].second, tol)
+          << "q=" << q << " i=" << i;
+    }
+  }
+  size_t set_overlap = 0;
+  for (size_t q = 0; q < on_results.size(); ++q) {
+    std::set<uint64_t> off_keys;
+    for (const auto &it : off_results[q]) {
+      off_keys.insert(it.first);
+    }
+    for (size_t i = 0; i < topk; ++i) {
+      if (off_keys.count(on_results[q][i].first)) {
+        ++set_overlap;
+      }
+    }
+  }
+  //! Measured ~0.93; the floor only guards a breakdown.
+  EXPECT_GT(static_cast<float>(set_overlap), 0.7f * on_results.size() * topk);
+
+  //! Loose floor: the point of this test is the on/off equivalence above;
+  //! this only guards a breakdown (same level as the int4 residual test).
+  EXPECT_GT(recall_with_searcher(&on_searcher, topk, false), 0.35f);
+
+  on_searcher.cleanup();
+  off_searcher.cleanup();
+}
+
+TEST_F(IVFTurboQuantizerTest, TestPqFastRejectsSmallBlock) {
+  //! Packed FastScan blocks interleave exactly 32 codes: any other
+  //! block_vector_count must be rejected at dump time.
+  prepare_holder(base_num_);
+
+  Params params = make_pq_fast_params(false);
+  params.set(PARAM_IVF_BUILDER_BLOCK_VECTOR_COUNT, 16);
+
+  IndexMeta meta;
+  meta.set_meta(IndexMeta::DataType::DT_FP32, dimension_);
+  meta.set_metric("SquaredEuclidean", 0, Params());
+
+  IVFBuilder builder;
+  ASSERT_EQ(0, builder.init(meta, params));
+  ASSERT_EQ(0, builder.train(nullptr, holder_));
+  ASSERT_EQ(0, builder.build(nullptr, holder_));
+
+  IndexDumper::Pointer dumper = IndexFactory::CreateDumper("FileDumper");
+  ASSERT_TRUE(!!dumper);
+  ASSERT_EQ(0, dumper->create(index_path_));
+  EXPECT_NE(0, builder.dump(dumper));
+  dumper->close();
+}

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 #include <zvec/ailego/container/params.h>
 #include <zvec/core/framework/index_holder.h>
 #include <zvec/core/framework/index_meta.h>
@@ -107,9 +108,45 @@ class Quantizer {
                                             int dp_num, const void *query,
                                             float *dist_list) const = 0;
 
+  //! Batched distance over contiguous codes (laid out `stride` bytes apart).
+  //! Block-oriented scanners (e.g. IVF inverted lists) should prefer this
+  //! overload: it avoids the per-vector pointer array and lets
+  //! implementations consume the block directly (a prerequisite for
+  //! packed-layout quantizers like FastScan).  The default implementation
+  //! forwards to the pointer-array batch.
+  virtual void calc_distance_dp_query_batch_contiguous(const void *codes,
+                                                       int dp_num,
+                                                       size_t stride,
+                                                       const void *query,
+                                                       float *dist_list) const {
+    std::vector<const void *> dp_list(static_cast<size_t>(dp_num));
+    const char *base = static_cast<const char *>(codes);
+    for (int i = 0; i < dp_num; ++i) {
+      dp_list[static_cast<size_t>(i)] = base + static_cast<size_t>(i) * stride;
+    }
+    this->calc_distance_dp_query_batch(dp_list.data(), dp_num, query,
+                                       dist_list);
+  }
+
   //! Distance between a quantized datapoint and an unquantized query
   virtual float calc_distance_dp_query_unquantized(const void *dp,
                                                    const void *query) const = 0;
+
+  //! Whether quantized codes must be stored in packed 32-vector blocks
+  //! (see pack_codes).  Storage layers that cannot honor packing must not
+  //! use such a quantizer.
+  virtual bool requires_packed_codes() const {
+    return false;
+  }
+
+  //! Pack up to 32 plain codes (laid out `stride` bytes apart) into one
+  //! block consumable by calc_distance_dp_query_batch_contiguous.  Slots
+  //! beyond `num` are zero-filled.  `out` must hold at least
+  //! 32 * quantized_datapoint_vector_length() bytes.
+  virtual int pack_codes(const void * /*codes*/, size_t /*num*/,
+                         size_t /*stride*/, void * /*out*/) const {
+    return kErrNotImplemented;
+  }
 
   //! Batched distance between quantized datapoints and an unquantized query
   virtual void calc_distance_dp_query_batch_unquantized(

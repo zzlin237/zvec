@@ -14,6 +14,7 @@
 #pragma once
 
 #include <core/quantizer/quantizer_params.h>
+#include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_framework.h>
 #include "metric/metric_params.h"
 #include "ivf_index_format.h"
@@ -187,6 +188,15 @@ class IVFDumper {
     }
   }
 
+  //! Enable packed-code blocks: every flushed block is repacked via
+  //! quantizer->pack_codes() before it is written, and blocks are always
+  //! written at full block size (the packed layout interleaves all lanes;
+  //! missing tail lanes are zero-filled).  Only the Quantizer base
+  //! interface is used here.
+  void set_code_packer(const turbo::Quantizer::Pointer &quantizer) {
+    code_packer_ = quantizer;
+  }
+
   //! Dump a vector in row major order
   int dump_inverted_vector(uint32_t inverted_list_id, uint64_t key,
                            const void *vec);
@@ -251,6 +261,7 @@ class IVFDumper {
   Block block_{};           // vectors grouped in block
   const IndexMeta meta_{};  // IndexMeta of the inverted index
   const IndexDumper::Pointer dumper_{};
+  turbo::Quantizer::Pointer code_packer_{};  // packs blocks when set
   size_t block_vector_count_{kDefaultBlockCount};
   std::vector<InvertedListMeta> inverted_lists_meta_{};
   std::vector<uint64_t> keys_{};

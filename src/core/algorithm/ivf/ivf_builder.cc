@@ -758,6 +758,17 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
     LOG_ERROR("Alloc IVFDumper failed");
     return IndexError_NoMemory;
   }
+  if (turbo_quantizer_ && turbo_quantizer_->requires_packed_codes()) {
+    //! Packed-code quantizer: blocks interleave exactly 32 codes; the
+    //! packed layout only works when one storage block holds one packed
+    //! block.
+    if (block_vector_count_ != kDefaultBlockCount) {
+      LOG_ERROR("Packed-code quantizer requires block_vector_count=%zu, got %u",
+                kDefaultBlockCount, block_vector_count_);
+      return IndexError_InvalidArgument;
+    }
+    ivf_dumper->set_code_packer(turbo_quantizer_);
+  }
 
   //! Dump inverted vectors
   std::vector<uint32_t> dumped_ids;

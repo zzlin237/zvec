@@ -14,6 +14,7 @@
 #include "ivf_entity.h"
 #include <cstring>
 #include <iostream>
+#include <turbo/quantizer/pq_fast_quantizer/pq_fast_quantizer.h>
 #include <turbo/quantizer/pq_int4_quantizer/pq_int4_quantizer.h>
 #include <turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h>
 #include <zvec/ailego/utility/base64_helper.h>
@@ -23,15 +24,16 @@ namespace zvec {
 namespace core {
 
 //! The precomputed residual table protocol lives on the concrete
-//! PqInt8Quantizer / PqInt4Quantizer (not the Quantizer base); both
-//! pointers null means the quantizer lacks the capability and the per-list
-//! residual path applies.  Exactly one pointer is non-null at a time.
+//! PqInt8Quantizer / PqInt4Quantizer / PqFastQuantizer (not the Quantizer
+//! base); all pointers null means the quantizer lacks the capability and
+//! the per-list residual path applies.  At most one pointer is non-null.
 struct PrecomputeQuantizers {
   const zvec::turbo::PqInt8Quantizer *int8{nullptr};
   const zvec::turbo::PqInt4Quantizer *int4{nullptr};
+  const zvec::turbo::PqFastQuantizer *fast{nullptr};
 
   bool supported() const {
-    return int8 != nullptr || int4 != nullptr;
+    return int8 != nullptr || int4 != nullptr || fast != nullptr;
   }
 };
 
@@ -43,21 +45,28 @@ static PrecomputeQuantizers precompute_quantizer_of(
   if (result.int8 == nullptr) {
     result.int4 =
         dynamic_cast<const zvec::turbo::PqInt4Quantizer *>(quantizer.get());
+    if (result.int4 == nullptr) {
+      result.fast =
+          dynamic_cast<const zvec::turbo::PqFastQuantizer *>(quantizer.get());
+    }
   }
   return result;
 }
 
 //! Dispatch a precompute-protocol method to whichever concrete quantizer
-//! supports it (see PrecomputeQuantizers).  The two member pointers have
+//! supports it (see PrecomputeQuantizers).  The member pointers have
 //! different class types, hence separate template parameters.
-template <typename M8, typename M4, typename... Args>
+template <typename M8, typename M4, typename MF, typename... Args>
 static int call_precompute_method(const PrecomputeQuantizers &qs,
                                   M8 int8_method, M4 int4_method,
-                                  Args... args) {
+                                  MF fast_method, Args... args) {
   if (qs.int8 != nullptr) {
     return (qs.int8->*int8_method)(args...);
   }
-  return (qs.int4->*int4_method)(args...);
+  if (qs.int4 != nullptr) {
+    return (qs.int4->*int4_method)(args...);
+  }
+  return (qs.fast->*fast_method)(args...);
 }
 
 //! Initialize
@@ -839,7 +848,8 @@ int IVFEntity::set_precompute_enabled(bool enable) {
   std::string table;
   int ret = call_precompute_method(
       proto, &zvec::turbo::PqInt8Quantizer::build_centroid_distance_table,
-      &zvec::turbo::PqInt4Quantizer::build_centroid_distance_table, centroids,
+      &zvec::turbo::PqInt4Quantizer::build_centroid_distance_table,
+      &zvec::turbo::PqFastQuantizer::build_centroid_distance_table, centroids,
       nlist, &table);
   if (ret != 0) {
     LOG_INFO(
@@ -878,7 +888,8 @@ int IVFEntity::prepare_query(const void *query) const {
   int ret = call_precompute_method(
       precompute_quantizer_of(quantizer_),
       &zvec::turbo::PqInt8Quantizer::quantize_precomputed_query,
-      &zvec::turbo::PqInt4Quantizer::quantize_precomputed_query, prepared,
+      &zvec::turbo::PqInt4Quantizer::quantize_precomputed_query,
+      &zvec::turbo::PqFastQuantizer::quantize_precomputed_query, prepared,
       residual_query_meta_, &precompute_query_table_, &ometa);
   if (ret != 0) {
     LOG_INFO(
@@ -929,20 +940,16 @@ float IVFEntity::compute_centroid_distance(size_t inverted_list_id) const {
 }
 
 //! Compute distances of a block of codes against a quantized query (LUT).
-//! The block stores codes back to back with element_size() stride.
+//! Gather-style quantizers keep codes back to back with element_size()
+//! stride (base-class default); packed-code quantizers scan the block
+//! natively in their interleaved layout.
 void IVFEntity::quantized_block_distance(const void *query,
                                          const void *block_data,
                                          size_t vecs_count,
                                          float *distances) const {
-  const size_t stride = meta_.element_size();
-  const char *base = static_cast<const char *>(block_data);
-  //! block_vector_count is capped by the keeps bitmap (< 64) in search()
-  const void *dp_list[64];
-  for (size_t k = 0; k < vecs_count; ++k) {
-    dp_list[k] = base + k * stride;
-  }
-  quantizer_->calc_distance_dp_query_batch(
-      dp_list, static_cast<int>(vecs_count), query, distances);
+  quantizer_->calc_distance_dp_query_batch_contiguous(
+      block_data, static_cast<int>(vecs_count), meta_.element_size(), query,
+      distances);
 }
 
 int IVFEntity::search(size_t inverted_list_id, const void *query,
@@ -973,6 +980,7 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
           precompute_quantizer_of(quantizer_),
           &zvec::turbo::PqInt8Quantizer::merge_query_distance_table,
           &zvec::turbo::PqInt4Quantizer::merge_query_distance_table,
+          &zvec::turbo::PqFastQuantizer::merge_query_distance_table,
           precompute_query_table_.data(), *precompute_table_, inverted_list_id,
           &precompute_merged_query_);
       if (ret == 0) {
@@ -1083,6 +1091,7 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
           precompute_quantizer_of(quantizer_),
           &zvec::turbo::PqInt8Quantizer::merge_query_distance_table,
           &zvec::turbo::PqInt4Quantizer::merge_query_distance_table,
+          &zvec::turbo::PqFastQuantizer::merge_query_distance_table,
           precompute_query_table_.data(), *precompute_table_, inverted_list_id,
           &precompute_merged_query_);
       if (ret == 0) {

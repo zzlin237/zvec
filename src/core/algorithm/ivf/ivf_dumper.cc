@@ -37,7 +37,8 @@ int IVFDumper::dump_inverted_block(uint32_t inverted_list_id,
   int ret = this->check_dump_inverted_list(inverted_list_id);
   ivf_check_error_code(ret);
 
-  if (block_.match_order(column_major ? IndexMeta::MajorOrder::MO_COLUMN
+  if (!code_packer_ &&
+      block_.match_order(column_major ? IndexMeta::MajorOrder::MO_COLUMN
                                       : IndexMeta::MajorOrder::MO_ROW) &&
       vector_count == block_.capacity()) {
     // Dump the block directly
@@ -390,8 +391,24 @@ int IVFDumper::dump_block(void) {
     return 0;
   }
 
+  const void *data = block_.data();
   size_t size = ailego_align(block_.bytes(), 32);
-  if (dumper_->write(block_.data(), size) != size) {
+  std::vector<uint8_t> packed;
+  if (code_packer_) {
+    //! Packed-code quantizer: repack the plain codes into the interleaved
+    //! block layout.  The packed layout interleaves all lanes (missing
+    //! tail lanes are zero-filled), so the full block is always written.
+    packed.assign(ailego_align(block_.block_size(), 32), 0);
+    int ret = code_packer_->pack_codes(block_.data(), block_.size(),
+                                       block_.element_size(), packed.data());
+    if (ret != 0) {
+      LOG_ERROR("Failed to pack codes, ret=%d", ret);
+      return IndexError_WriteData;
+    }
+    data = packed.data();
+    size = ailego_align(block_.block_size(), 32);
+  }
+  if (dumper_->write(data, size) != size) {
     LOG_ERROR("Failed to write data into dumper %s", dumper_->name().c_str());
     return IndexError_WriteData;
   }
