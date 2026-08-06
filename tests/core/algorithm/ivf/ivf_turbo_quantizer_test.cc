@@ -585,9 +585,9 @@ TEST_F(IVFTurboQuantizerTest, TestPrecomputeRestore) {
 }
 
 TEST_F(IVFTurboQuantizerTest, TestPrecomputeFallback) {
-  //! Quantizers without precompute support (default kErrUnsupported) must
-  //! silently fall back to the per-list residual path: on/off searchers
-  //! produce identical results and recall is preserved.
+  //! PqInt4Quantizer also implements the precomputed table protocol: the
+  //! on/off searchers over the same dump must return identical keys with
+  //! nearly equal scores, mirroring TestPrecomputeEquivalence for int8.
   base_num_ = 320;
   prepare_clustered_data();
   const size_t topk = 10;
@@ -613,14 +613,15 @@ TEST_F(IVFTurboQuantizerTest, TestPrecomputeFallback) {
   for (size_t q = 0; q < on_results.size(); ++q) {
     ASSERT_EQ(on_results[q].size(), off_results[q].size());
     for (size_t i = 0; i < topk; ++i) {
-      //! Both searchers take the identical per-list path: bit-exact match.
+      //! Precomputed merge only reshuffles float rounding against the
+      //! per-list LUT path: keys identical, scores nearly equal.
       EXPECT_EQ(on_results[q][i].first, off_results[q][i].first);
-      EXPECT_FLOAT_EQ(on_results[q][i].second, off_results[q][i].second);
+      EXPECT_NEAR(on_results[q][i].second, off_results[q][i].second, 1e-3f);
     }
   }
 
   //! Loose floor: int4 residuals are much coarser than int8; the point of
-  //! this test is the on/off identity above, this only guards a breakdown.
+  //! this test is the on/off equivalence above, this only guards a breakdown.
   EXPECT_GT(recall_with_searcher(&searcher, topk, false), 0.35f);
 }
 

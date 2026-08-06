@@ -20,7 +20,8 @@
 #include <zvec/ailego/utility/float_helper.h>
 #include <zvec/core/framework/index_holder.h>
 #include <zvec/core/framework/index_meta.h>
-#include "quantizer/quantizer.h"
+// Rooted at src/ so this header stays includable from core (ivf_entity).
+#include <turbo/quantizer/quantizer.h>
 
 namespace zvec {
 namespace turbo {
@@ -97,17 +98,30 @@ class PqInt8Quantizer : public Quantizer {
   int quantize(const void *query, const IndexQueryMeta &qmeta, std::string *out,
                IndexQueryMeta *ometa) const override;
 
+  //! Precomputed residual distance table support (consumed by IVF residual
+  //! search; callers discover the capability via dynamic_cast).
+  //!
+  //! Build a query-independent distance table from the coarse centroids.
+  //! One row per centroid is produced; the table layout is opaque to the
+  //! caller and only consumed by quantize_precomputed_query() and
+  //! merge_query_distance_table(). May refuse oversized tables by returning
+  //! a nonzero error code so the caller falls back to its default path.
   int build_centroid_distance_table(const void *centroids, size_t centroid_num,
-                                    std::string *table) const override;
+                                    std::string *table) const;
 
+  //! Per-query step paired with build_centroid_distance_table(): build the
+  //! query-side distance table once per query, independent of the centroid
+  //! being scanned.
   int quantize_precomputed_query(const void *query, const IndexQueryMeta &qmeta,
-                                 std::string *out,
-                                 IndexQueryMeta *ometa) const override;
+                                 std::string *out, IndexQueryMeta *ometa) const;
 
+  //! Merge the query-side table with the precomputed row of the
+  //! centroid_id-th centroid into a buffer compatible with
+  //! calc_distance_dp_query_batch(). The produced distances exclude the
+  //! query-to-centroid term; the caller must add it back.
   int merge_query_distance_table(const void *query_table,
                                  const std::string &centroid_table,
-                                 size_t centroid_id,
-                                 std::string *out) const override;
+                                 size_t centroid_id, std::string *out) const;
 
   int dequantize(const void *in, const IndexQueryMeta &qmeta,
                  std::string *out) const override;
@@ -234,6 +248,11 @@ class PqInt8Quantizer : public Quantizer {
   //! Data type matches input_data_type_.  PQ encoding always minimizes L2
   //! quantization error regardless of the search metric.
   BatchDistanceFunc l2_batch_fn_{};
+
+  //! Inner-product batch distance function for the precomputed residual
+  //! tables (build_centroid_distance_table / quantize_precomputed_query).
+  //! Independent of the configured metric; returns -<a, b> per element.
+  BatchDistanceFunc ip_batch_fn_{};
 };
 
 }  // namespace turbo

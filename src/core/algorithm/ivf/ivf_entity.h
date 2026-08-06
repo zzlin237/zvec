@@ -256,9 +256,10 @@ class IVFEntity {
     return reformer_;
   }
 
-  //! Attach a turbo quantizer (opaque base pointer; the entity never
-  //! inspects the concrete type). When set, inverted codes are decoded with
-  //! the quantizer instead of the metric-based distance calculator.
+  //! Attach a turbo quantizer. When set, inverted codes are decoded with
+  //! the quantizer instead of the metric-based distance calculator. The
+  //! entity only downcasts it to discover the optional precomputed-table
+  //! capability (see precompute_quantizer_of() in ivf_entity.cc).
   //! @param index_meta original vector-space meta: quantizers may rewrite
   //!        their own meta to the code representation, so the residual
   //!        query meta must be derived from the index meta instead.

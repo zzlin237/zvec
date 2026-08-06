@@ -89,6 +89,12 @@ int PqInt8Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
       get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
                               QuantizeType::kDefault, CpuArchType::kAuto);
 
+  // Inner-product batch distance for the precomputed residual tables.
+  // Metric-independent: the IP kernel returns -<a, b> per element.
+  ip_batch_fn_ =
+      get_batch_distance_func(MetricType::kInnerProduct, input_data_type_,
+                              QuantizeType::kDefault, CpuArchType::kAuto);
+
   // Cosine = normalize + L2: after normalization cosine distance is monotonic
   // with squared-Euclidean, so the search LUT reuses SquaredEuclidean.
   if (meta_.metric_name() == "Cosine") {
@@ -631,24 +637,17 @@ int PqInt8Quantizer::build_centroid_distance_table(const void *centroids,
       const uint8_t *buf_bytes = reinterpret_cast<const uint8_t *>(buf.data());
       float *row = tab + i * row_floats;
       for (uint32_t m = 0; m < num_chunk_; ++m) {
-        //! term2 = ||c_m[j]||^2 + 2<c_i^m, c_m[j]>, derived through the L2
-        //! identity so no inner-product kernel is required:
-        //!   2<c_i^m, c_m[j]> = ||c_i^m||^2 + ||c_m[j]||^2
-        //!                      - ||c_i^m - c_m[j]||^2
-        float cnorm = 0.0f;
-        for (uint32_t t = 0; t < sub_dim_; ++t) {
-          float v = static_cast<float>(buf[m * sub_dim_ + t]);
-          cnorm += v * v;
-        }
+        //! term2 = ||c_m[j]||^2 + 2<c_i^m, c_m[j]>.  The IP kernel returns
+        //! the negated inner product, i.e. dists[j] = -<c_i^m, c_m[j]>.
         const auto &centroid_ptrs = centroid_ptrs_cache_[m];
         // const_cast: see compute_dist_table for rationale.
-        l2_batch_fn_(const_cast<const void **>(centroid_ptrs.data()),
+        ip_batch_fn_(const_cast<const void **>(centroid_ptrs.data()),
                      buf_bytes + static_cast<size_t>(m) * sub_dim_ * elem_size,
                      kNumCentroids, sub_dim_, dists);
         const float *rn = sub_centroid_norms_.data() + m * kNumCentroids;
         float *out_m = row + m * kNumCentroids;
         for (uint32_t j = 0; j < kNumCentroids; ++j) {
-          out_m[j] = cnorm + 2.0f * rn[j] - dists[j];
+          out_m[j] = rn[j] - 2.0f * dists[j];
         }
       }
     }
@@ -684,7 +683,7 @@ int PqInt8Quantizer::quantize_precomputed_query(const void *query,
       break;
   }
   if (query == nullptr || out == nullptr ||
-      qmeta.unit_size() != expected_unit || sub_centroid_norms_.empty()) {
+      qmeta.unit_size() != expected_unit || centroids_.empty()) {
     return kErrInvalidArgument;
   }
 
@@ -731,46 +730,24 @@ int PqInt8Quantizer::quantize_precomputed_query(const void *query,
     prep = centered_query_storage.data();
   }
 
-  //! term3 LUT: -2<q^m, c_m[j]> via the L2 identity
-  //!   -2<q^m, c_m[j]> = ||q^m - c_m[j]||^2 - ||q^m||^2 - ||c_m[j]||^2
-  //! The merged LUT keeps the plain float[num_chunk * 256] layout consumed
-  //! by calc_distance_dp_query_batch().
+  //! term3 LUT: -2<q^m, c_m[j]>.  The IP kernel returns the negated inner
+  //! product, i.e. dists[j] = -<q^m, c_m[j]>, so LUT = 2 * dists.  The
+  //! merged LUT keeps the plain float[num_chunk * 256] layout consumed by
+  //! calc_distance_dp_query_batch().
   out->resize(quantized_query_vector_length());
   float *lut = reinterpret_cast<float *>(&(*out)[0]);
   const uint8_t *prep_bytes = reinterpret_cast<const uint8_t *>(prep);
   float dists[kNumCentroids];
   for (uint32_t m = 0; m < num_chunk_; ++m) {
-    float qnorm = 0.0f;
     const uint8_t *sub =
         prep_bytes + static_cast<size_t>(m) * sub_dim_ * elem_size;
-    switch (input_data_type_) {
-      case DataType::kFp16: {
-        const ailego::Float16 *f16 =
-            reinterpret_cast<const ailego::Float16 *>(sub);
-        for (uint32_t t = 0; t < sub_dim_; ++t) {
-          float v = static_cast<float>(f16[t]);
-          qnorm += v * v;
-        }
-        break;
-      }
-      case DataType::kFp32: {
-        const float *f32 = reinterpret_cast<const float *>(sub);
-        for (uint32_t t = 0; t < sub_dim_; ++t) {
-          qnorm += f32[t] * f32[t];
-        }
-        break;
-      }
-      default:
-        return kErrUnsupported;
-    }
     const auto &centroid_ptrs = centroid_ptrs_cache_[m];
     // const_cast: see compute_dist_table for rationale.
-    l2_batch_fn_(const_cast<const void **>(centroid_ptrs.data()), sub,
+    ip_batch_fn_(const_cast<const void **>(centroid_ptrs.data()), sub,
                  kNumCentroids, sub_dim_, dists);
-    const float *rn = sub_centroid_norms_.data() + m * kNumCentroids;
     float *lut_m = lut + m * kNumCentroids;
     for (uint32_t j = 0; j < kNumCentroids; ++j) {
-      lut_m[j] = dists[j] - qnorm - rn[j];
+      lut_m[j] = 2.0f * dists[j];
     }
   }
 
@@ -1009,6 +986,12 @@ int PqInt8Quantizer::deserialize(const void *data, size_t len) {
   // L2-only batch distance for encoding (always L2 regardless of metric).
   l2_batch_fn_ =
       get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
+                              QuantizeType::kDefault, CpuArchType::kAuto);
+
+  // Inner-product batch distance for the precomputed residual tables.
+  // Metric-independent: the IP kernel returns -<a, b> per element.
+  ip_batch_fn_ =
+      get_batch_distance_func(MetricType::kInnerProduct, input_data_type_,
                               QuantizeType::kDefault, CpuArchType::kAuto);
 
   // Metric-aware batch distance for search LUT.  Cosine = normalize + L2,

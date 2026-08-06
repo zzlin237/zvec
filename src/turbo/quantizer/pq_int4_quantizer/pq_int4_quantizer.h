@@ -20,7 +20,8 @@
 #include <zvec/ailego/utility/float_helper.h>
 #include <zvec/core/framework/index_holder.h>
 #include <zvec/core/framework/index_meta.h>
-#include "quantizer/quantizer.h"
+// Rooted at src/ so this header stays includable from core (ivf_entity).
+#include <turbo/quantizer/quantizer.h>
 
 namespace zvec {
 namespace turbo {
@@ -110,6 +111,29 @@ class PqInt4Quantizer : public Quantizer {
   DistanceImpl sym_distance(const void *query,
                             const IndexQueryMeta &qmeta) const;
 
+  //! Precomputed residual distance table support (consumed by IVF residual
+  //! search; callers discover the capability via dynamic_cast).
+  //!
+  //! A datapoint code is decomposed as c_i + c_m[j_m] where c_i is the
+  //! owning centroid and c_m[j_m] is the m-th sub-quantizer centroid picked
+  //! by the code.  Squared distance to a query becomes
+  //!   d = ||x - c_i||^2 + table[i] + LUT
+  //! with the first term per-list (computed inside IVF), the second term
+  //! depending only on (i, code) and the third term only on (query, code).
+  //! table[i] is produced by build_centroid_distance_table() once per index,
+  //! LUT by quantize_precomputed_query() once per query, and
+  //! merge_query_distance_table() fuses them into a per-list scan table
+  //! [num_chunk * kNumCentroids] floats (same shape as quantize_query()).
+  int build_centroid_distance_table(const void *centroids, size_t centroid_num,
+                                    std::string *table) const;
+
+  int quantize_precomputed_query(const void *query, const IndexQueryMeta &qmeta,
+                                 std::string *out, IndexQueryMeta *ometa) const;
+
+  int merge_query_distance_table(const void *query_table,
+                                 const std::string &centroid_table,
+                                 size_t centroid_id, std::string *out) const;
+
   int serialize(std::string *out) const override;
 
   int deserialize(std::string &in) override;
@@ -144,6 +168,10 @@ class PqInt4Quantizer : public Quantizer {
 
   //! Compute the centroid-to-centroid distance table for SDC.
   void compute_dist_table();
+
+  //! Compute ||c_m[j]||^2 for every sub-centroid, consumed by
+  //! build_centroid_distance_table().  Built in train() and deserialize().
+  void compute_sub_centroid_norms();
 
   //! Build centroid_ptrs_cache_ from current centroids_.
   //! Called after train() and deserialize() when centroids are available.
@@ -202,6 +230,10 @@ class PqInt4Quantizer : public Quantizer {
   //! [num_chunk * kNumCentroids * kNumCentroids]
   std::vector<float> dist_table_;
 
+  //! Squared norms of the sub-centroids: [num_chunk * kNumCentroids].
+  //! Used by build_centroid_distance_table().
+  std::vector<float> sub_centroid_norms_;
+
   //! Pre-built centroid pointer arrays for each sub-quantizer.
   //! Layout: centroid_ptrs_cache_[sub_idx][centroid_idx] = pointer to centroid.
   //! Built once during init/deserialize, reused by compute_dist_table
@@ -222,6 +254,14 @@ class PqInt4Quantizer : public Quantizer {
   //! Data type matches input_data_type_.  PQ encoding always minimizes L2
   //! quantization error regardless of the search metric.
   BatchDistanceFunc l2_batch_fn_{};
+
+  //! Inner-product batch distance function for the precomputed residual
+  //! tables (build_centroid_distance_table / quantize_precomputed_query).
+  //! The table terms are pure inner products against residual centroids
+  //! regardless of the search metric, so this is always assembled for
+  //! MetricType::kInnerProduct.  Independent of the configured metric;
+  //! returns -<a, b> per element.
+  BatchDistanceFunc ip_batch_fn_{};
 };
 
 }  // namespace turbo
