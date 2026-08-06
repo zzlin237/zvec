@@ -21,6 +21,7 @@
 #include <zvec/core/framework/index_holder.h>
 #include <zvec/core/framework/index_meta.h>
 // Rooted at src/ so this header stays includable from core (ivf_entity).
+#include <turbo/quantizer/common/precompute_table_quantizer.h>
 #include <turbo/quantizer/quantizer.h>
 
 namespace zvec {
@@ -39,7 +40,7 @@ using namespace zvec::core;
 //! quantize_query().  Distance between a PQ code and a query uses ADC (LUT
 //! look-up); distance between two PQ codes uses SDC (centroid-to-centroid
 //! distance table).
-class PqInt4Quantizer : public Quantizer {
+class PqInt4Quantizer : public Quantizer, public PrecomputeTableQuantizer {
  public:
   PqInt4Quantizer() {
     type_ = QuantizeType::kPQ;
@@ -111,28 +112,20 @@ class PqInt4Quantizer : public Quantizer {
   DistanceImpl sym_distance(const void *query,
                             const IndexQueryMeta &qmeta) const;
 
-  //! Precomputed residual distance table support (consumed by IVF residual
-  //! search; callers discover the capability via dynamic_cast).
-  //!
-  //! A datapoint code is decomposed as c_i + c_m[j_m] where c_i is the
-  //! owning centroid and c_m[j_m] is the m-th sub-quantizer centroid picked
-  //! by the code.  Squared distance to a query becomes
-  //!   d = ||x - c_i||^2 + table[i] + LUT
-  //! with the first term per-list (computed inside IVF), the second term
-  //! depending only on (i, code) and the third term only on (query, code).
-  //! table[i] is produced by build_centroid_distance_table() once per index,
-  //! LUT by quantize_precomputed_query() once per query, and
-  //! merge_query_distance_table() fuses them into a per-list scan table
-  //! [num_chunk * kNumCentroids] floats (same shape as quantize_query()).
+  //! Precomputed residual distance table support (see
+  //! PrecomputeTableQuantizer).  The fused per-list scan table keeps the
+  //! float LUT shape [num_chunk * kNumCentroids] of quantize_query().
   int build_centroid_distance_table(const void *centroids, size_t centroid_num,
-                                    std::string *table) const;
+                                    std::string *table) const override;
 
   int quantize_precomputed_query(const void *query, const IndexQueryMeta &qmeta,
-                                 std::string *out, IndexQueryMeta *ometa) const;
+                                 std::string *out,
+                                 IndexQueryMeta *ometa) const override;
 
   int merge_query_distance_table(const void *query_table,
                                  const std::string &centroid_table,
-                                 size_t centroid_id, std::string *out) const;
+                                 size_t centroid_id,
+                                 std::string *out) const override;
 
   int serialize(std::string *out) const override;
 

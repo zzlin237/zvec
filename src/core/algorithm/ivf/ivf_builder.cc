@@ -13,6 +13,7 @@
 // limitations under the License.
 #include "ivf_builder.h"
 #include <ailego/pattern/defer.h>
+#include <turbo/quantizer/common/packed_code_quantizer.h>
 #include <zvec/ailego/utility/base64_helper.h>
 #include <zvec/ailego/utility/float_helper.h>
 #include <zvec/ailego/utility/string_helper.h>
@@ -758,16 +759,19 @@ int IVFBuilder::dump_index(const IndexDumper::Pointer &dumper) {
     LOG_ERROR("Alloc IVFDumper failed");
     return IndexError_NoMemory;
   }
-  if (turbo_quantizer_ && turbo_quantizer_->requires_packed_codes()) {
-    //! Packed-code quantizer: blocks interleave exactly 32 codes; the
-    //! packed layout only works when one storage block holds one packed
-    //! block.
+  //! Packed-code capability (e.g. FastScan): discover via the capability
+  //! interface; the packed layout interleaves exactly 32 codes, so it only
+  //! works when one storage block holds one packed block.
+  auto code_packer =
+      std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(
+          turbo_quantizer_);
+  if (code_packer) {
     if (block_vector_count_ != kDefaultBlockCount) {
       LOG_ERROR("Packed-code quantizer requires block_vector_count=%zu, got %u",
                 kDefaultBlockCount, block_vector_count_);
       return IndexError_InvalidArgument;
     }
-    ivf_dumper->set_code_packer(turbo_quantizer_);
+    ivf_dumper->set_code_packer(code_packer);
   }
 
   //! Dump inverted vectors

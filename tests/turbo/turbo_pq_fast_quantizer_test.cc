@@ -133,7 +133,9 @@ TEST(PqFastQuantizer, LengthsAndProperties) {
   ASSERT_TRUE(q);
   EXPECT_EQ(zvec::turbo::QuantizeType::kPQFast, q->type());
   EXPECT_TRUE(q->require_train());
-  EXPECT_TRUE(q->requires_packed_codes());
+  //! Packing capability is exposed via the PackedCodeQuantizer interface.
+  EXPECT_TRUE(
+      std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(q));
   EXPECT_EQ(4u, q->quantized_datapoint_vector_length());
   EXPECT_EQ(8u * 16 + 2 * sizeof(float), q->quantized_query_vector_length());
 
@@ -192,6 +194,10 @@ TEST(PqFastQuantizer, TrainEncodeDequantize) {
 static void check_pack_roundtrip(size_t dim, size_t nsq, size_t num) {
   auto quantizer = make_pqfs_quantizer(dim, nsq);
   ASSERT_TRUE(quantizer);
+  auto packer =
+      std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(
+          quantizer);
+  ASSERT_TRUE(packer);
   auto holder = make_random_holder(256, dim);
   ASSERT_EQ(0, quantizer->train(holder));
 
@@ -203,8 +209,7 @@ static void check_pack_roundtrip(size_t dim, size_t nsq, size_t num) {
   }
 
   std::vector<uint8_t> packed(fast_scan_packed_block_size(nsq), 0xFF);
-  ASSERT_EQ(0,
-            quantizer->pack_codes(codes.data(), num, code_len, packed.data()));
+  ASSERT_EQ(0, packer->pack_codes(codes.data(), num, code_len, packed.data()));
 
   // Every real (vector, sub-space) pair must round-trip; missing lanes and
   // the odd pad sub-space must be zero.
@@ -379,15 +384,19 @@ TEST(PqFastQuantizer, ContiguousBatchMatchesSingle) {
 
   // Pack blocks the way the IVF dumper does: 32 codes per block, the tail
   // block zero-filled, blocks laid out back-to-back.
+  auto packer =
+      std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(
+          quantizer);
+  ASSERT_TRUE(packer);
   const size_t block_bytes = fast_scan_packed_block_size(NSQ);
   const size_t nblocks = (COUNT + kFastScanBlockSize - 1) / kFastScanBlockSize;
   std::vector<uint8_t> packed(nblocks * block_bytes, 0);
   for (size_t b = 0; b < nblocks; ++b) {
     const size_t n =
         std::min(kFastScanBlockSize, COUNT - b * kFastScanBlockSize);
-    ASSERT_EQ(0, quantizer->pack_codes(
-                     codes.data() + b * kFastScanBlockSize * code_len, n,
-                     code_len, packed.data() + b * block_bytes));
+    ASSERT_EQ(
+        0, packer->pack_codes(codes.data() + b * kFastScanBlockSize * code_len,
+                              n, code_len, packed.data() + b * block_bytes));
   }
 
   // Whole range in one call (multi-block) plus per-block calls.

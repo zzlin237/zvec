@@ -21,6 +21,8 @@
 #include <zvec/core/framework/index_holder.h>
 #include <zvec/core/framework/index_meta.h>
 // Rooted at src/ so this header stays includable from core (ivf_entity).
+#include <turbo/quantizer/common/packed_code_quantizer.h>
+#include <turbo/quantizer/common/precompute_table_quantizer.h>
 #include <turbo/quantizer/quantizer.h>
 
 namespace zvec {
@@ -34,9 +36,9 @@ using namespace zvec::core;
 //! PqInt4Quantizer (sub-quantizer m in the low nibble of byte m/2 when m is
 //! even, high nibble when odd; total ceil(num_chunk / 2) bytes).  Unlike
 //! the gather-style PQ quantizers, codes MUST be stored in packed
-//! 32-vector blocks (requires_packed_codes() / pack_codes()) so that the
-//! FastScan kernel can look up 32 codes per sub-space with one SIMD byte
-//! shuffle over an in-register LUT.
+//! 32-vector blocks (it implements the PackedCodeQuantizer capability) so
+//! that the FastScan kernel can look up 32 codes per sub-space with one
+//! SIMD byte shuffle over an in-register LUT.
 //!
 //! Queries are encoded as a uint8 affine-quantized LUT: the float ADC
 //! table [num_chunk * 16] is quantized with a single min/max over the
@@ -52,7 +54,9 @@ using namespace zvec::core;
 //! code-vs-code distance).  Supported metrics: SquaredEuclidean,
 //! InnerProduct and Cosine (= normalize + L2; the original vector norm is
 //! stored after each code for dequantize, aligned with PqInt4Quantizer).
-class PqFastQuantizer : public Quantizer {
+class PqFastQuantizer : public Quantizer,
+                        public PackedCodeQuantizer,
+                        public PrecomputeTableQuantizer {
  public:
   PqFastQuantizer() {
     type_ = QuantizeType::kPQFast;
@@ -96,10 +100,6 @@ class PqFastQuantizer : public Quantizer {
 
   void quantize_query(const void *input, void *output) const override;
 
-  bool requires_packed_codes() const override {
-    return true;
-  }
-
   int pack_codes(const void *codes, size_t num, size_t stride,
                  void *out) const override;
 
@@ -129,21 +129,22 @@ class PqFastQuantizer : public Quantizer {
   DistanceImpl sym_distance(const void *query,
                             const IndexQueryMeta &qmeta) const;
 
-  //! Precomputed residual distance table support (consumed by IVF residual
-  //! search; callers discover the capability via dynamic_cast).  Same
-  //! decomposition contract as PqInt8Quantizer; the merged per-list LUT is
-  //! affine-quantized internally, so the output keeps the packed-u8 FastScan
-  //! query format consumed by the block scan.  fp32 + plain L2 only:
-  //! anything else returns kErrUnsupported and IVF keeps the per-list path.
+  //! Precomputed residual distance table support (see
+  //! PrecomputeTableQuantizer).  The merged per-list LUT is affine-quantized
+  //! internally, so the output keeps the packed-u8 FastScan query format
+  //! consumed by the block scan.  fp32 + plain L2 only: anything else
+  //! returns kErrUnsupported and IVF keeps the per-list path.
   int build_centroid_distance_table(const void *centroids, size_t centroid_num,
-                                    std::string *table) const;
+                                    std::string *table) const override;
 
   int quantize_precomputed_query(const void *query, const IndexQueryMeta &qmeta,
-                                 std::string *out, IndexQueryMeta *ometa) const;
+                                 std::string *out,
+                                 IndexQueryMeta *ometa) const override;
 
   int merge_query_distance_table(const void *query_table,
                                  const std::string &centroid_table,
-                                 size_t centroid_id, std::string *out) const;
+                                 size_t centroid_id,
+                                 std::string *out) const override;
 
   int quantize(const void *query, const IndexQueryMeta &qmeta, std::string *out,
                IndexQueryMeta *ometa) const override;

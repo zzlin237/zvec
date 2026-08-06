@@ -14,59 +14,20 @@
 #include "ivf_entity.h"
 #include <cstring>
 #include <iostream>
-#include <turbo/quantizer/pq_fast_quantizer/pq_fast_quantizer.h>
-#include <turbo/quantizer/pq_int4_quantizer/pq_int4_quantizer.h>
-#include <turbo/quantizer/pq_int8_quantizer/pq_int8_quantizer.h>
+#include <turbo/quantizer/common/precompute_table_quantizer.h>
 #include <zvec/ailego/utility/base64_helper.h>
 #include <zvec/ailego/utility/float_helper.h>
 #include "ivf_utility.h"
 namespace zvec {
 namespace core {
 
-//! The precomputed residual table protocol lives on the concrete
-//! PqInt8Quantizer / PqInt4Quantizer / PqFastQuantizer (not the Quantizer
-//! base); all pointers null means the quantizer lacks the capability and
-//! the per-list residual path applies.  At most one pointer is non-null.
-struct PrecomputeQuantizers {
-  const zvec::turbo::PqInt8Quantizer *int8{nullptr};
-  const zvec::turbo::PqInt4Quantizer *int4{nullptr};
-  const zvec::turbo::PqFastQuantizer *fast{nullptr};
-
-  bool supported() const {
-    return int8 != nullptr || int4 != nullptr || fast != nullptr;
-  }
-};
-
-static PrecomputeQuantizers precompute_quantizer_of(
+//! The precomputed residual table protocol is an optional capability
+//! (turbo::PrecomputeTableQuantizer); a null result means the quantizer
+//! lacks it and the per-list residual path applies.
+static const zvec::turbo::PrecomputeTableQuantizer *precompute_quantizer_of(
     const zvec::turbo::Quantizer::Pointer &quantizer) {
-  PrecomputeQuantizers result;
-  result.int8 =
-      dynamic_cast<const zvec::turbo::PqInt8Quantizer *>(quantizer.get());
-  if (result.int8 == nullptr) {
-    result.int4 =
-        dynamic_cast<const zvec::turbo::PqInt4Quantizer *>(quantizer.get());
-    if (result.int4 == nullptr) {
-      result.fast =
-          dynamic_cast<const zvec::turbo::PqFastQuantizer *>(quantizer.get());
-    }
-  }
-  return result;
-}
-
-//! Dispatch a precompute-protocol method to whichever concrete quantizer
-//! supports it (see PrecomputeQuantizers).  The member pointers have
-//! different class types, hence separate template parameters.
-template <typename M8, typename M4, typename MF, typename... Args>
-static int call_precompute_method(const PrecomputeQuantizers &qs,
-                                  M8 int8_method, M4 int4_method,
-                                  MF fast_method, Args... args) {
-  if (qs.int8 != nullptr) {
-    return (qs.int8->*int8_method)(args...);
-  }
-  if (qs.int4 != nullptr) {
-    return (qs.int4->*int4_method)(args...);
-  }
-  return (qs.fast->*fast_method)(args...);
+  return dynamic_cast<const zvec::turbo::PrecomputeTableQuantizer *>(
+      quantizer.get());
 }
 
 //! Initialize
@@ -824,8 +785,8 @@ int IVFEntity::set_precompute_enabled(bool enable) {
   if (!enable || !use_residual_ || !quantizer_ || !residual_centroids_) {
     return 0;
   }
-  const auto proto = precompute_quantizer_of(quantizer_);
-  if (!proto.supported()) {
+  const auto *proto = precompute_quantizer_of(quantizer_);
+  if (!proto) {
     LOG_INFO(
         "Quantizer has no precomputed table support, "
         "keep per-list residual path");
@@ -846,11 +807,7 @@ int IVFEntity::set_precompute_enabled(bool enable) {
   }
 
   std::string table;
-  int ret = call_precompute_method(
-      proto, &zvec::turbo::PqInt8Quantizer::build_centroid_distance_table,
-      &zvec::turbo::PqInt4Quantizer::build_centroid_distance_table,
-      &zvec::turbo::PqFastQuantizer::build_centroid_distance_table, centroids,
-      nlist, &table);
+  int ret = proto->build_centroid_distance_table(centroids, nlist, &table);
   if (ret != 0) {
     LOG_INFO(
         "Precomputed residual table unavailable (ret=%d), "
@@ -885,12 +842,11 @@ int IVFEntity::prepare_query(const void *query) const {
   }
 
   IndexQueryMeta ometa;
-  int ret = call_precompute_method(
-      precompute_quantizer_of(quantizer_),
-      &zvec::turbo::PqInt8Quantizer::quantize_precomputed_query,
-      &zvec::turbo::PqInt4Quantizer::quantize_precomputed_query,
-      &zvec::turbo::PqFastQuantizer::quantize_precomputed_query, prepared,
-      residual_query_meta_, &precompute_query_table_, &ometa);
+  const auto *proto = precompute_quantizer_of(quantizer_);
+  int ret = proto ? proto->quantize_precomputed_query(
+                        prepared, residual_query_meta_,
+                        &precompute_query_table_, &ometa)
+                  : -1;
   if (ret != 0) {
     LOG_INFO(
         "quantize_precomputed_query failed ret=%d, "
@@ -976,13 +932,11 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
         precompute_prepared_query_ == query) {
       //! Fast path: merge the per-query term3 LUT with the precomputed
       //! centroid row (term2), both built by the quantizer.
-      int ret = call_precompute_method(
-          precompute_quantizer_of(quantizer_),
-          &zvec::turbo::PqInt8Quantizer::merge_query_distance_table,
-          &zvec::turbo::PqInt4Quantizer::merge_query_distance_table,
-          &zvec::turbo::PqFastQuantizer::merge_query_distance_table,
-          precompute_query_table_.data(), *precompute_table_, inverted_list_id,
-          &precompute_merged_query_);
+      const auto *proto = precompute_quantizer_of(quantizer_);
+      int ret = proto ? proto->merge_query_distance_table(
+                            precompute_query_table_.data(), *precompute_table_,
+                            inverted_list_id, &precompute_merged_query_)
+                      : -1;
       if (ret == 0) {
         residual_base = this->compute_centroid_distance(inverted_list_id);
         query = precompute_merged_query_.data();
@@ -1087,13 +1041,11 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
         precompute_prepared_query_ == query) {
       //! Fast path: merge the per-query term3 LUT with the precomputed
       //! centroid row (term2), both built by the quantizer.
-      int ret = call_precompute_method(
-          precompute_quantizer_of(quantizer_),
-          &zvec::turbo::PqInt8Quantizer::merge_query_distance_table,
-          &zvec::turbo::PqInt4Quantizer::merge_query_distance_table,
-          &zvec::turbo::PqFastQuantizer::merge_query_distance_table,
-          precompute_query_table_.data(), *precompute_table_, inverted_list_id,
-          &precompute_merged_query_);
+      const auto *proto = precompute_quantizer_of(quantizer_);
+      int ret = proto ? proto->merge_query_distance_table(
+                            precompute_query_table_.data(), *precompute_table_,
+                            inverted_list_id, &precompute_merged_query_)
+                      : -1;
       if (ret == 0) {
         residual_base = this->compute_centroid_distance(inverted_list_id);
         query = precompute_merged_query_.data();
