@@ -132,6 +132,39 @@ class Quantizer {
     return 0;
   }
 
+  //! Build a query-independent distance table from the coarse centroids.
+  //! One row per centroid is produced; the table layout is opaque to the
+  //! caller and only consumed by quantize_precomputed_query() and
+  //! merge_query_distance_table(). Implementations may refuse the request
+  //! (e.g. unsupported quantizer type or oversized table) by returning a
+  //! nonzero error code so the caller falls back to its default path.
+  virtual int build_centroid_distance_table(const void * /*centroids*/,
+                                            size_t /*centroid_num*/,
+                                            std::string * /*table*/) const {
+    return kErrUnsupported;
+  }
+
+  //! Per-query step paired with build_centroid_distance_table(): build the
+  //! query-side distance table once per query, independent of the centroid
+  //! being scanned.
+  virtual int quantize_precomputed_query(const void * /*query*/,
+                                         const IndexQueryMeta & /*qmeta*/,
+                                         std::string * /*out*/,
+                                         IndexQueryMeta * /*ometa*/) const {
+    return kErrUnsupported;
+  }
+
+  //! Merge the query-side table with the precomputed row of the
+  //! centroid_id-th centroid into a buffer compatible with
+  //! calc_distance_dp_query_batch(). The produced distances exclude the
+  //! query-to-centroid term; the caller must add it back.
+  virtual int merge_query_distance_table(const void * /*query_table*/,
+                                         const std::string & /*centroid_table*/,
+                                         size_t /*centroid_id*/,
+                                         std::string * /*out*/) const {
+    return kErrUnsupported;
+  }
+
   virtual DistanceImpl distance(const void * /*query*/,
                                 const IndexQueryMeta & /*qmeta*/) const {
     return DistanceImpl{};

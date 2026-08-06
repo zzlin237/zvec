@@ -97,6 +97,18 @@ class PqInt8Quantizer : public Quantizer {
   int quantize(const void *query, const IndexQueryMeta &qmeta, std::string *out,
                IndexQueryMeta *ometa) const override;
 
+  int build_centroid_distance_table(const void *centroids, size_t centroid_num,
+                                    std::string *table) const override;
+
+  int quantize_precomputed_query(const void *query, const IndexQueryMeta &qmeta,
+                                 std::string *out,
+                                 IndexQueryMeta *ometa) const override;
+
+  int merge_query_distance_table(const void *query_table,
+                                 const std::string &centroid_table,
+                                 size_t centroid_id,
+                                 std::string *out) const override;
+
   int dequantize(const void *in, const IndexQueryMeta &qmeta,
                  std::string *out) const override;
 
@@ -139,6 +151,10 @@ class PqInt8Quantizer : public Quantizer {
 
   //! Compute the centroid-to-centroid distance table for SDC.
   void compute_dist_table();
+
+  //! Compute the squared norms of all sub-centroids ([num_chunk * 256]).
+  //! Called after train() and deserialize() when centroids are available.
+  void compute_sub_centroid_norms();
 
   //! Build centroid_ptrs_cache_ from current centroids_.
   //! Called after train() and deserialize() when centroids are available.
@@ -191,6 +207,12 @@ class PqInt8Quantizer : public Quantizer {
   //! Centroid-to-centroid distance table for SDC:
   //! [num_chunk * kNumCentroids * kNumCentroids]
   std::vector<float> dist_table_;
+
+  //! Squared norms of the sub-centroids: [num_chunk * kNumCentroids],
+  //! entry [m * 256 + j] = ||c_m[j]||^2.  Used by the precomputed
+  //! residual distance table (build_centroid_distance_table /
+  //! quantize_precomputed_query).
+  std::vector<float> sub_centroid_norms_;
 
   //! Pre-built centroid pointer arrays for each chunk.
   //! Layout: centroid_ptrs_cache_[sub_idx][centroid_idx] = pointer to centroid.

@@ -284,6 +284,17 @@ class IVFEntity {
     return use_residual_;
   }
 
+  //! Enable/disable the precomputed residual distance table. Called by
+  //! searcher/streamer after load; builds the centroid table through the
+  //! turbo quantizer interface. Never fails the load: quantizers that do
+  //! not support the table keep the per-list residual path.
+  int set_precompute_enabled(bool enable);
+
+  //! Per-query hook for the precomputed residual path: normalize the query
+  //! once (Cosine) and cache the query-side distance table. No-op when the
+  //! precomputed path is inactive.
+  int prepare_query(const void *query) const;
+
   /*! Index Reformer Wrapper
    *  To transform query in inverted index searching, and normalize the score
    */
@@ -383,6 +394,15 @@ class IVFEntity {
   //! residual_query_.
   int prepare_residual_query(size_t inverted_list_id, const void *query) const;
 
+  //! L2-normalize a residual-space vector buffer in-place (fp16 goes
+  //! through a fp32 scratch). Shared by the per-list and the precomputed
+  //! residual paths.
+  void normalize_residual_vec(char *vec) const;
+
+  //! term1 of the residual decomposition: ||q' - c_i||^2 between the
+  //! prepared query cached by prepare_query() and the list centroid.
+  float compute_centroid_distance(size_t inverted_list_id) const;
+
   //! Compute distances of a block of codes against a quantized query (LUT)
   void quantized_block_distance(const void *query, const void *block_data,
                                 size_t vecs_count, float *distances) const;
@@ -411,6 +431,17 @@ class IVFEntity {
   mutable std::string residual_query_vec_{};  //! residual query vector buffer
   IndexQueryMeta residual_query_meta_{};      //! meta of the residual space
   size_t residual_input_element_size_{0};     //! centroid/query element size
+
+  //! Precomputed residual distance table state (term2/term3 decomposition);
+  //! the table is shared across cloned entities, per-query buffers are not.
+  bool precompute_enabled_{false};
+  mutable bool precompute_active_{false};
+  std::shared_ptr<const std::string> precompute_table_{};
+  mutable std::string precompute_query_table_{};   //! term3 LUT, per query
+  mutable std::string precompute_merged_query_{};  //! merged per-list LUT
+  mutable std::string precompute_query_vec_{};     //! normalized query cache
+  mutable const void *precompute_prepared_query_{nullptr};  //! guard pointer
+  mutable const void *precompute_prepared_vec_{nullptr};    //! term1 operand
   IVFDistanceCalculator::Pointer calculator_{};
   IndexStorage::Pointer container_{};
   IndexStorage::Segment::Pointer inverted_{};

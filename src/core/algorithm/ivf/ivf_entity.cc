@@ -693,35 +693,7 @@ int IVFEntity::prepare_residual_query(size_t inverted_list_id,
   const bool fp16 = (qmeta.data_type() == IndexMeta::DataType::DT_FP16);
   char *vec = &residual_query_vec_[0];
   if (residual_normalize_query_) {
-    float norm = 0.0f;
-    if (fp16) {
-      scratch.resize(dim);
-      ailego::FloatHelper::ToFP32(reinterpret_cast<const uint16_t *>(vec), dim,
-                                  scratch.data());
-      for (uint32_t i = 0; i < dim; ++i) {
-        norm += scratch[i] * scratch[i];
-      }
-      norm = std::sqrt(norm);
-      if (norm > 0.0f) {
-        for (uint32_t i = 0; i < dim; ++i) {
-          scratch[i] /= norm;
-        }
-        out16.resize(dim);
-        ailego::FloatHelper::ToFP16(scratch.data(), dim, out16.data());
-        std::memcpy(vec, out16.data(), elem_size);
-      }
-    } else {
-      float *f = reinterpret_cast<float *>(vec);
-      for (uint32_t i = 0; i < dim; ++i) {
-        norm += f[i] * f[i];
-      }
-      norm = std::sqrt(norm);
-      if (norm > 0.0f) {
-        for (uint32_t i = 0; i < dim; ++i) {
-          f[i] /= norm;
-        }
-      }
-    }
+    this->normalize_residual_vec(vec);
   }
 
   //! Subtract the list centroid in the residual space.
@@ -756,6 +728,153 @@ int IVFEntity::prepare_residual_query(size_t inverted_list_id,
   return 0;
 }
 
+void IVFEntity::normalize_residual_vec(char *vec) const {
+  const uint32_t dim = residual_query_meta_.dimension();
+  const bool fp16 =
+      (residual_query_meta_.data_type() == IndexMeta::DataType::DT_FP16);
+  float norm = 0.0f;
+  if (fp16) {
+    std::vector<float> scratch(dim);
+    ailego::FloatHelper::ToFP32(reinterpret_cast<const uint16_t *>(vec), dim,
+                                scratch.data());
+    for (uint32_t i = 0; i < dim; ++i) {
+      norm += scratch[i] * scratch[i];
+    }
+    norm = std::sqrt(norm);
+    if (norm > 0.0f) {
+      for (uint32_t i = 0; i < dim; ++i) {
+        scratch[i] /= norm;
+      }
+      std::vector<uint16_t> out16(dim);
+      ailego::FloatHelper::ToFP16(scratch.data(), dim, out16.data());
+      std::memcpy(vec, out16.data(), dim * sizeof(uint16_t));
+    }
+  } else {
+    float *f = reinterpret_cast<float *>(vec);
+    for (uint32_t i = 0; i < dim; ++i) {
+      norm += f[i] * f[i];
+    }
+    norm = std::sqrt(norm);
+    if (norm > 0.0f) {
+      for (uint32_t i = 0; i < dim; ++i) {
+        f[i] /= norm;
+      }
+    }
+  }
+}
+
+//! Build the precomputed residual distance table from the persisted
+//! residual centroids. Always returns 0: unsupported quantizers or missing
+//! centroids simply keep the per-list residual path.
+int IVFEntity::set_precompute_enabled(bool enable) {
+  precompute_enabled_ = enable;
+  precompute_active_ = false;
+  precompute_table_.reset();
+  precompute_prepared_query_ = nullptr;
+  precompute_prepared_vec_ = nullptr;
+  if (!enable || !use_residual_ || !quantizer_ || !residual_centroids_) {
+    return 0;
+  }
+
+  const size_t elem_size = residual_input_element_size_;
+  const size_t nlist = header_.inverted_list_count;
+  const size_t total = nlist * elem_size;
+  if (elem_size == 0 || residual_centroids_->data_size() < total) {
+    LOG_INFO("Residual centroids unavailable, keep per-list residual path");
+    return 0;
+  }
+  const void *centroids = nullptr;
+  if (residual_centroids_->read(0, &centroids, total) != total) {
+    LOG_ERROR("Failed to read residual centroids for precompute table");
+    return 0;
+  }
+
+  std::string table;
+  int ret = quantizer_->build_centroid_distance_table(centroids, nlist, &table);
+  if (ret != 0) {
+    LOG_INFO(
+        "Precomputed residual table unavailable (ret=%d), "
+        "keep per-list residual path",
+        ret);
+    return 0;
+  }
+  precompute_table_ = std::make_shared<const std::string>(std::move(table));
+  precompute_active_ = true;
+  LOG_INFO("Precomputed residual distance table ready, lists=%zu bytes=%zu",
+           nlist, precompute_table_->size());
+  return 0;
+}
+
+//! Per-query hook of the precomputed residual path: normalize the query
+//! once (Cosine residual) and cache the query-side (term3) distance table.
+//! precompute_prepared_query_ guards search() against a missing/stale
+//! prepare; on failure the precomputed path is disabled for good.
+int IVFEntity::prepare_query(const void *query) const {
+  precompute_prepared_query_ = nullptr;
+  precompute_prepared_vec_ = nullptr;
+  if (!precompute_active_ || !quantizer_) {
+    return 0;
+  }
+
+  const void *prepared = query;
+  if (residual_normalize_query_) {
+    precompute_query_vec_.resize(residual_input_element_size_);
+    std::memcpy(&precompute_query_vec_[0], query, residual_input_element_size_);
+    this->normalize_residual_vec(&precompute_query_vec_[0]);
+    prepared = precompute_query_vec_.data();
+  }
+
+  IndexQueryMeta ometa;
+  int ret = quantizer_->quantize_precomputed_query(
+      prepared, residual_query_meta_, &precompute_query_table_, &ometa);
+  if (ret != 0) {
+    LOG_INFO(
+        "quantize_precomputed_query failed ret=%d, "
+        "fall back to per-list residual path",
+        ret);
+    precompute_active_ = false;
+    return 0;
+  }
+  precompute_prepared_query_ = query;
+  precompute_prepared_vec_ = prepared;
+  return 0;
+}
+
+//! term1 of the residual decomposition: ||q' - c_i||^2 between the query
+//! prepared by prepare_query() and the list centroid. Both live in the
+//! residual space (normalized for Cosine), so plain squared L2 applies.
+float IVFEntity::compute_centroid_distance(size_t inverted_list_id) const {
+  const size_t elem_size = residual_input_element_size_;
+  const void *centroid = nullptr;
+  if (residual_centroids_->read(inverted_list_id * elem_size, &centroid,
+                                elem_size) != elem_size) {
+    LOG_ERROR("Failed to read residual centroid, list=%zu", inverted_list_id);
+    return 0.0f;
+  }
+  const uint32_t dim = residual_query_meta_.dimension();
+  const bool fp16 =
+      (residual_query_meta_.data_type() == IndexMeta::DataType::DT_FP16);
+  const char *qvec = static_cast<const char *>(precompute_prepared_vec_);
+  float dist = 0.0f;
+  if (fp16) {
+    const uint16_t *q16 = reinterpret_cast<const uint16_t *>(qvec);
+    const uint16_t *c16 = reinterpret_cast<const uint16_t *>(centroid);
+    for (uint32_t i = 0; i < dim; ++i) {
+      float d = ailego::FloatHelper::ToFP32(q16[i]) -
+                ailego::FloatHelper::ToFP32(c16[i]);
+      dist += d * d;
+    }
+  } else {
+    const float *q32 = reinterpret_cast<const float *>(qvec);
+    const float *c32 = reinterpret_cast<const float *>(centroid);
+    for (uint32_t i = 0; i < dim; ++i) {
+      float d = q32[i] - c32[i];
+      dist += d * d;
+    }
+  }
+  return dist;
+}
+
 //! Compute distances of a block of codes against a quantized query (LUT).
 //! The block stores codes back to back with element_size() stride.
 void IVFEntity::quantized_block_distance(const void *query,
@@ -788,12 +907,31 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
   const size_t batch_size = kBatchBlocks;
   const size_t block_size = header_.block_size;
   const auto norm_val = this->inverted_list_normalize_value(inverted_list_id);
+  //! Residual distance = term1 + (term2 + term3); term1 is a per-list
+  //! constant folded into residual_base before the heap emplace.
+  float residual_base = 0.0f;
   if (use_residual_ && quantizer_) {
-    //! The transformed query is the original vector in residual mode; build
-    //! the per-list residual LUT before scanning blocks.
-    int ret = this->prepare_residual_query(inverted_list_id, query);
-    ivf_check_error_code(ret);
-    query = residual_query_.data();
+    bool precomputed = false;
+    if (precompute_active_ && precompute_table_ &&
+        precompute_prepared_query_ == query) {
+      //! Fast path: merge the per-query term3 LUT with the precomputed
+      //! centroid row (term2), both built by the quantizer.
+      int ret = quantizer_->merge_query_distance_table(
+          precompute_query_table_.data(), *precompute_table_, inverted_list_id,
+          &precompute_merged_query_);
+      if (ret == 0) {
+        residual_base = this->compute_centroid_distance(inverted_list_id);
+        query = precompute_merged_query_.data();
+        precomputed = true;
+      }
+    }
+    if (!precomputed) {
+      //! The transformed query is the original vector in residual mode;
+      //! build the per-list residual LUT before scanning blocks.
+      int ret = this->prepare_residual_query(inverted_list_id, query);
+      ivf_check_error_code(ret);
+      query = residual_query_.data();
+    }
   }
   for (size_t i = 0; i < list_meta->block_count; i += batch_size) {
     //! Read vecs
@@ -848,7 +986,9 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
       for (size_t k = 0; k < vecs_count; ++k) {
         if (keeps & (1ULL << k)) {
           if (block_keys[k] != kInvalidKey) {
-            heap->emplace(block_keys[k], distances[k] * norm_val, id_off + k);
+            heap->emplace(block_keys[k],
+                          (distances[k] + residual_base) * norm_val,
+                          id_off + k);
           }
         }
       }
@@ -874,12 +1014,31 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
   const size_t batch_size = kBatchBlocks;
   const size_t block_size = header_.block_size;
   const auto norm_val = this->inverted_list_normalize_value(inverted_list_id);
+  //! Residual distance = term1 + (term2 + term3); term1 is a per-list
+  //! constant folded into residual_base before the heap emplace.
+  float residual_base = 0.0f;
   if (use_residual_ && quantizer_) {
-    //! The transformed query is the original vector in residual mode; build
-    //! the per-list residual LUT before scanning blocks.
-    int ret = this->prepare_residual_query(inverted_list_id, query);
-    ivf_check_error_code(ret);
-    query = residual_query_.data();
+    bool precomputed = false;
+    if (precompute_active_ && precompute_table_ &&
+        precompute_prepared_query_ == query) {
+      //! Fast path: merge the per-query term3 LUT with the precomputed
+      //! centroid row (term2), both built by the quantizer.
+      int ret = quantizer_->merge_query_distance_table(
+          precompute_query_table_.data(), *precompute_table_, inverted_list_id,
+          &precompute_merged_query_);
+      if (ret == 0) {
+        residual_base = this->compute_centroid_distance(inverted_list_id);
+        query = precompute_merged_query_.data();
+        precomputed = true;
+      }
+    }
+    if (!precomputed) {
+      //! The transformed query is the original vector in residual mode;
+      //! build the per-list residual LUT before scanning blocks.
+      int ret = this->prepare_residual_query(inverted_list_id, query);
+      ivf_check_error_code(ret);
+      query = residual_query_.data();
+    }
   }
   for (size_t i = 0; i < list_meta->block_count; i += batch_size) {
     //! Read vecs
@@ -917,7 +1076,8 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
       for (size_t k = 0; k < vecs_count; ++k) {
         if (block_keys[k] != kInvalidKey) {
           uint32_t id = list_meta->id_offset + (i + b) * block_vecs + k;
-          heap->emplace(block_keys[k], distances[k] * norm_val, id);
+          heap->emplace(block_keys[k],
+                        (distances[k] + residual_base) * norm_val, id);
         }
       }
       *(context_stats->mutable_dist_calced_count()) += vecs_count;
@@ -932,6 +1092,9 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
 int IVFEntity::search(const void *query, const IndexFilter &filter,
                       IndexDocumentHeap *heap,
                       IndexContext::Stats *context_stats) const {
+  //! No centroid probing on the full-scan path: prepare the query-side
+  //! precomputed table here (no-op when the path is inactive).
+  this->prepare_query(query);
   for (size_t i = 0; i < header_.inverted_list_count; ++i) {
     uint32_t scan_count;
     int ret = this->search(i, query, filter, &scan_count, heap, context_stats);
@@ -946,6 +1109,7 @@ int IVFEntity::search(const void *query, const IndexFilter &filter,
 //! search all inverted list without filter
 int IVFEntity::search(const void *query, IndexDocumentHeap *heap,
                       IndexContext::Stats *context_stats) const {
+  this->prepare_query(query);
   for (size_t i = 0; i < header_.inverted_list_count; ++i) {
     uint32_t scan_count;
     int ret = this->search(i, query, &scan_count, heap, context_stats);
@@ -1170,6 +1334,11 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
   entity->residual_centroids_ = this->residual_centroids_;
   entity->residual_query_meta_ = this->residual_query_meta_;
   entity->residual_input_element_size_ = this->residual_input_element_size_;
+
+  //! Share the (immutable) precomputed table; per-query buffers stay empty.
+  entity->precompute_enabled_ = this->precompute_enabled_;
+  entity->precompute_active_ = this->precompute_active_;
+  entity->precompute_table_ = this->precompute_table_;
 
   return entity;
 }

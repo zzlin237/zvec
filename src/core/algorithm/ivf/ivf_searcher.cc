@@ -25,6 +25,7 @@ int IVFSearcher::init(const ailego::Params &parameters) {
   params_ = parameters;
 
   params_.get(PARAM_IVF_SEARCHER_BRUTE_FORCE_THRESHOLD, &bruteforce_threshold_);
+  params_.get(PARAM_IVF_SEARCHER_USE_PRECOMPUTE_TABLE, &use_precompute_table_);
 
   searcher_state_ = STATE_INITED;
 
@@ -36,6 +37,7 @@ int IVFSearcher::cleanup(void) {
 
   params_.clear();
   bruteforce_threshold_ = kDefaultBfThreshold;
+  use_precompute_table_ = true;
 
   searcher_state_ = STATE_INIT;
   return 0;
@@ -105,6 +107,11 @@ int IVFSearcher::load(IndexStorage::Pointer container,
 
   //! Restore the turbo quantizer (no-op for legacy indexes)
   ret = IVFUtility::RestoreTurboQuantizer(meta_, entity_);
+  ivf_check_error_code(ret);
+
+  //! Try the precomputed residual table; falls back internally when the
+  //! quantizer does not support it or the index is not residual.
+  ret = entity_->set_precompute_enabled(use_precompute_table_);
   ivf_check_error_code(ret);
 
   magic_ = IndexContext::GenerateMagic();
@@ -230,6 +237,9 @@ int IVFSearcher::search_impl(const void *query, const IndexQueryMeta &qmeta,
     auto &context_stats = ctx->mutable_stats(q);
     auto &heap = ctx->mutable_result_heap();
     heap.clear();
+    //! Precomputed residual path: build the query-side table once per query
+    //! (no-op when the path is inactive).
+    entity->prepare_query(query);
     size_t total_scan_count = 0;
     for (size_t i = 0;
          i < centroids.size() && total_scan_count < ctx->max_scan_count();

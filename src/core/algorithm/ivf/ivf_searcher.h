@@ -103,6 +103,8 @@ class IVFSearcher : public IndexSearcher {
   IVFCentroidIndex::Pointer centroid_index_{};
   IVFEntity::Pointer entity_{};
   uint32_t bruteforce_threshold_{kDefaultBfThreshold};
+  //! Switch of the precomputed residual distance table (residual mode only)
+  bool use_precompute_table_{true};
   uint32_t magic_{0};
   Stats stats_{};
   State searcher_state_{STATE_INIT};

@@ -40,6 +40,11 @@ class IVFTurboQuantizerTest : public testing::Test {
   void build_dump_load(const Params &builder_params, IVFSearcher *searcher,
                        IndexStorage::Pointer *container);
 
+  //! Load the previously dumped index into another searcher, with extra
+  //! searcher params (e.g. the precompute switch).
+  void load_dumped(IVFSearcher *searcher, const Params &extra_params,
+                   IndexStorage::Pointer *container);
+
   //! Generate well-separated clusters so residual quantization can show
   //! its advantage over raw-vector quantization.
   void prepare_clustered_data();
@@ -152,6 +157,24 @@ void IVFTurboQuantizerTest::build_dump_load(const Params &builder_params,
   Params searcher_params;
   searcher_params.set(PARAM_IVF_SEARCHER_SCAN_RATIO, 1.0);
   searcher_params.set(PARAM_IVF_SEARCHER_BRUTE_FORCE_THRESHOLD, 0);
+  ASSERT_EQ(0, searcher->init(searcher_params));
+
+  *container = IndexFactory::CreateStorage("MMapFileReadStorage");
+  ASSERT_TRUE(!!*container);
+  Params container_params;
+  container_params.set("proxima.mmap_file.container.memory_warmup", true);
+  (*container)->init(container_params);
+  ASSERT_EQ(0, (*container)->open(index_path_, false));
+  ASSERT_EQ(0, searcher->load(*container, IndexMetric::Pointer()));
+}
+
+void IVFTurboQuantizerTest::load_dumped(IVFSearcher *searcher,
+                                        const Params &extra_params,
+                                        IndexStorage::Pointer *container) {
+  Params searcher_params;
+  searcher_params.set(PARAM_IVF_SEARCHER_SCAN_RATIO, 1.0);
+  searcher_params.set(PARAM_IVF_SEARCHER_BRUTE_FORCE_THRESHOLD, 0);
+  searcher_params.merge(extra_params);
   ASSERT_EQ(0, searcher->init(searcher_params));
 
   *container = IndexFactory::CreateStorage("MMapFileReadStorage");
@@ -469,6 +492,136 @@ TEST_F(IVFTurboQuantizerTest, TestResidualRestore) {
       }
     }
   }
+}
+
+TEST_F(IVFTurboQuantizerTest, TestPrecomputeEquivalence) {
+  //! The precomputed residual table (term2/term3 decomposition) must not
+  //! change results: searchers with the table on/off over the same dump
+  //! return identical keys and nearly equal scores (the merge only
+  //! reshuffles float rounding against the per-list LUT path).
+  base_num_ = 320;
+  prepare_clustered_data();
+  const size_t topk = 10;
+
+  for (int cosine = 0; cosine <= 1; ++cosine) {
+    build_metric_ = cosine ? "Cosine" : "SquaredEuclidean";
+
+    IVFSearcher on_searcher;
+    IndexStorage::Pointer on_container;
+    build_dump_load(make_turbo_params(true), &on_searcher, &on_container);
+
+    Params off_params;
+    off_params.set(PARAM_IVF_SEARCHER_USE_PRECOMPUTE_TABLE, false);
+    IVFSearcher off_searcher;
+    IndexStorage::Pointer off_container;
+    load_dumped(&off_searcher, off_params, &off_container);
+
+    vector<vector<pair<uint64_t, float>>> on_results, off_results;
+    search_scored(&on_searcher, topk, &on_results);
+    search_scored(&off_searcher, topk, &off_results);
+
+    ASSERT_EQ(on_results.size(), off_results.size());
+    for (size_t q = 0; q < on_results.size(); ++q) {
+      ASSERT_EQ(on_results[q].size(), off_results[q].size());
+      for (size_t i = 0; i < topk; ++i) {
+        EXPECT_EQ(on_results[q][i].first, off_results[q][i].first)
+            << "metric=" << build_metric_ << " q=" << q << " i=" << i;
+        EXPECT_NEAR(on_results[q][i].second, off_results[q][i].second, 1e-3f);
+      }
+    }
+
+    //! The accelerated path keeps the residual recall level.
+    const float recall = recall_with_searcher(&on_searcher, topk, cosine != 0);
+    EXPECT_GT(recall, 0.9f) << "metric=" << build_metric_;
+
+    on_searcher.cleanup();
+    off_searcher.cleanup();
+    on_container.reset();
+    off_container.reset();
+  }
+}
+
+TEST_F(IVFTurboQuantizerTest, TestPrecomputeRestore) {
+  //! The table is not persisted: after dump/load it must be rebuilt from
+  //! the residual centroid segment automatically, reproducing results.
+  base_num_ = 320;
+  prepare_clustered_data();
+  const size_t topk = 10;
+
+  for (int cosine = 0; cosine <= 1; ++cosine) {
+    build_metric_ = cosine ? "Cosine" : "SquaredEuclidean";
+
+    IVFSearcher searcher;
+    IndexStorage::Pointer container;
+    build_dump_load(make_turbo_params(true), &searcher, &container);
+    vector<vector<pair<uint64_t, float>>> first;
+    search_scored(&searcher, topk, &first);
+    EXPECT_GT(recall_with_searcher(&searcher, topk, cosine != 0), 0.9f)
+        << "metric=" << build_metric_;
+    searcher.cleanup();
+    container.reset();
+
+    //! Reload the dumped file; the table is rebuilt on load.
+    IVFSearcher reloaded;
+    IndexStorage::Pointer container2;
+    load_dumped(&reloaded, Params(), &container2);
+    vector<vector<pair<uint64_t, float>>> second;
+    search_scored(&reloaded, topk, &second);
+
+    ASSERT_EQ(first.size(), second.size());
+    for (size_t q = 0; q < first.size(); ++q) {
+      ASSERT_EQ(first[q].size(), second[q].size());
+      for (size_t i = 0; i < first[q].size(); ++i) {
+        EXPECT_EQ(first[q][i].first, second[q][i].first);
+        EXPECT_NEAR(first[q][i].second, second[q][i].second, 1e-5f);
+      }
+    }
+    EXPECT_GT(recall_with_searcher(&reloaded, topk, cosine != 0), 0.9f)
+        << "metric=" << build_metric_;
+
+    reloaded.cleanup();
+    container2.reset();
+  }
+}
+
+TEST_F(IVFTurboQuantizerTest, TestPrecomputeFallback) {
+  //! Quantizers without precompute support (default kErrUnsupported) must
+  //! silently fall back to the per-list residual path: on/off searchers
+  //! produce identical results and recall is preserved.
+  base_num_ = 320;
+  prepare_clustered_data();
+  const size_t topk = 10;
+
+  Params params = make_turbo_params(true);
+  params.set(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, "PqInt4Quantizer");
+
+  IVFSearcher searcher;
+  IndexStorage::Pointer container;
+  build_dump_load(params, &searcher, &container);
+
+  Params off_params;
+  off_params.set(PARAM_IVF_SEARCHER_USE_PRECOMPUTE_TABLE, false);
+  IVFSearcher off_searcher;
+  IndexStorage::Pointer off_container;
+  load_dumped(&off_searcher, off_params, &off_container);
+
+  vector<vector<pair<uint64_t, float>>> on_results, off_results;
+  search_scored(&searcher, topk, &on_results);
+  search_scored(&off_searcher, topk, &off_results);
+
+  ASSERT_EQ(on_results.size(), off_results.size());
+  for (size_t q = 0; q < on_results.size(); ++q) {
+    ASSERT_EQ(on_results[q].size(), off_results[q].size());
+    for (size_t i = 0; i < topk; ++i) {
+      //! Both searchers take the identical per-list path: bit-exact match.
+      EXPECT_EQ(on_results[q][i].first, off_results[q][i].first);
+      EXPECT_FLOAT_EQ(on_results[q][i].second, off_results[q][i].second);
+    }
+  }
+
+  //! Loose floor: int4 residuals are much coarser than int8; the point of
+  //! this test is the on/off identity above, this only guards a breakdown.
+  EXPECT_GT(recall_with_searcher(&searcher, topk, false), 0.35f);
 }
 
 TEST_F(IVFTurboQuantizerTest, TestResidualRejectIp) {

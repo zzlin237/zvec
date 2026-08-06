@@ -83,6 +83,12 @@ static const std::string PARAM_IVF_SEARCHER_CONVERTER_REFORMER(
     "proxima.ivf.searcher.converter_reformer");
 static const std::string PARAM_IVF_SEARCHER_NPROBE(
     "proxima.ivf.searcher.nprobe");
+//! Enable the precomputed residual distance table (faiss-style term2/term3
+//! decomposition) for residual turbo-quantized indexes. Only takes effect
+//! in residual mode; falls back to the per-list residual path when the
+//! quantizer does not support it. Defaults to true.
+static const std::string PARAM_IVF_SEARCHER_USE_PRECOMPUTE_TABLE(
+    "proxima.ivf.searcher.use_precompute_table");
 
 // Constants
 static constexpr char const *kIPMetricName = "InnerProduct";
