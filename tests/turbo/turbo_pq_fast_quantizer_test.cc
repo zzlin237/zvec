@@ -18,10 +18,14 @@
 #include <limits>
 #include <random>
 #include <vector>
+#include <ailego/internal/cpu_features.h>
 #include <gtest/gtest.h>
 #include <zvec/ailego/container/params.h>
 #include <zvec/turbo/turbo.h>
+#include "distance/avx2/pq_quantizer_fast/pq_distance.h"
+#include "distance/avx512/pq_quantizer_fast/pq_distance.h"
 #include "distance/common/fast_scan_common.h"
+#include "distance/neon/pq_quantizer_fast/pq_distance.h"
 #include "distance/scalar/pq_quantizer_fast/pq_distance.h"
 #include "quantizer/pq_fast_quantizer/pq_fast_quantizer.h"
 #include "zvec/core/framework/index_factory.h"
@@ -239,10 +243,11 @@ TEST(PqFastQuantizer, PackCodesRoundtripOddChunk) {
 // Kernel correctness
 // ---------------------------------------------------------------------------
 
-// Dispatched (possibly SIMD) kernel must be bit-exact with the scalar one.
-// The pad LUT group of an odd num_chunk must be zero (packing contract);
-// pad code nibbles may hold arbitrary values.
-static void check_kernel_equivalence(size_t num_chunk, uint32_t seed) {
+// A FastScan kernel must be bit-exact with the scalar one. The pad LUT
+// group of an odd num_chunk must be zero (packing contract); pad code
+// nibbles may hold arbitrary values.
+static void check_kernel_equivalence_fn(zvec::turbo::PqFastScanFunc fn,
+                                        size_t num_chunk, uint32_t seed) {
   std::mt19937 gen(seed);
   std::uniform_int_distribution<int> byte_dist(0, 255);
 
@@ -258,13 +263,17 @@ static void check_kernel_equivalence(size_t num_chunk, uint32_t seed) {
   int32_t got[32];
   zvec::turbo::scalar::pq_adc_fast_scan(packed_codes.data(), packed_lut.data(),
                                         num_chunk, ref);
-  auto kernels = zvec::turbo::get_pq_kernels(
-      zvec::turbo::DataType::kInt4, zvec::turbo::QuantizeType::kPQFast);
-  ASSERT_TRUE(kernels.fast_scan);
-  kernels.fast_scan(packed_codes.data(), packed_lut.data(), num_chunk, got);
+  fn(packed_codes.data(), packed_lut.data(), num_chunk, got);
   for (size_t v = 0; v < 32; ++v) {
     ASSERT_EQ(ref[v], got[v]) << "num_chunk=" << num_chunk << " v=" << v;
   }
+}
+
+static void check_kernel_equivalence(size_t num_chunk, uint32_t seed) {
+  auto kernels = zvec::turbo::get_pq_kernels(
+      zvec::turbo::DataType::kInt4, zvec::turbo::QuantizeType::kPQFast);
+  ASSERT_TRUE(kernels.fast_scan);
+  check_kernel_equivalence_fn(kernels.fast_scan, num_chunk, seed);
 }
 
 TEST(PqFastScanKernel, DispatchedMatchesScalar) {
@@ -283,6 +292,40 @@ TEST(PqFastScanKernel, DispatchedMatchesScalarLargeChunk) {
   // > 256 sub-spaces exercises the u16 -> int32 spill path of the AVX2
   // kernel (accumulation would overflow u16 otherwise).
   check_kernel_equivalence(300, 7);
+}
+
+// Direct ISA coverage: call every implementation even when dispatch would
+// not pick it, so each one is proven bit-exact on a capable host. Sizes
+// span even / odd num_chunk, the single-pair tail of the AVX512 quad loop
+// and the u16 spill period.
+static void check_kernel_all_sizes(zvec::turbo::PqFastScanFunc fn,
+                                   uint32_t seed) {
+  check_kernel_equivalence_fn(fn, 8, seed);
+  check_kernel_equivalence_fn(fn, 16, seed + 1);
+  check_kernel_equivalence_fn(fn, 64, seed + 2);
+  check_kernel_equivalence_fn(fn, 1, seed + 3);
+  check_kernel_equivalence_fn(fn, 7, seed + 4);
+  check_kernel_equivalence_fn(fn, 33, seed + 5);
+  check_kernel_equivalence_fn(fn, 300, seed + 6);
+}
+
+TEST(PqFastScanKernel, Avx2MatchesScalar) {
+  check_kernel_all_sizes(zvec::turbo::avx2::pq_adc_fast_scan_avx2, 100);
+}
+
+TEST(PqFastScanKernel, Avx512MatchesScalar) {
+  const auto &flags = zvec::ailego::internal::CpuFeatures::static_flags_;
+  if (!flags.AVX512F || !flags.AVX512BW) {
+    GTEST_SKIP() << "host CPU lacks AVX512F / AVX512BW";
+  }
+  check_kernel_all_sizes(zvec::turbo::avx512::pq_adc_fast_scan_avx512, 200);
+}
+
+TEST(PqFastScanKernel, NeonMatchesScalar) {
+  if (!zvec::ailego::internal::CpuFeatures::static_flags_.NEON) {
+    GTEST_SKIP() << "host CPU lacks NEON";
+  }
+  check_kernel_all_sizes(zvec::turbo::neon::pq_adc_fast_scan_neon, 300);
 }
 
 TEST(PqFastScanKernel, DispatchTableIsFamilyExclusive) {

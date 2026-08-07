@@ -301,6 +301,31 @@ TEST_F(IVFTurboQuantizerTest, TestCosinePqInt8) {
   EXPECT_GT(recall, 0.5f);
 }
 
+// Fp32 as a turbo quantizer: full-precision codes, so the turbo path (build
+// -> dump -> quantizer restore from meta -> search) must be exact.
+TEST_F(IVFTurboQuantizerTest, TestL2Fp32Turbo) {
+  Params params;
+  params.set(PARAM_IVF_BUILDER_CENTROID_COUNT, "16");
+  params.set(PARAM_IVF_BUILDER_CLUSTER_CLASS, "KmeansCluster");
+  params.set(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, "Fp32Quantizer");
+
+  float recall = 0.0f;
+  recall_at(params, 10, false, &recall);
+  EXPECT_GT(recall, 0.99f);
+}
+
+TEST_F(IVFTurboQuantizerTest, TestCosineFp32Turbo) {
+  Params params;
+  params.set(PARAM_IVF_BUILDER_CENTROID_COUNT, "16");
+  params.set(PARAM_IVF_BUILDER_CLUSTER_CLASS, "KmeansCluster");
+  params.set(PARAM_IVF_BUILDER_CONVERTER_CLASS, "CosineNormalizeConverter");
+  params.set(PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS, "Fp32Quantizer");
+
+  float recall = 0.0f;
+  recall_at(params, 10, true, &recall);
+  EXPECT_GT(recall, 0.99f);
+}
+
 TEST_F(IVFTurboQuantizerTest, TestBatchSearchAndQuantizerRestore) {
   Params params;
   params.set(PARAM_IVF_BUILDER_CENTROID_COUNT, "16");

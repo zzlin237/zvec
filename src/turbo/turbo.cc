@@ -19,6 +19,7 @@
 #include "avx2/pq_quantizer_int4/pq_distance.h"
 #include "avx2/pq_quantizer_int8/pq_distance.h"
 #include "avx2/rotate/fht/fht.h"
+#include "avx512/pq_quantizer_fast/pq_distance.h"
 #include "avx512/pq_quantizer_int4/pq_distance.h"
 #include "avx512/pq_quantizer_int8/pq_distance.h"
 #include "avx512/rotate/fht/fht.h"
@@ -26,6 +27,7 @@
 #include "avx512_vnni/record_quantized_int8/squared_euclidean.h"
 #include "avx512_vnni/uniform_int8/quantize.h"
 #include "avx512_vnni/uniform_int8/squared_euclidean.h"
+#include "neon/pq_quantizer_fast/pq_distance.h"
 #include "neon/pq_quantizer_int4/pq_distance.h"
 #include "neon/pq_quantizer_int8/pq_distance.h"
 #include "neon/rotate/fht/fht.h"
@@ -205,9 +207,20 @@ PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
     }
     // Single-code ADC against the quantized LUT is scalar-only: the hot path
     // is the packed 32-vector block scan below. No SDC / batch ADC kernels.
+    if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
+        zvec::ailego::internal::CpuFeatures::static_flags_.AVX512BW &&
+        IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+      // _mm512_shuffle_epi8 needs AVX512BW on top of AVX512F.
+      return {scalar::pq_adc_u8, nullptr, nullptr,
+              avx512::pq_adc_fast_scan_avx512};
+    }
     if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX2 &&
         IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
       return {scalar::pq_adc_u8, nullptr, nullptr, avx2::pq_adc_fast_scan_avx2};
+    }
+    if (zvec::ailego::internal::CpuFeatures::static_flags_.NEON &&
+        IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+      return {scalar::pq_adc_u8, nullptr, nullptr, neon::pq_adc_fast_scan_neon};
     }
     return {scalar::pq_adc_u8, nullptr, nullptr, scalar::pq_adc_fast_scan};
   }

@@ -201,3 +201,58 @@ TEST(Fp32Quantizer, Score) {
     EXPECT_NEAR(d, expected, 1e-4) << "i=" << i;
   }
 }
+
+TEST(Fp32Quantizer, SerializeRoundtrip) {
+  const size_t DIMENSION = 12;
+
+  IndexMeta meta;
+  meta.set_meta(IndexMeta::DataType::DT_FP32, DIMENSION);
+  meta.set_metric("Cosine", 0, Params());
+
+  auto quantizer = IndexFactory::CreateQuantizer("Fp32Quantizer");
+  ASSERT_TRUE(quantizer);
+  Params params;
+  ASSERT_EQ(0, quantizer->init(meta, params));
+
+  // Serialize must produce a non-empty, header-prefixed blob so that the
+  // IVF / HNSW turbo persistence paths (turbo_quantizer_data_b64) can store
+  // and restore it.
+  std::string blob;
+  ASSERT_EQ(0, quantizer->serialize(&blob));
+  ASSERT_GT(blob.size(), sizeof(zvec::turbo::QuantizerSerHeader));
+
+  // Restore into a fresh instance (init before deserialize, mirroring
+  // IVFUtility::RestoreTurboQuantizer).
+  auto restored = IndexFactory::CreateQuantizer("Fp32Quantizer");
+  ASSERT_TRUE(!!restored);
+  ASSERT_EQ(0, restored->init(meta, params));
+  ASSERT_EQ(0, restored->deserialize(blob.data(), blob.size()));
+  EXPECT_EQ(quantizer->dim(), restored->dim());
+  EXPECT_EQ(quantizer->quantized_datapoint_vector_length(),
+            restored->quantized_datapoint_vector_length());
+
+  // The restored quantizer computes identical distances.
+  std::mt19937 gen(7);
+  std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+  std::vector<float> a(DIMENSION), b(DIMENSION);
+  for (auto &v : a) v = dist(gen);
+  for (auto &v : b) v = dist(gen);
+  std::string qa, qb;
+  IndexQueryMeta ometa;
+  ASSERT_EQ(
+      0, quantizer->quantize(
+             a.data(), IndexQueryMeta(IndexMeta::DataType::DT_FP32, DIMENSION),
+             &qa, &ometa));
+  ASSERT_EQ(
+      0, quantizer->quantize(
+             b.data(), IndexQueryMeta(IndexMeta::DataType::DT_FP32, DIMENSION),
+             &qb, &ometa));
+  EXPECT_FLOAT_EQ(quantizer->calc_distance_dp_query(qa.data(), qb.data()),
+                  restored->calc_distance_dp_query(qa.data(), qb.data()));
+
+  // Corrupted blobs are rejected.
+  std::string bad = blob;
+  bad[0] ^= 0xFF;
+  EXPECT_NE(0, restored->deserialize(bad.data(), bad.size()));
+  EXPECT_NE(0, restored->deserialize(blob.data(), 4));
+}

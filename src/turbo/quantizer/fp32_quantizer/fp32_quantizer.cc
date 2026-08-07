@@ -24,6 +24,17 @@
 namespace zvec {
 namespace turbo {
 
+// ---------------------------------------------------------------------------
+// Fp32 serialization payload (follows the QuantizerSerHeader).
+// Fp32 carries no codebook: the whole state is derivable from the IndexMeta
+// (dim + metric), so the payload only stores sanity-check scalars.
+// ---------------------------------------------------------------------------
+struct Fp32SerPayload {
+  uint32_t original_dim;
+  uint32_t extra_meta_size;
+  uint32_t reserved[2];
+};
+
 int Fp32Quantizer::init(const IndexMeta &meta,
                         const ailego::Params & /*params*/) {
   meta_ = meta;
@@ -184,6 +195,62 @@ void Fp32Quantizer::calc_distance_dp_query_batch_unquantized(
 float Fp32Quantizer::calc_distance_dp_dp(const void *dp1,
                                          const void *dp2) const {
   return calc_distance_dp_query(dp1, dp2);
+}
+
+// ---------------------------------------------------------------------------
+// Serialization
+// ---------------------------------------------------------------------------
+int Fp32Quantizer::serialize(std::string *out) const {
+  if (!out) return kErrUnsupported;
+
+  QuantizerSerHeader hdr{};
+  hdr.magic = kQuantizerMagic;
+  hdr.version = kQuantizerSerVersion;
+  hdr.quant_type = static_cast<uint16_t>(QuantizeType::kFp32);
+  hdr.dim = original_dim_;
+  hdr.metric = static_cast<uint32_t>(metric_from_name(meta_.metric_name()));
+  hdr.payload_size = static_cast<uint32_t>(sizeof(Fp32SerPayload));
+
+  Fp32SerPayload payload{};
+  payload.original_dim = original_dim_;
+  payload.extra_meta_size = extra_meta_size_;
+
+  out->clear();
+  out->append(reinterpret_cast<const char *>(&hdr), sizeof(hdr));
+  out->append(reinterpret_cast<const char *>(&payload), sizeof(payload));
+  return 0;
+}
+
+int Fp32Quantizer::deserialize(std::string &in) {
+  return deserialize(in.data(), in.size());
+}
+
+//! Contract: init(meta) must run before deserialize(). The metric policy
+//! (distance dispatch, extra_meta_size_) is taken from meta_ and is
+//! intentionally NOT restored from hdr.metric: load paths own the metric via
+//! the persisted IndexMeta. The payload only re-validates the scalar state.
+int Fp32Quantizer::deserialize(const void *data, size_t len) {
+  if (len < sizeof(QuantizerSerHeader) + sizeof(Fp32SerPayload)) {
+    return kErrUnsupported;
+  }
+
+  const char *ptr = reinterpret_cast<const char *>(data);
+  QuantizerSerHeader hdr;
+  std::memcpy(&hdr, ptr, sizeof(hdr));
+  ptr += sizeof(hdr);
+
+  if (hdr.magic != kQuantizerMagic) return kErrUnsupported;
+  if (hdr.version != kQuantizerSerVersion) return kErrUnsupported;
+  if (hdr.quant_type != static_cast<uint16_t>(QuantizeType::kFp32)) {
+    return kErrUnsupported;
+  }
+
+  Fp32SerPayload payload;
+  std::memcpy(&payload, ptr, sizeof(payload));
+
+  original_dim_ = payload.original_dim;
+  extra_meta_size_ = payload.extra_meta_size;
+  return 0;
 }
 
 INDEX_FACTORY_REGISTER_QUANTIZER(Fp32Quantizer);
