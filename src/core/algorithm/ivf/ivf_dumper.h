@@ -14,7 +14,7 @@
 #pragma once
 
 #include <core/quantizer/quantizer_params.h>
-#include <turbo/quantizer/common/packed_code_quantizer.h>
+#include <turbo/quantizer/common/pq_quantizer/packed_code_quantizer.h>
 #include <zvec/core/framework/index_framework.h>
 #include "metric/metric_params.h"
 #include "ivf_index_format.h"

@@ -21,8 +21,8 @@
 #include <zvec/core/framework/index_holder.h>
 #include <zvec/core/framework/index_meta.h>
 // Rooted at src/ so this header stays includable from core (ivf_entity).
-#include <turbo/quantizer/common/packed_code_quantizer.h>
-#include <turbo/quantizer/common/precompute_table_quantizer.h>
+#include <turbo/quantizer/common/pq_quantizer/packed_code_quantizer.h>
+#include <turbo/quantizer/common/pq_quantizer/precompute_table_quantizer.h>
 #include <turbo/quantizer/quantizer.h>
 
 namespace zvec {

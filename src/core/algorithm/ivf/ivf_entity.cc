@@ -14,7 +14,7 @@
 #include "ivf_entity.h"
 #include <cstring>
 #include <iostream>
-#include <turbo/quantizer/common/precompute_table_quantizer.h>
+#include <turbo/quantizer/common/pq_quantizer/precompute_table_quantizer.h>
 #include <zvec/ailego/utility/base64_helper.h>
 #include <zvec/ailego/utility/float_helper.h>
 #include "ivf_utility.h"

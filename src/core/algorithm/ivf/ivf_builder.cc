@@ -13,7 +13,7 @@
 // limitations under the License.
 #include "ivf_builder.h"
 #include <ailego/pattern/defer.h>
-#include <turbo/quantizer/common/packed_code_quantizer.h>
+#include <turbo/quantizer/common/pq_quantizer/packed_code_quantizer.h>
 #include <zvec/ailego/utility/base64_helper.h>
 #include <zvec/ailego/utility/float_helper.h>
 #include <zvec/ailego/utility/string_helper.h>
