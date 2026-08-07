@@ -110,9 +110,12 @@ class PqFastQuantizer : public Quantizer,
                                     const void *query,
                                     float *dist_list) const override;
 
-  void calc_distance_dp_query_batch_contiguous(const void *codes, int dp_num,
-                                               size_t stride, const void *query,
-                                               float *dist_list) const override;
+  //! PackedCodeQuantizer capability: native block scan over packed 32-vector
+  //! blocks (see pack_codes).  This is the read-side counterpart of packing
+  //! and the only path that runs the SIMD FastScan kernel.
+  void calc_distance_packed_block(const void *block, size_t num,
+                                  const void *query,
+                                  float *dist_list) const override;
 
   float calc_distance_dp_query_unquantized(const void *dp,
                                            const void *query) const override;

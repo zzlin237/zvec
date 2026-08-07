@@ -14,6 +14,7 @@
 #pragma once
 
 #include <core/quantizer/quantizer_params.h>
+#include <turbo/quantizer/common/packed_code_quantizer.h>
 #include <turbo/quantizer/quantizer.h>
 #include <zvec/core/framework/index_framework.h>
 #include "metric/metric_params.h"
@@ -259,13 +260,17 @@ class IVFEntity {
   //! Attach a turbo quantizer. When set, inverted codes are decoded with
   //! the quantizer instead of the metric-based distance calculator. The
   //! entity only downcasts it to discover the optional precomputed-table
-  //! capability (see precompute_quantizer_of() in ivf_entity.cc).
+  //! capability (see precompute_quantizer_of() in ivf_entity.cc) and the
+  //! packed-code capability (cached here once, so the search hot path
+  //! needs no cast/branch on quantizer type).
   //! @param index_meta original vector-space meta: quantizers may rewrite
   //!        their own meta to the code representation, so the residual
   //!        query meta must be derived from the index meta instead.
   void set_quantizer(zvec::turbo::Quantizer::Pointer quantizer,
                      const IndexMeta &index_meta) {
     quantizer_ = std::move(quantizer);
+    packed_quantizer_ = dynamic_cast<const zvec::turbo::PackedCodeQuantizer *>(
+        quantizer_.get());
     if (quantizer_ && use_residual_) {
       //! meta_ is a pseudo code meta; derive the residual query meta from
       //! the original vector-space meta (data type/dimension as trained).
@@ -422,6 +427,9 @@ class IVFEntity {
   IndexMeta meta_{};
   mutable IVFReformerWrapper reformer_{};
   zvec::turbo::Quantizer::Pointer quantizer_{};
+  //! Cached packed-code capability of quantizer_ (null for gather-style
+  //! quantizers); owned by quantizer_, refreshed in set_quantizer().
+  const zvec::turbo::PackedCodeQuantizer *packed_quantizer_{nullptr};
   mutable std::string quantized_query_{};  // LUT buffer for turbo quantizer
 
   //! Residual mode state

@@ -735,6 +735,9 @@ void PqFastQuantizer::calc_distance_dp_query_batch(const void *const *dp_list,
                                                    int dp_num,
                                                    const void *query,
                                                    float *dist_list) const {
+  // Gather-style contract: plain nibble codes addressed one pointer at a
+  // time (single-code ADC).  The SIMD FastScan kernel only runs over
+  // packed blocks, see calc_distance_packed_block.
   const uint8_t *q = reinterpret_cast<const uint8_t *>(query);
   for (int i = 0; i < dp_num; ++i) {
     float d = 0.0f;
@@ -743,13 +746,11 @@ void PqFastQuantizer::calc_distance_dp_query_batch(const void *const *dp_list,
   }
 }
 
-void PqFastQuantizer::calc_distance_dp_query_batch_contiguous(
-    const void *codes, int dp_num, size_t stride, const void *query,
-    float *dist_list) const {
-  // `codes` is one (or several back-to-back) packed 32-vector block(s)
-  // produced by pack_codes(); the per-vector stride is meaningless in the
-  // packed layout.
-  (void)stride;
+void PqFastQuantizer::calc_distance_packed_block(const void *block, size_t num,
+                                                 const void *query,
+                                                 float *dist_list) const {
+  // `block` is one (or several back-to-back) packed 32-vector block(s)
+  // produced by pack_codes().
   const uint8_t *q = reinterpret_cast<const uint8_t *>(query);
   float delta = 0.0f;
   float bias = 0.0f;
@@ -757,17 +758,17 @@ void PqFastQuantizer::calc_distance_dp_query_batch_contiguous(
   std::memcpy(&delta, tail, sizeof(float));
   std::memcpy(&bias, tail + sizeof(float), sizeof(float));
 
-  const uint8_t *block = reinterpret_cast<const uint8_t *>(codes);
+  const uint8_t *packed = reinterpret_cast<const uint8_t *>(block);
   const size_t block_bytes = fast_scan_packed_block_size(num_chunk_);
   int32_t accu32[kFastScanBlockSize];
-  int done = 0;
-  while (done < dp_num) {
-    const int n = std::min(static_cast<int>(kFastScanBlockSize), dp_num - done);
-    scan_fn_(block, q, num_chunk_, accu32);
-    for (int i = 0; i < n; ++i) {
+  size_t done = 0;
+  while (done < num) {
+    const size_t n = std::min<size_t>(kFastScanBlockSize, num - done);
+    scan_fn_(packed, q, num_chunk_, accu32);
+    for (size_t i = 0; i < n; ++i) {
       dist_list[done + i] = static_cast<float>(accu32[i]) * delta + bias;
     }
-    block += block_bytes;
+    packed += block_bytes;
     done += n;
   }
 }
@@ -904,8 +905,9 @@ DistanceImpl PqFastQuantizer::distance(const void *query,
   DistanceFunc adc_func = adc_fn_;
 
   // FastScan has no per-pointer batch kernel: its fast path scans packed
-  // 32-vector blocks (calc_distance_dp_query_batch_contiguous).  Use the
-  // 3-arg constructor; DistanceImpl::batch() falls back to the scalar path.
+  // 32-vector blocks (PackedCodeQuantizer::calc_distance_packed_block).
+  // Use the 3-arg constructor; DistanceImpl::batch() falls back to the
+  // scalar path.
 
   // The query is already quantized (packed u8 LUT + delta/bias tail) by the
   // caller; copy it directly.

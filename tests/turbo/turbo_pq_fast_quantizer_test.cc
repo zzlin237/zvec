@@ -400,7 +400,7 @@ TEST(PqFastQuantizer, QuantizedAdcVsExactAdc) {
   }
 }
 
-TEST(PqFastQuantizer, ContiguousBatchMatchesSingle) {
+TEST(PqFastQuantizer, PackedBlockMatchesSingle) {
   const size_t DIM = 32;
   const size_t NSQ = 8;
   const size_t COUNT = 300;
@@ -442,11 +442,11 @@ TEST(PqFastQuantizer, ContiguousBatchMatchesSingle) {
                               n, code_len, packed.data() + b * block_bytes));
   }
 
-  // Whole range in one call (multi-block) plus per-block calls.
+  // Whole range in one call (multi-block) through the PackedCodeQuantizer
+  // capability interface.
   std::vector<float> batch_dist(COUNT);
-  quantizer->calc_distance_dp_query_batch_contiguous(
-      packed.data(), static_cast<int>(COUNT), code_len, qquery.data(),
-      batch_dist.data());
+  packer->calc_distance_packed_block(packed.data(), COUNT, qquery.data(),
+                                     batch_dist.data());
 
   for (size_t i = 0; i < COUNT; ++i) {
     float single = quantizer->calc_distance_dp_query(

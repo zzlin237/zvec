@@ -896,16 +896,33 @@ float IVFEntity::compute_centroid_distance(size_t inverted_list_id) const {
 }
 
 //! Compute distances of a block of codes against a quantized query (LUT).
-//! Gather-style quantizers keep codes back to back with element_size()
-//! stride (base-class default); packed-code quantizers scan the block
-//! natively in their interleaved layout.
+//! Packed-code quantizers (FastScan) scan the block natively in their
+//! interleaved layout through the cached capability pointer; gather-style
+//! quantizers build a pointer array over the contiguous block and forward
+//! to the generic batch interface.
 void IVFEntity::quantized_block_distance(const void *query,
                                          const void *block_data,
                                          size_t vecs_count,
                                          float *distances) const {
-  quantizer_->calc_distance_dp_query_batch_contiguous(
-      block_data, static_cast<int>(vecs_count), meta_.element_size(), query,
-      distances);
+  if (packed_quantizer_) {
+    packed_quantizer_->calc_distance_packed_block(block_data, vecs_count, query,
+                                                  distances);
+    return;
+  }
+  //! One storage block holds at most kMaxBlockVectors codes (block_vector
+  //! count is validated to be in [1..32] at build time), so the gather
+  //! pointer array stays on the stack.
+  constexpr size_t kMaxBlockVectors = 32;
+  ailego_assert_with(vecs_count <= kMaxBlockVectors,
+                     "block too large for stack gather list");
+  const void *dp_list[kMaxBlockVectors];
+  const char *base = static_cast<const char *>(block_data);
+  const size_t stride = meta_.element_size();
+  for (size_t i = 0; i < vecs_count; ++i) {
+    dp_list[i] = base + i * stride;
+  }
+  quantizer_->calc_distance_dp_query_batch(
+      dp_list, static_cast<int>(vecs_count), query, distances);
 }
 
 int IVFEntity::search(size_t inverted_list_id, const void *query,
@@ -1335,6 +1352,8 @@ IVFEntity::Pointer IVFEntity::clone(const IVFEntity::Pointer &entity) const {
   entity->meta_ = this->meta_;
   entity->reformer_ = this->reformer_;
   entity->quantizer_ = this->quantizer_;
+  //! Same quantizer object: carry over the cached capability pointer.
+  entity->packed_quantizer_ = this->packed_quantizer_;
   entity->calculator_ = this->calculator_;
   entity->header_ = this->header_;
   entity->container_ = this->container_;

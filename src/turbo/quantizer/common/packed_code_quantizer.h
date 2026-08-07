@@ -24,16 +24,25 @@ namespace turbo {
 //! so storage layers discover it via dynamic_cast: a successful cast both
 //! requires packing and provides the packer.  Storage layers that cannot
 //! honor packing must not use such a quantizer.
+//!
+//! The write side (pack_codes) and the read side (calc_distance_packed_block)
+//! share the same block layout contract; generic gather-style quantizers
+//! keep using Quantizer::calc_distance_dp_query_batch.
 class PackedCodeQuantizer {
  public:
   virtual ~PackedCodeQuantizer() = default;
 
   //! Pack up to 32 plain codes (laid out `stride` bytes apart) into one
-  //! packed block consumable by
-  //! Quantizer::calc_distance_dp_query_batch_contiguous.  Slots beyond
+  //! packed block consumable by calc_distance_packed_block.  Slots beyond
   //! `num` are zero-filled; `out` must hold one full packed block.
   virtual int pack_codes(const void *codes, size_t num, size_t stride,
                          void *out) const = 0;
+
+  //! Scan one or several back-to-back packed blocks (produced by
+  //! pack_codes) against a quantized query, writing `num` distances.
+  virtual void calc_distance_packed_block(const void *block, size_t num,
+                                          const void *query,
+                                          float *dist_list) const = 0;
 };
 
 }  // namespace turbo
