@@ -52,6 +52,9 @@ int PqInt8Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
   } else {
     return kErrUnsupported;
   }
+  const QuantizeType input_quantize_type = input_data_type_ == DataType::kFp16
+                                               ? QuantizeType::kFp16
+                                               : QuantizeType::kFp32;
 
   uint32_t d = meta.dimension();
   original_dim_ = d;
@@ -66,17 +69,17 @@ int PqInt8Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
   }
 
   num_chunk_ = nsq;
-  sub_dim_ = d / nsq;
+  chunk_dim_ = d / nsq;
 
   // Pre-allocate centroids as raw bytes in the original data type.
-  centroids_.resize(static_cast<size_t>(num_chunk_) * kNumCentroids * sub_dim_ *
-                    element_size());
+  centroids_.resize(static_cast<size_t>(num_chunk_) * kNumCentroids *
+                    chunk_dim_ * element_size());
 
   // Dispatch ISA kernels (scalar only for now).
   auto pq_k = get_pq_kernels(DataType::kInt8);
-  adc_fn_ = pq_k.adc_distance;
-  sdc_fn_ = pq_k.sdc_distance;
-  batch_adc_fn_ = pq_k.batch_adc_distance;
+  adc_fn_ = pq_k.asymmetric_distance;
+  sdc_fn_ = pq_k.symmetric_distance;
+  batch_adc_fn_ = pq_k.batch_asymmetric_distance;
 
   // Resolve the configured metric type.  The metric is owned by the caller's
   // IndexMeta; serialize() stamps it into the header only as a sanity check
@@ -87,19 +90,23 @@ int PqInt8Quantizer::init(const IndexMeta &meta, const ailego::Params &params) {
   // space regardless of the search metric.  Data type matches input.
   l2_batch_fn_ =
       get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
-                              QuantizeType::kDefault, CpuArchType::kAuto);
+                              input_quantize_type, CpuArchType::kAuto);
 
   // Cosine = normalize + L2: after normalization cosine distance is monotonic
   // with squared-Euclidean, so the search LUT reuses SquaredEuclidean.
   if (meta_.metric_name() == "Cosine") {
     batch_fn_ =
         get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
-                                QuantizeType::kDefault, CpuArchType::kAuto);
+                                input_quantize_type, CpuArchType::kAuto);
     extra_meta_size_ = kExtraMetaSizeCosine;
     meta_.set_extra_meta_size(extra_meta_size_);
   } else {
     batch_fn_ = get_batch_distance_func(
-        mt, input_data_type_, QuantizeType::kDefault, CpuArchType::kAuto);
+        mt, input_data_type_, input_quantize_type, CpuArchType::kAuto);
+  }
+
+  if (!adc_fn_ || !sdc_fn_ || !batch_adc_fn_ || !l2_batch_fn_ || !batch_fn_) {
+    return kErrUnsupported;
   }
 
   // Read optional training params (aligned with multi_chunk_cluster)
@@ -128,7 +135,7 @@ template <typename T>
 void PqInt8Quantizer::train_chunk(const T *data, size_t num, size_t stride,
                                   size_t sub_idx) {
   const size_t k = kNumCentroids;
-  const size_t d = sub_dim_;
+  const size_t d = chunk_dim_;
   uint8_t *centroids_m =
       centroids_.data() + static_cast<size_t>(sub_idx) * k * d * sizeof(T);
 
@@ -301,7 +308,7 @@ int PqInt8Quantizer::train(IndexHolder::Pointer holder) {
 
 void PqInt8Quantizer::build_centroid_ptrs_cache() {
   const size_t k = kNumCentroids;
-  const size_t d = sub_dim_;
+  const size_t d = chunk_dim_;
   const size_t type_sz = element_size();
   const uint8_t *base = centroids_.data();
 
@@ -317,7 +324,7 @@ void PqInt8Quantizer::build_centroid_ptrs_cache() {
 
 void PqInt8Quantizer::compute_dist_table() {
   const size_t k = kNumCentroids;
-  const size_t d = sub_dim_;
+  const size_t d = chunk_dim_;
   dist_table_.resize(static_cast<size_t>(num_chunk_) * k * k, 0.0f);
 
   // Centroid-to-centroid distances via the metric-aware batch_fn_:
@@ -395,12 +402,12 @@ void PqInt8Quantizer::quantize_data(const void *input, void *output) const {
 
   for (uint32_t m = 0; m < num_chunk_; ++m) {
     const void *sub_vec =
-        vec_bytes + static_cast<size_t>(m) * sub_dim_ * elem_size;
+        vec_bytes + static_cast<size_t>(m) * chunk_dim_ * elem_size;
     const auto &centroid_ptrs = centroid_ptrs_cache_[m];
 
     // Compute L2 distances from this sub-vector to all 256 centroids.
     l2_batch_fn_(const_cast<const void **>(centroid_ptrs.data()), sub_vec,
-                 kNumCentroids, sub_dim_, dists);
+                 kNumCentroids, chunk_dim_, dists);
 
     // Argmin: find nearest centroid.  Seed with +infinity instead of
     // dists[0]: k-means may leave dead centroids that yield NaN distances,
@@ -479,9 +486,9 @@ void PqInt8Quantizer::quantize_query(const void *input, void *output) const {
   for (uint32_t m = 0; m < num_chunk_; ++m) {
     const auto &centroid_ptrs = centroid_ptrs_cache_[m];
     const void *sub_query =
-        query_bytes + static_cast<size_t>(m) * sub_dim_ * elem_size;
+        query_bytes + static_cast<size_t>(m) * chunk_dim_ * elem_size;
     batch_fn_(const_cast<const void **>(centroid_ptrs.data()), sub_query,
-              kNumCentroids, sub_dim_, lut + m * kNumCentroids);
+              kNumCentroids, chunk_dim_, lut + m * kNumCentroids);
   }
 
   // Cosine: the LUT holds ||q_m - c_m[j]||^2 on L2-normalized vectors, and
@@ -588,7 +595,7 @@ int PqInt8Quantizer::dequantize(const void *in, const IndexQueryMeta &qmeta,
   // Reconstruct by concatenating the selected centroids per chunk,
   // converting from the original data type to float.
   const size_t k = kNumCentroids;
-  const size_t d = sub_dim_;
+  const size_t d = chunk_dim_;
   const uint32_t elem_size = element_size();
 
   for (uint32_t m = 0; m < num_chunk_; ++m) {
@@ -638,7 +645,8 @@ DistanceImpl PqInt8Quantizer::distance(const void *query,
                                        const IndexQueryMeta &qmeta) const {
   (void)qmeta;
 
-  // ADC: PqAdcDistanceFunc matches DistanceFunc directly (no lambda needed).
+  // ADC: CodebookAsymmetricDistanceFunc matches DistanceFunc directly (no
+  // lambda needed).
   DistanceFunc adc_func = adc_fn_;
 
   // Batch ADC: ISA-dispatched batch4 kernel, no lambda needed.
@@ -683,13 +691,14 @@ int PqInt8Quantizer::serialize(std::string *out) const {
   hdr.magic = kQuantizerMagic;
   hdr.version = kQuantizerSerVersion;
   hdr.quant_type = static_cast<uint32_t>(QuantizeType::kPQ);
+  hdr.data_type = static_cast<uint16_t>(DataType::kInt8);
   hdr.dim = original_dim_;
   hdr.metric = static_cast<uint32_t>(metric_from_name(meta_.metric_name()));
 
   PqInt8SerPayload payload{};
   payload.original_dim = original_dim_;
   payload.num_chunk = num_chunk_;
-  payload.chunk_dim = sub_dim_;
+  payload.chunk_dim = chunk_dim_;
   payload.num_centroids = kNumCentroids;
   payload.use_zero_mean = use_zero_mean_ ? 1 : 0;
   payload.input_data_type = static_cast<uint8_t>(input_data_type_);
@@ -738,6 +747,9 @@ int PqInt8Quantizer::deserialize(const void *data, size_t len) {
   if (hdr.quant_type != static_cast<uint16_t>(QuantizeType::kPQ)) {
     return kErrUnsupported;
   }
+  if (hdr.data_type != static_cast<uint16_t>(DataType::kInt8)) {
+    return kErrUnsupported;
+  }
 
   PqInt8SerPayload payload;
   std::memcpy(&payload, ptr, sizeof(payload));
@@ -745,7 +757,7 @@ int PqInt8Quantizer::deserialize(const void *data, size_t len) {
 
   original_dim_ = payload.original_dim;
   num_chunk_ = payload.num_chunk;
-  sub_dim_ = payload.chunk_dim;
+  chunk_dim_ = payload.chunk_dim;
 
   // Restore input data type.  Old payloads have input_data_type == 0
   // (was reserved), which maps to kInt4 -- treat as kFp32 for compat.
@@ -756,10 +768,17 @@ int PqInt8Quantizer::deserialize(const void *data, size_t len) {
   } else {
     input_data_type_ = static_cast<DataType>(payload.input_data_type);
   }
+  if (input_data_type_ != DataType::kFp16 &&
+      input_data_type_ != DataType::kFp32) {
+    return kErrUnsupported;
+  }
+  const QuantizeType input_quantize_type = input_data_type_ == DataType::kFp16
+                                               ? QuantizeType::kFp16
+                                               : QuantizeType::kFp32;
 
   // Restore centroids (raw bytes in original data type).
   size_t centroids_bytes = static_cast<size_t>(num_chunk_) * kNumCentroids *
-                           sub_dim_ * element_size();
+                           chunk_dim_ * element_size();
   centroids_.resize(centroids_bytes);
   std::memcpy(centroids_.data(), ptr, centroids_bytes);
   ptr += centroids_bytes;
@@ -777,26 +796,30 @@ int PqInt8Quantizer::deserialize(const void *data, size_t len) {
 
   // Re-dispatch kernels.
   auto pq_k = get_pq_kernels(DataType::kInt8);
-  adc_fn_ = pq_k.adc_distance;
-  sdc_fn_ = pq_k.sdc_distance;
-  batch_adc_fn_ = pq_k.batch_adc_distance;
+  adc_fn_ = pq_k.asymmetric_distance;
+  sdc_fn_ = pq_k.symmetric_distance;
+  batch_adc_fn_ = pq_k.batch_asymmetric_distance;
 
   // L2-only batch distance for encoding (always L2 regardless of metric).
   l2_batch_fn_ =
       get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
-                              QuantizeType::kDefault, CpuArchType::kAuto);
+                              input_quantize_type, CpuArchType::kAuto);
 
   // Metric-aware batch distance for search LUT.  Cosine = normalize + L2,
   // so it uses SquaredEuclidean (same as encoding), not IP.
   if (meta_.metric_name() == "Cosine") {
     batch_fn_ =
         get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
-                                QuantizeType::kDefault, CpuArchType::kAuto);
+                                input_quantize_type, CpuArchType::kAuto);
     extra_meta_size_ = kExtraMetaSizeCosine;
   } else {
-    batch_fn_ = get_batch_distance_func(
-        metric_from_name(meta_.metric_name()), input_data_type_,
-        QuantizeType::kDefault, CpuArchType::kAuto);
+    batch_fn_ = get_batch_distance_func(metric_from_name(meta_.metric_name()),
+                                        input_data_type_, input_quantize_type,
+                                        CpuArchType::kAuto);
+  }
+
+  if (!adc_fn_ || !sdc_fn_ || !batch_adc_fn_ || !l2_batch_fn_ || !batch_fn_) {
+    return kErrUnsupported;
   }
 
   // Set output meta: the quantized representation is INT8 codes with
