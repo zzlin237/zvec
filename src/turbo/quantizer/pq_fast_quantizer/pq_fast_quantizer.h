@@ -58,9 +58,7 @@ class PqFastQuantizer : public Quantizer,
                         public PackedCodeQuantizer,
                         public PrecomputeTableQuantizer {
  public:
-  PqFastQuantizer() {
-    type_ = QuantizeType::kPQFast;
-  }
+  PqFastQuantizer() : Quantizer(QuantizeType::kPQFast) {}
 
   ~PqFastQuantizer() override = default;
 

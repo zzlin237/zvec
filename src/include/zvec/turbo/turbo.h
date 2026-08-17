@@ -50,11 +50,9 @@ using BatchDistanceFunc = std::function<void(
 using QueryPreprocessFunc =
     zvec::ailego::DistanceBatch::DistanceBatchQueryPreprocessFunc;
 
-// Uniform int8 quantize kernel: fp32 -> int8 with a global affine transform:
-//   out[i] = clip(round(in[i] * scale + bias), 0, 127)
-// This signature is specific to the uniform-int8 quantizer and is NOT a
-// generic quantize contract. Raw function pointer (rather than std::function)
-// to avoid indirect-call overhead on the per-record / per-query hot path.
+// Uniform UINT7 quantize kernel: fp32 -> int8 code in [0, 127] with a global
+// affine transform. Raw function pointer (rather than std::function) avoids
+// indirect-call overhead on the per-record / per-query hot path.
 using UniformQuantizeFunc = void (*)(const float *in, size_t dim, float scale,
                                      float bias, int8_t *out);
 
@@ -139,14 +137,17 @@ enum class DataType {
 };
 
 enum class QuantizeType {
-  kDefault,
-  kUniform,
+  // Explicit values: type ids are persisted in serialized headers
+  // (QuantizerSerHeader.quant_type); 0 was the retired kDefault.
+  kUniform = 1,  // Uniform uint7: codes are restricted to [0, 127].
   kRecord,
   kFp16,
   kFp32,
   kPQ,
   kRabit,
-  kPQFast  //!< 4-bit PQ with FastScan (packed codes + SIMD in-register LUT)
+  kPQFast,        //!< 4-bit PQ with FastScan (packed codes + SIMD in-register
+                  //!< LUT)
+  kUniformUint8,  // Uniform uint8: codes cover the full [0, 255] range.
 };
 
 enum class RotateType : uint16_t {
@@ -181,6 +182,21 @@ ZVEC_TURBO_API QueryPreprocessFunc get_query_preprocess_func(
     MetricType metric_type, DataType data_type, QuantizeType quantize_type,
     CpuArchType cpu_arch_type = CpuArchType::kAuto);
 
+// All kernels of a single dispatched kernel family. `preprocess` is non-null
+// when the batch kernel requires the query to be preprocessed first (e.g.
+// the AVX512-VNNI int8 kernels expect a +128 uint8-shifted query).
+struct DistanceKernels {
+  DistanceFunc dist{};
+  BatchDistanceFunc batch{};
+  QueryPreprocessFunc preprocess = nullptr;
+};
+
+// Aggregate lookup: resolves dist/batch/preprocess in one pass so callers
+// cannot pair functions from different kernel families.
+ZVEC_TURBO_API DistanceKernels get_distance_kernels(
+    MetricType metric_type, DataType data_type, QuantizeType quantize_type,
+    CpuArchType cpu_arch_type = CpuArchType::kAuto);
+
 // Returns the SIMD kernel for the uniform quantizer on the current CPU for
 // the given output data_type, or nullptr if no SIMD implementation is
 // available (callers must keep a scalar fallback). This is a
@@ -191,14 +207,14 @@ ZVEC_TURBO_API UniformQuantizeFunc
 get_uniform_quantize_func(DataType data_type);
 
 // Returns rotator kernels dispatched for the current CPU.
-RotatorKernels get_rotator_kernels(
+ZVEC_TURBO_API RotatorKernels get_rotator_kernels(
     RotateType rotate_type, CpuArchType cpu_arch_type = CpuArchType::kAuto);
 
 // Returns all PQ kernels dispatched for the given data_type, quantize_type
 // and CPU arch.  See PqKernels for which fields each family populates;
 // unsupported combinations yield an all-null struct.
-PqKernels get_pq_kernels(DataType data_type,
-                         QuantizeType quantize_type = QuantizeType::kPQ,
-                         CpuArchType cpu_arch_type = CpuArchType::kAuto);
+ZVEC_TURBO_API PqKernels get_pq_kernels(
+    DataType data_type, QuantizeType quantize_type = QuantizeType::kPQ,
+    CpuArchType cpu_arch_type = CpuArchType::kAuto);
 
 }  // namespace zvec::turbo

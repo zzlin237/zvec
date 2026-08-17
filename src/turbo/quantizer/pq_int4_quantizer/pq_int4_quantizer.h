@@ -42,9 +42,7 @@ using namespace zvec::core;
 //! distance table).
 class PqInt4Quantizer : public Quantizer, public PrecomputeTableQuantizer {
  public:
-  PqInt4Quantizer() {
-    type_ = QuantizeType::kPQ;
-  }
+  PqInt4Quantizer() : Quantizer(QuantizeType::kPQ) {}
 
   ~PqInt4Quantizer() override = default;
 

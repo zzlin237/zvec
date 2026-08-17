@@ -43,6 +43,10 @@ struct PqFastSerPayload {
 };
 
 void PqFastQuantizer::setup_functions() {
+  const QuantizeType input_quantize_type = input_data_type_ == DataType::kFp16
+                                               ? QuantizeType::kFp16
+                                               : QuantizeType::kFp32;
+
   // ISA-dispatched FastScan kernels: the packed block scan plus the scalar
   // single-code ADC against a quantized LUT.
   auto pq_k = get_pq_kernels(DataType::kInt4, QuantizeType::kPQFast);
@@ -53,7 +57,7 @@ void PqFastQuantizer::setup_functions() {
   // codebook is trained/encoded in L2 space regardless of the search metric.
   l2_batch_fn_ =
       get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
-                              QuantizeType::kDefault, CpuArchType::kAuto);
+                              input_quantize_type, CpuArchType::kAuto);
 
   // Metric-aware batch distance for the search LUT.  Cosine = normalize +
   // L2: after normalization cosine distance is monotonic with
@@ -62,20 +66,20 @@ void PqFastQuantizer::setup_functions() {
   if (meta_.metric_name() == "Cosine") {
     batch_fn_ =
         get_batch_distance_func(MetricType::kSquaredEuclidean, input_data_type_,
-                                QuantizeType::kDefault, CpuArchType::kAuto);
+                                input_quantize_type, CpuArchType::kAuto);
     extra_meta_size_ = kExtraMetaSizeCosine;
     meta_.set_extra_meta_size(extra_meta_size_);
   } else {
     batch_fn_ = get_batch_distance_func(
         metric_from_name(meta_.metric_name()), input_data_type_,
-        QuantizeType::kDefault, CpuArchType::kAuto);
+        input_quantize_type, CpuArchType::kAuto);
   }
 
   // Inner-product batch distance for the precomputed residual tables.  The
   // table terms are pure inner products regardless of the search metric.
   ip_batch_fn_ =
       get_batch_distance_func(MetricType::kInnerProduct, input_data_type_,
-                              QuantizeType::kDefault, CpuArchType::kAuto);
+                              input_quantize_type, CpuArchType::kAuto);
 }
 
 int PqFastQuantizer::init(const IndexMeta &meta, const ailego::Params &params) {
@@ -938,6 +942,7 @@ int PqFastQuantizer::serialize(std::string *out) const {
   hdr.quant_type = static_cast<uint32_t>(QuantizeType::kPQFast);
   hdr.dim = original_dim_;
   hdr.metric = static_cast<uint32_t>(metric_from_name(meta_.metric_name()));
+  hdr.data_type = static_cast<uint16_t>(DataType::kInt4);
 
   PqFastSerPayload payload{};
   payload.original_dim = original_dim_;
