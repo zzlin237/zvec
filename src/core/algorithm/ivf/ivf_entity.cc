@@ -356,7 +356,7 @@ void IVFEntity::IVFReformerWrapper::normalize(size_t qidx,
       ailego_assert_with(qidx < scales_.size(), "invalid index");
       {
         auto reciprocal = 1.0f / scales_[qidx];
-        for (auto &it : *heap) {
+        for (auto &it : heap->mutable_container()) {
           *it.mutable_score() *= reciprocal;
         }
       }
@@ -364,7 +364,7 @@ void IVFEntity::IVFReformerWrapper::normalize(size_t qidx,
 
     case kReformerTpInt8:
     case kReformerTpInt4:
-      for (auto &it : *heap) {
+      for (auto &it : heap->mutable_container()) {
         *it.mutable_score() *= reciprocal_;
       }
       break;
@@ -388,7 +388,7 @@ void IVFEntity::IVFReformerWrapper::normalize(size_t qidx, const void *query,
       ailego_assert_with(qidx < scales_.size(), "invalid index");
       {
         auto reciprocal = 1.0f / scales_[qidx];
-        for (auto &it : *heap) {
+        for (auto &it : heap->mutable_container()) {
           *it.mutable_score() *= reciprocal;
         }
       }
@@ -396,13 +396,13 @@ void IVFEntity::IVFReformerWrapper::normalize(size_t qidx, const void *query,
 
     case kReformerTpInt8:
     case kReformerTpInt4:
-      for (auto &it : *heap) {
+      for (auto &it : heap->mutable_container()) {
         *it.mutable_score() *= reciprocal_;
       }
       break;
 
     case kReformerTpDefault:
-      reformer_->normalize(query, qmeta, *heap);
+      reformer_->normalize(query, qmeta, heap->mutable_container());
       break;
 
     default:

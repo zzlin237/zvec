@@ -81,6 +81,11 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
   param_.m = std::max(5, std::min(1024, param_.m));
 
   if (is_sparse_) {
+    // the original vector provider is only supported by the dense streamer
+    if (ailego_unlikely(param_.provider != nullptr)) {
+      LOG_ERROR("Provider is not supported by sparse HNSW index");
+      return core::IndexError_Unsupported;
+    }
     proxima_index_params_.set(core::PARAM_HNSW_SPARSE_STREAMER_EFCONSTRUCTION,
                               param_.ef_construction);
     proxima_index_params_.set(
@@ -140,6 +145,14 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
         break;
     }
     streamer_ = core::IndexFactory::CreateStreamer("HnswStreamer");
+    // build graph from the original vectors of provider when it is set
+    if (param_.provider && streamer_) {
+      int ret = streamer_->set_provider(param_.provider, param_.provider_meta);
+      if (ailego_unlikely(ret != 0)) {
+        LOG_ERROR("Failed to set provider to streamer, ret=%d", ret);
+        return ret;
+      }
+    }
   }
 
   if (ailego_unlikely(!streamer_)) {
@@ -179,8 +192,10 @@ int HNSWIndex::_prepare_for_search(
 
   context->set_topk(hnsw_search_param->topk);
   context->set_fetch_vector(hnsw_search_param->fetch_vector);
-  if (hnsw_search_param->filter) {
+  if (hnsw_search_param->filter && hnsw_search_param->filter->is_valid()) {
     context->set_filter(std::move(*hnsw_search_param->filter));
+  } else {
+    context->reset_filter();
   }
   if (hnsw_search_param->radius > 0.0f) {
     context->set_threshold(hnsw_search_param->radius);

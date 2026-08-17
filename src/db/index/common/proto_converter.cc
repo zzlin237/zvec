@@ -87,6 +87,28 @@ proto::HnswRabitqIndexParams ProtoConverter::ToPb(
   return params_pb;
 }
 
+// IvfRabitqIndexParams
+IvfRabitqIndexParams::OPtr ProtoConverter::FromPb(
+    const proto::IvfRabitqIndexParams &params_pb) {
+  auto params = std::make_shared<IvfRabitqIndexParams>(
+      MetricTypeCodeBook::Get(params_pb.base().metric_type()),
+      params_pb.nlist(), params_pb.total_bits(), params_pb.sample_count());
+  return params;
+}
+
+proto::IvfRabitqIndexParams ProtoConverter::ToPb(
+    const IvfRabitqIndexParams *params) {
+  proto::IvfRabitqIndexParams params_pb;
+  params_pb.mutable_base()->set_metric_type(
+      MetricTypeCodeBook::Get(params->metric_type()));
+  params_pb.mutable_base()->set_quantize_type(
+      QuantizeTypeCodeBook::Get(params->quantize_type()));
+  params_pb.set_nlist(params->nlist());
+  params_pb.set_total_bits(params->total_bits());
+  params_pb.set_sample_count(params->sample_count());
+  return params_pb;
+}
+
 // FlatIndexParams
 FlatIndexParams::OPtr ProtoConverter::FromPb(
     const proto::FlatIndexParams &params_pb) {
@@ -134,13 +156,14 @@ proto::IVFIndexParams ProtoConverter::ToPb(const IVFIndexParams *params) {
 // VamanaIndexParams
 VamanaIndexParams::OPtr ProtoConverter::FromPb(
     const proto::VamanaIndexParams &params_pb) {
-  auto qp = ReadQuantizerParam(params_pb.base().quantizer_param());
+  bool enable_rotate = params_pb.base().quantizer_param().enable_rotate();
   return std::make_shared<VamanaIndexParams>(
       MetricTypeCodeBook::Get(params_pb.base().metric_type()),
       params_pb.max_degree(), params_pb.search_list_size(), params_pb.alpha(),
       params_pb.saturate_graph(), params_pb.use_contiguous_memory(),
       params_pb.use_id_map(),
-      QuantizeTypeCodeBook::Get(params_pb.base().quantize_type()), qp);
+      QuantizeTypeCodeBook::Get(params_pb.base().quantize_type()),
+      QuantizerParam(enable_rotate), params_pb.two_pass_build());
 }
 
 proto::VamanaIndexParams ProtoConverter::ToPb(const VamanaIndexParams *params) {
@@ -157,6 +180,7 @@ proto::VamanaIndexParams ProtoConverter::ToPb(const VamanaIndexParams *params) {
   params_pb.set_saturate_graph(params->saturate_graph());
   params_pb.set_use_contiguous_memory(params->use_contiguous_memory());
   params_pb.set_use_id_map(params->use_id_map());
+  params_pb.set_two_pass_build(params->two_pass_build());
   return params_pb;
 }
 
@@ -292,6 +316,8 @@ IndexParams::Ptr ProtoConverter::FromPb(const proto::IndexParams &params_pb) {
     return ProtoConverter::FromPb(params_pb.flat());
   } else if (params_pb.has_hnsw_rabitq()) {
     return ProtoConverter::FromPb(params_pb.hnsw_rabitq());
+  } else if (params_pb.has_ivf_rabitq()) {
+    return ProtoConverter::FromPb(params_pb.ivf_rabitq());
   } else if (params_pb.has_diskann()) {
     return ProtoConverter::FromPb(params_pb.diskann());
   } else if (params_pb.has_vamana()) {
@@ -358,6 +384,15 @@ proto::IndexParams ProtoConverter::ToPb(const IndexParams *params) {
       if (hnsw_rabitq_params) {
         params_pb.mutable_hnsw_rabitq()->CopyFrom(
             ProtoConverter::ToPb(hnsw_rabitq_params));
+      }
+      break;
+    }
+    case IndexType::IVF_RABITQ: {
+      auto ivf_rabitq_params =
+          dynamic_cast<const IvfRabitqIndexParams *>(params);
+      if (ivf_rabitq_params) {
+        params_pb.mutable_ivf_rabitq()->CopyFrom(
+            ProtoConverter::ToPb(ivf_rabitq_params));
       }
       break;
     }
