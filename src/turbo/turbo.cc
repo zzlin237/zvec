@@ -251,73 +251,81 @@ UniformQuantizeFunc get_uniform_quantize_func(DataType data_type) {
 
 PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
                          CpuArchType cpu_arch_type) {
-  if (quantize_type == QuantizeType::kPQFast) {
-    // FastScan is inherently 4-bit: a 16-entry LUT is what fits one SIMD lane.
-    if (data_type != DataType::kInt4) {
-      return {};
-    }
-    // Single-code ADC against the quantized LUT is scalar-only: the hot path
-    // is the packed 32-vector block scan below. No SDC / batch ADC kernels.
-    if (zvec::ailego::internal::CpuFeatures::static_flags_.AVX512F &&
-        zvec::ailego::internal::CpuFeatures::static_flags_.AVX512BW &&
-        IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
-      // _mm512_shuffle_epi8 needs AVX512BW on top of AVX512F.
-      return {scalar::pq_adc_u8, nullptr, nullptr,
-              avx512::pq_adc_fast_scan_avx512};
-    }
-    if (CpuSupports(CpuArchType::kAVX2) &&
-        IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
-      return {scalar::pq_adc_u8, nullptr, nullptr, avx2::pq_adc_fast_scan_avx2};
-    }
-    if (CpuSupports(CpuArchType::kNEON) &&
-        IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
-      return {scalar::pq_adc_u8, nullptr, nullptr, neon::pq_adc_fast_scan_neon};
-    }
-    return {scalar::pq_adc_u8, nullptr, nullptr, scalar::pq_adc_fast_scan};
-  }
-  if (quantize_type == QuantizeType::kPQ) {
-    if (data_type == DataType::kInt4) {
+  switch (quantize_type) {
+    case QuantizeType::kPQFast:
+      // FastScan is inherently 4-bit: a 16-entry LUT is what fits one SIMD
+      // lane.
+      if (data_type != DataType::kInt4) {
+        return {};
+      }
+      // Single-code ADC against the quantized LUT is scalar-only: the hot path
+      // is the packed 32-vector block scan below. No SDC / batch ADC kernels.
       if (CpuSupports(CpuArchType::kAVX512) &&
+          zvec::ailego::internal::CpuFeatures::static_flags_.AVX512BW &&
           IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
-        return {avx512::pq_adc_int4_distance_avx512,
-                avx512::pq_sdc_int4_distance_avx512,
-                avx512::pq_adc_int4_batch_distance_avx512};
+        // _mm512_shuffle_epi8 needs AVX512BW on top of AVX512F.
+        return {scalar::pq_adc_u8, nullptr, nullptr,
+                avx512::pq_adc_fast_scan_avx512};
       }
       if (CpuSupports(CpuArchType::kAVX2) &&
           IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
-        return {avx2::pq_adc_int4_distance_avx2,
-                avx2::pq_sdc_int4_distance_avx2,
-                avx2::pq_adc_int4_batch_distance_avx2};
+        return {scalar::pq_adc_u8, nullptr, nullptr,
+                avx2::pq_adc_fast_scan_avx2};
       }
       if (CpuSupports(CpuArchType::kNEON) &&
           IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
-        return {neon::pq_adc_int4_distance_neon,
-                neon::pq_sdc_int4_distance_neon,
-                neon::pq_adc_int4_batch_distance_neon};
+        return {scalar::pq_adc_u8, nullptr, nullptr,
+                neon::pq_adc_fast_scan_neon};
       }
-      return {scalar::pq_adc_int4_distance, scalar::pq_sdc_int4_distance,
-              scalar::pq_adc_int4_batch_distance};
-    }
-    if (CpuSupports(CpuArchType::kAVX512) &&
-        IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
-      return {avx512::pq_adc_int8_distance_avx512,
-              avx512::pq_sdc_int8_distance_avx512,
-              avx512::pq_adc_int8_batch_distance_avx512};
-    }
-    if (CpuSupports(CpuArchType::kAVX2) &&
-        IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
-      return {avx2::pq_adc_int8_distance_avx2, avx2::pq_sdc_int8_distance_avx2,
-              avx2::pq_adc_int8_batch_distance_avx2};
-    }
-    if (CpuSupports(CpuArchType::kNEON) &&
-        IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
-      return {neon::pq_adc_int8_distance_neon, neon::pq_sdc_int8_distance_neon,
-              neon::pq_adc_int8_batch_distance_neon};
-    }
-    return {scalar::pq_adc_int8_distance, scalar::pq_sdc_int8_distance,
-            scalar::pq_adc_int8_batch_distance};
+      return {scalar::pq_adc_u8, nullptr, nullptr, scalar::pq_adc_fast_scan};
+
+    case QuantizeType::kPQ:
+      if (data_type == DataType::kInt4) {
+        if (CpuSupports(CpuArchType::kAVX512) &&
+            IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+          return {avx512::pq_adc_int4_distance_avx512,
+                  avx512::pq_sdc_int4_distance_avx512,
+                  avx512::pq_adc_int4_batch_distance_avx512};
+        }
+        if (CpuSupports(CpuArchType::kAVX2) &&
+            IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+          return {avx2::pq_adc_int4_distance_avx2,
+                  avx2::pq_sdc_int4_distance_avx2,
+                  avx2::pq_adc_int4_batch_distance_avx2};
+        }
+        if (CpuSupports(CpuArchType::kNEON) &&
+            IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+          return {neon::pq_adc_int4_distance_neon,
+                  neon::pq_sdc_int4_distance_neon,
+                  neon::pq_adc_int4_batch_distance_neon};
+        }
+        return {scalar::pq_adc_int4_distance, scalar::pq_sdc_int4_distance,
+                scalar::pq_adc_int4_batch_distance};
+      }
+      if (CpuSupports(CpuArchType::kAVX512) &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
+        return {avx512::pq_adc_int8_distance_avx512,
+                avx512::pq_sdc_int8_distance_avx512,
+                avx512::pq_adc_int8_batch_distance_avx512};
+      }
+      if (CpuSupports(CpuArchType::kAVX2) &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
+        return {avx2::pq_adc_int8_distance_avx2,
+                avx2::pq_sdc_int8_distance_avx2,
+                avx2::pq_adc_int8_batch_distance_avx2};
+      }
+      if (CpuSupports(CpuArchType::kNEON) &&
+          IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
+        return {neon::pq_adc_int8_distance_neon,
+                neon::pq_sdc_int8_distance_neon,
+                neon::pq_adc_int8_batch_distance_neon};
+      }
+      return {scalar::pq_adc_int8_distance, scalar::pq_sdc_int8_distance,
+              scalar::pq_adc_int8_batch_distance};
+
+    default:
+      return {};
   }
-  return {};
 }
 
 RotatorKernels get_rotator_kernels(RotateType rotate_type,

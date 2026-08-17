@@ -100,14 +100,16 @@ void pq_adc_fast_scan_neon(const void *packed_codes_v, const void *packed_lut_v,
   spill();
 
   // Group order is baked into kFastScanMapper, so no permute is needed.
-  vst1q_u32(accu32, acc_a0);
-  vst1q_u32(accu32 + 4, acc_a1);
-  vst1q_u32(accu32 + 8, acc_c0);
-  vst1q_u32(accu32 + 12, acc_c1);
-  vst1q_u32(accu32 + 16, acc_b0);
-  vst1q_u32(accu32 + 20, acc_b1);
-  vst1q_u32(accu32 + 24, acc_d0);
-  vst1q_u32(accu32 + 28, acc_d1);
+  // vst1q_u32 wants uint32_t *; the bit pattern matches the int32_t API.
+  auto *accu = reinterpret_cast<uint32_t *>(accu32);
+  vst1q_u32(accu, acc_a0);
+  vst1q_u32(accu + 4, acc_a1);
+  vst1q_u32(accu + 8, acc_c0);
+  vst1q_u32(accu + 12, acc_c1);
+  vst1q_u32(accu + 16, acc_b0);
+  vst1q_u32(accu + 20, acc_b1);
+  vst1q_u32(accu + 24, acc_d0);
+  vst1q_u32(accu + 28, acc_d1);
 #else
   // Unlike the float-returning PQ kernels, a no-op stub here would leave
   // accu32 untouched and silently yield zero distances, so forward instead.
