@@ -51,6 +51,7 @@ void PqFastQuantizer::setup_functions() {
   // single-code ADC against a quantized LUT.
   auto pq_k = get_pq_kernels(DataType::kInt4, QuantizeType::kPQFast);
   scan_fn_ = pq_k.fast_scan;
+  scan_multi_fn_ = pq_k.fast_scan_multi;
   adc_fn_ = pq_k.adc_distance;
 
   // L2-only batch distance for encoding and KMeans training: the PQ
@@ -775,6 +776,79 @@ void PqFastQuantizer::calc_distance_packed_block(const void *block, size_t num,
     packed += block_bytes;
     done += n;
   }
+}
+
+size_t PqFastQuantizer::scan_packed_blocks(const void *blocks, size_t num,
+                                           const void *query, int32_t threshold,
+                                           float *survivor_dists,
+                                           uint32_t *survivor_slots) const {
+  if (num == 0) {
+    return 0;
+  }
+  const uint8_t *q = reinterpret_cast<const uint8_t *>(query);
+  float delta = 0.0f;
+  float bias = 0.0f;
+  const uint8_t *tail = q + fast_scan_packed_lut_size(num_chunk_);
+  std::memcpy(&delta, tail, sizeof(float));
+  std::memcpy(&bias, tail + sizeof(float), sizeof(float));
+
+  const size_t num_blocks = (num + kFastScanBlockSize - 1) / kFastScanBlockSize;
+  // Scratch for the fused kernel: integer scores of every slot (padded
+  // slots of a trailing block included) plus one survive mask per block.
+  std::vector<int32_t> scores(num_blocks * kFastScanBlockSize);
+  std::vector<uint32_t> masks(num_blocks);
+  scan_multi_fn_(blocks, q, num_chunk_, num_blocks, threshold, scores.data(),
+                 masks.data());
+
+  // Dequantize survivors only; padded slots (>= num) never surface.  The
+  // slot is batch-global (offset across all blocks) so callers can index
+  // their contiguous key/id arrays directly.
+  size_t nsurv = 0;
+  for (size_t b = 0; b < num_blocks; ++b) {
+    const uint32_t mask = masks[b];
+    const size_t base = b * kFastScanBlockSize;
+    const size_t valid = std::min<size_t>(kFastScanBlockSize, num - base);
+    for (size_t j = 0; j < valid; ++j) {
+      if ((mask >> j) & 1u) {
+        survivor_dists[nsurv] =
+            static_cast<float>(scores[base + j]) * delta + bias;
+        survivor_slots[nsurv] = static_cast<uint32_t>(base + j);
+        ++nsurv;
+      }
+    }
+  }
+  return nsurv;
+}
+
+int32_t PqFastQuantizer::packed_score_threshold(const void *query,
+                                                float heap_top, float add,
+                                                float mul) const {
+  constexpr int32_t kNoPrune = std::numeric_limits<int32_t>::max();
+  // Heap values live in the affine domain (dist + add) * mul; a survivor
+  // must satisfy score * delta + bias < heap_top / mul - add.  Invert both
+  // affines in one shot and round UP so a borderline vector is never
+  // dropped (the kernel keeps strictly smaller scores).
+  if (!(mul > 0.0f) || !std::isfinite(heap_top)) {
+    return kNoPrune;
+  }
+  const uint8_t *q = reinterpret_cast<const uint8_t *>(query);
+  float delta = 0.0f;
+  float bias = 0.0f;
+  const uint8_t *tail = q + fast_scan_packed_lut_size(num_chunk_);
+  std::memcpy(&delta, tail, sizeof(float));
+  std::memcpy(&bias, tail + sizeof(float), sizeof(float));
+  if (!(delta > 0.0f)) {
+    return kNoPrune;
+  }
+  const double dist_thr = static_cast<double>(heap_top) / mul - add - bias;
+  const double thr = std::ceil(dist_thr / delta);
+  if (thr >= static_cast<double>(std::numeric_limits<int32_t>::max())) {
+    return kNoPrune;
+  }
+  if (thr <= static_cast<double>(std::numeric_limits<int32_t>::min())) {
+    return std::numeric_limits<int32_t>::min();
+  }
+  return static_cast<int32_t>(thr);
 }
 
 float PqFastQuantizer::calc_distance_dp_query_unquantized(

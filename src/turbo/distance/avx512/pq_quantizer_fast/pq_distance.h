@@ -26,4 +26,13 @@ namespace zvec::turbo::avx512 {
 void pq_adc_fast_scan_avx512(const void *packed_codes, const void *packed_lut,
                              size_t num_chunk, int32_t *accu32);
 
+// Multi-block variant with fused integer threshold comparison (see
+// scalar::pq_adc_fast_scan_multi for the contract). Processes 2-block tiles
+// so each LUT load serves two code blocks (32-zmm budget); an odd trailing
+// block falls back to a single-block tile.
+void pq_adc_fast_scan_multi_avx512(const void *packed_codes,
+                                   const void *packed_lut, size_t num_chunk,
+                                   size_t num_blocks, int32_t threshold,
+                                   int32_t *scores, uint32_t *masks);
+
 }  // namespace zvec::turbo::avx512

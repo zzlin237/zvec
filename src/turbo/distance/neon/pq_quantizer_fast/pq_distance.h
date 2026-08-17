@@ -28,4 +28,12 @@ namespace zvec::turbo::neon {
 void pq_adc_fast_scan_neon(const void *packed_codes, const void *packed_lut,
                            size_t num_chunk, int32_t *accu32);
 
+// Multi-block variant with fused integer threshold comparison (see
+// scalar::pq_adc_fast_scan_multi for the contract): scalar outer shell over
+// the existing per-block TBL loop, mask built by scalar compares.
+void pq_adc_fast_scan_multi_neon(const void *packed_codes,
+                                 const void *packed_lut, size_t num_chunk,
+                                 size_t num_blocks, int32_t threshold,
+                                 int32_t *scores, uint32_t *masks);
+
 }  // namespace zvec::turbo::neon

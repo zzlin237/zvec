@@ -63,10 +63,11 @@ static bool load_queries(const string &query_file, const string &first_sep,
 }
 
 // Generate ground truth by linear search on the reference (flat) index
-static bool generate_ground_truth(
-    core_interface::Index::Pointer flat_index,
-    const vector<vector<float>> &queries, size_t gt_count,
-    vector<vector<pair<uint64_t, float>>> &gt, shared_ptr<ThreadPool> pool) {
+static bool generate_ground_truth(core_interface::Index::Pointer flat_index,
+                                  const vector<vector<float>> &queries,
+                                  size_t gt_count,
+                                  vector<vector<pair<uint64_t, float>>> &gt,
+                                  shared_ptr<ThreadPool> pool) {
   cout << "Generating ground truth from flat index (gt_count=" << gt_count
        << ")..." << endl;
 
@@ -122,10 +123,9 @@ static bool generate_ground_truth(
 }
 
 // Compute recall@K by comparing keys (ID-based comparison)
-static void compute_recall_by_id(
-    const vector<IndexDocument> &knn_res,
-    const vector<pair<uint64_t, float>> &one_gt, size_t topk,
-    map<size_t, float> &recall_acc) {
+static void compute_recall_by_id(const vector<IndexDocument> &knn_res,
+                                 const vector<pair<uint64_t, float>> &one_gt,
+                                 size_t topk, map<size_t, float> &recall_acc) {
   size_t result_size = std::min(topk, one_gt.size());
   if (result_size == 0) return;
 
@@ -275,17 +275,17 @@ int main(int argc, char *argv[]) {
   auto config_common = config_node["IndexCommon"];
 
   // Log level
-  map<string, int> LOG_LEVEL_MAP = {{"debug", IndexLogger::LEVEL_DEBUG},
-                                    {"info", IndexLogger::LEVEL_INFO},
-                                    {"warn", IndexLogger::LEVEL_WARN},
-                                    {"error", IndexLogger::LEVEL_ERROR},
-                                    {"fatal", IndexLogger::LEVEL_FATAL}};
+  map<string, int> LOG_LEVEL_MAP = {
+      {"debug", zvec::ailego::Logger::LEVEL_DEBUG},
+      {"info", zvec::ailego::Logger::LEVEL_INFO},
+      {"warn", zvec::ailego::Logger::LEVEL_WARN},
+      {"error", zvec::ailego::Logger::LEVEL_ERROR},
+      {"fatal", zvec::ailego::Logger::LEVEL_FATAL}};
   string log_level = config_common["LogLevel"]
                          ? config_common["LogLevel"].as<string>()
                          : "info";
   transform(log_level.begin(), log_level.end(), log_level.begin(), ::tolower);
   if (LOG_LEVEL_MAP.find(log_level) != LOG_LEVEL_MAP.end()) {
-    IndexLoggerBroker::SetLevel(LOG_LEVEL_MAP[log_level]);
     zvec::ailego::LoggerBroker::SetLevel(LOG_LEVEL_MAP[log_level]);
   }
 
@@ -388,16 +388,16 @@ int main(int argc, char *argv[]) {
   } else if (config_common["FlatIndexPath"]) {
     // No refiner config - use a separate FlatIndexPath just for GT generation.
     string flat_path = config_common["FlatIndexPath"].as<string>();
-    string flat_config_json = config_common["FlatIndexConfig"]
-                                  ? config_common["FlatIndexConfig"].as<string>()
-                                  : "";
+    string flat_config_json =
+        config_common["FlatIndexConfig"]
+            ? config_common["FlatIndexConfig"].as<string>()
+            : "";
     if (flat_config_json.empty()) {
       LOG_ERROR("FlatIndexConfig is required when FlatIndexPath is set");
       return -1;
     }
-    auto params =
-        core_interface::IndexFactory::DeserializeIndexParamFromJson(
-            flat_config_json);
+    auto params = core_interface::IndexFactory::DeserializeIndexParamFromJson(
+        flat_config_json);
     flat_index = core_interface::IndexFactory::CreateAndInitIndex(*params);
 
     core_interface::StorageOptions storage_options;
@@ -413,8 +413,9 @@ int main(int argc, char *argv[]) {
     }
     cout << "Loaded flat index for GT from: " << flat_path << endl;
   } else {
-    LOG_ERROR("Either RefinerConfig.ReferenceIndex or FlatIndexPath must "
-              "be provided for ground truth generation");
+    LOG_ERROR(
+        "Either RefinerConfig.ReferenceIndex or FlatIndexPath must "
+        "be provided for ground truth generation");
     return -1;
   }
 
@@ -433,7 +434,8 @@ int main(int argc, char *argv[]) {
                     "IVF+PQ (no refiner)", pool);
   }
 
-  // ---- Test 2: IVF+PQ + Refiner (over-fetch scale_factor*topk, re-rank FP32) --
+  // ---- Test 2: IVF+PQ + Refiner (over-fetch scale_factor*topk, re-rank FP32)
+  // --
   if (has_refiner && flat_index) {
     auto refiner_query_param = query_param->Clone();
     auto refiner_param = std::make_shared<core_interface::RefinerParam>();

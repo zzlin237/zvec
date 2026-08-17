@@ -115,6 +115,17 @@ class PqFastQuantizer : public Quantizer,
                                   const void *query,
                                   float *dist_list) const override;
 
+  //! PackedCodeQuantizer capability: fused multi-block scan with an integer
+  //! score threshold; dequantizes survivors only (see the interface).
+  size_t scan_packed_blocks(const void *blocks, size_t num, const void *query,
+                            int32_t threshold, float *survivor_dists,
+                            uint32_t *survivor_slots) const override;
+
+  //! PackedCodeQuantizer capability: invert a heap-top threshold (affine
+  //! domain (dist + add) * mul) into the integer score domain.
+  int32_t packed_score_threshold(const void *query, float heap_top, float add,
+                                 float mul) const override;
+
   float calc_distance_dp_query_unquantized(const void *dp,
                                            const void *query) const override;
 
@@ -263,6 +274,10 @@ class PqFastQuantizer : public Quantizer,
 
   //! ISA-dispatched FastScan scan32 kernel.
   PqFastScanFunc scan_fn_{nullptr};
+
+  //! ISA-dispatched multi-block FastScan kernel with fused integer
+  //! threshold comparison (backs scan_packed_blocks).
+  PqFastScanMultiFunc scan_multi_fn_{nullptr};
 
   //! Dispatched single-code ADC against a quantized FastScan query
   //! (plain nibble code + packed u8 LUT with delta/bias tail).

@@ -766,6 +766,17 @@ TEST_F(IVFTurboQuantizerTest, TestL2PqFastResidualPrecompute) {
   off_searcher.cleanup();
 }
 
+TEST_F(IVFTurboQuantizerTest, TestL2PqFastPrunedScan) {
+  //! Small topk over ~62-vector lists: the heap fills inside the first
+  //! list, so most read batches run the fused scan with an active integer
+  //! threshold.  Pruning must be lossless (no false kills), so recall
+  //! stays at the same level as the unpruned FastScan path.
+  Params params = make_pq_fast_params(false);
+  float recall = 0.0f;
+  recall_at(params, 5, false, &recall);
+  EXPECT_GT(recall, 0.3f);
+}
+
 TEST_F(IVFTurboQuantizerTest, TestPqFastRejectsSmallBlock) {
   //! Packed FastScan blocks interleave exactly 32 codes: any other
   //! block_vector_count must be rejected at dump time.

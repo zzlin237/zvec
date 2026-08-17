@@ -26,4 +26,13 @@ namespace zvec::turbo::avx2 {
 void pq_adc_fast_scan_avx2(const void *packed_codes, const void *packed_lut,
                            size_t num_chunk, int32_t *accu32);
 
+// Multi-block variant with fused integer threshold comparison (see
+// scalar::pq_adc_fast_scan_multi for the contract). One call scans all
+// blocks so low_mask / the even chunk count stay hoisted; the AVX2 register
+// budget (16 ymm) keeps the loop single-block, the LUT stays L1-hot.
+void pq_adc_fast_scan_multi_avx2(const void *packed_codes,
+                                 const void *packed_lut, size_t num_chunk,
+                                 size_t num_blocks, int32_t threshold,
+                                 int32_t *scores, uint32_t *masks);
+
 }  // namespace zvec::turbo::avx2

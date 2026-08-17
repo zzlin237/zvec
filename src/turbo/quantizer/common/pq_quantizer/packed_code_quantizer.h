@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace zvec {
 namespace turbo {
@@ -43,6 +44,29 @@ class PackedCodeQuantizer {
   virtual void calc_distance_packed_block(const void *block, size_t num,
                                           const void *query,
                                           float *dist_list) const = 0;
+
+  //! Fused multi-block scan: compares an integer score threshold inside the
+  //! scan (INT32_MAX = no pruning) and dequantizes surviving vectors only.
+  //! Writes survivor distances and their batch-global slots (indexing the
+  //! contiguous `num`-vector input), and
+  //! returns the survivor count.  `num` is the actual vector count; padded
+  //! slots of a trailing block never appear in the output.  The threshold is
+  //! expressed in the quantizer's own integer score domain (see
+  //! packed_score_threshold).
+  virtual size_t scan_packed_blocks(const void *blocks, size_t num,
+                                    const void *query, int32_t threshold,
+                                    float *survivor_dists,
+                                    uint32_t *survivor_slots) const = 0;
+
+  //! Invert a heap-top threshold into the integer score domain.  Heap values
+  //! live in the affine domain (dist + add) * mul, where add / mul are
+  //! generic affine coefficients supplied by the caller (IVF passes its
+  //! residual_base / norm_val); the quantizer inverts them together with its
+  //! own delta / bias without knowing their semantics.  Returns INT32_MAX
+  //! when pruning is unavailable (non-positive mul, non-finite heap top,
+  //! degenerate delta).
+  virtual int32_t packed_score_threshold(const void *query, float heap_top,
+                                         float add, float mul) const = 0;
 };
 
 }  // namespace turbo

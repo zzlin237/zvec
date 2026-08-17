@@ -333,9 +333,11 @@ TEST(PqFastScanKernel, DispatchTableIsFamilyExclusive) {
   using zvec::turbo::get_pq_kernels;
   using zvec::turbo::QuantizeType;
 
-  // kPQFast fills fast_scan plus the scalar single-code ADC; no SDC / batch.
+  // kPQFast fills fast_scan (single + multi block) plus the scalar
+  // single-code ADC; no SDC / batch.
   auto fast = get_pq_kernels(DataType::kInt4, QuantizeType::kPQFast);
   EXPECT_TRUE(fast.fast_scan);
+  EXPECT_TRUE(fast.fast_scan_multi);
   EXPECT_TRUE(fast.adc_distance);
   EXPECT_FALSE(fast.sdc_distance);
   EXPECT_FALSE(fast.batch_adc_distance);
@@ -347,6 +349,7 @@ TEST(PqFastScanKernel, DispatchTableIsFamilyExclusive) {
     EXPECT_TRUE(pq.sdc_distance);
     EXPECT_TRUE(pq.batch_adc_distance);
     EXPECT_FALSE(pq.fast_scan);
+    EXPECT_FALSE(pq.fast_scan_multi);
   }
 
   // FastScan is 4-bit only, and unrelated families dispatch to nothing.
@@ -355,6 +358,121 @@ TEST(PqFastScanKernel, DispatchTableIsFamilyExclusive) {
   auto none = get_pq_kernels(DataType::kInt4, QuantizeType::kFp32);
   EXPECT_FALSE(none.adc_distance);
   EXPECT_FALSE(none.fast_scan);
+  EXPECT_FALSE(none.fast_scan_multi);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-block kernel correctness
+// ---------------------------------------------------------------------------
+
+// A multi-block kernel must be bit-exact with looping the scalar
+// single-block kernel, and its survive masks must match the integer
+// threshold comparison exactly.
+static void check_multi_kernel_equivalence_fn(
+    zvec::turbo::PqFastScanMultiFunc fn, size_t num_chunk, size_t num_blocks,
+    uint32_t seed) {
+  std::mt19937 gen(seed);
+  std::uniform_int_distribution<int> byte_dist(0, 255);
+
+  const size_t nsq_even = fast_scan_even_chunk(num_chunk);
+  const size_t block_bytes = nsq_even * 16;
+  std::vector<uint8_t> packed_codes(num_blocks * block_bytes);
+  std::vector<uint8_t> packed_lut(nsq_even * 16, 0);
+  for (auto &b : packed_codes) b = static_cast<uint8_t>(byte_dist(gen));
+  for (size_t i = 0; i < num_chunk * 16; ++i) {
+    packed_lut[i] = static_cast<uint8_t>(byte_dist(gen));
+  }
+
+  const size_t total = num_blocks * kFastScanBlockSize;
+  std::vector<int32_t> ref_scores(total);
+  for (size_t b = 0; b < num_blocks; ++b) {
+    zvec::turbo::scalar::pq_adc_fast_scan(
+        packed_codes.data() + b * block_bytes, packed_lut.data(), num_chunk,
+        ref_scores.data() + b * kFastScanBlockSize);
+  }
+
+  // Thresholds: no pruning, prune everything, exact score boundaries and
+  // values between scores.
+  const int32_t min_score =
+      *std::min_element(ref_scores.begin(), ref_scores.end());
+  const int32_t max_score =
+      *std::max_element(ref_scores.begin(), ref_scores.end());
+  const std::vector<int32_t> thresholds = {std::numeric_limits<int32_t>::max(),
+                                           std::numeric_limits<int32_t>::min(),
+                                           min_score,
+                                           min_score + 1,
+                                           (min_score + max_score) / 2,
+                                           max_score,
+                                           max_score + 1};
+  for (const int32_t threshold : thresholds) {
+    std::vector<int32_t> got_scores(total, -777);
+    std::vector<uint32_t> got_masks(num_blocks, 0u);
+    fn(packed_codes.data(), packed_lut.data(), num_chunk, num_blocks, threshold,
+       got_scores.data(), got_masks.data());
+    for (size_t v = 0; v < total; ++v) {
+      ASSERT_EQ(ref_scores[v], got_scores[v])
+          << "num_chunk=" << num_chunk << " num_blocks=" << num_blocks
+          << " threshold=" << threshold << " v=" << v;
+    }
+    for (size_t b = 0; b < num_blocks; ++b) {
+      uint32_t want = 0;
+      for (size_t j = 0; j < kFastScanBlockSize; ++j) {
+        if (ref_scores[b * kFastScanBlockSize + j] < threshold) {
+          want |= 1u << j;
+        }
+      }
+      ASSERT_EQ(want, got_masks[b])
+          << "num_chunk=" << num_chunk << " num_blocks=" << num_blocks
+          << " threshold=" << threshold << " b=" << b;
+    }
+  }
+}
+
+static void check_multi_kernel_all_shapes(zvec::turbo::PqFastScanMultiFunc fn,
+                                          uint32_t seed) {
+  // num_blocks spans a single block, a full AVX512 two-block tile, an odd
+  // trailing tile and a multi-tile batch; num_chunk spans even / odd /
+  // spill-period sizes.
+  for (const size_t num_chunk : {size_t(8), size_t(7), size_t(300)}) {
+    for (const size_t num_blocks :
+         {size_t(1), size_t(2), size_t(3), size_t(5)}) {
+      check_multi_kernel_equivalence_fn(fn, num_chunk, num_blocks, seed++);
+    }
+  }
+}
+
+TEST(PqFastScanMultiKernel, DispatchedMatchesScalar) {
+  auto kernels = zvec::turbo::get_pq_kernels(
+      zvec::turbo::DataType::kInt4, zvec::turbo::QuantizeType::kPQFast);
+  ASSERT_TRUE(kernels.fast_scan_multi);
+  check_multi_kernel_all_shapes(kernels.fast_scan_multi, 10);
+}
+
+TEST(PqFastScanMultiKernel, ScalarMatchesSingleBlockLoop) {
+  check_multi_kernel_all_shapes(zvec::turbo::scalar::pq_adc_fast_scan_multi,
+                                50);
+}
+
+TEST(PqFastScanMultiKernel, Avx2MatchesScalar) {
+  check_multi_kernel_all_shapes(zvec::turbo::avx2::pq_adc_fast_scan_multi_avx2,
+                                100);
+}
+
+TEST(PqFastScanMultiKernel, Avx512MatchesScalar) {
+  const auto &flags = zvec::ailego::internal::CpuFeatures::static_flags_;
+  if (!flags.AVX512F || !flags.AVX512BW) {
+    GTEST_SKIP() << "host CPU lacks AVX512F / AVX512BW";
+  }
+  check_multi_kernel_all_shapes(
+      zvec::turbo::avx512::pq_adc_fast_scan_multi_avx512, 200);
+}
+
+TEST(PqFastScanMultiKernel, NeonMatchesScalar) {
+  if (!zvec::ailego::internal::CpuFeatures::static_flags_.NEON) {
+    GTEST_SKIP() << "host CPU lacks NEON";
+  }
+  check_multi_kernel_all_shapes(zvec::turbo::neon::pq_adc_fast_scan_multi_neon,
+                                300);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,6 +581,159 @@ TEST(PqFastQuantizer, PackedBlockMatchesSingle) {
   for (size_t i = 0; i < COUNT; ++i) {
     ASSERT_FLOAT_EQ(list_dist[i], batch_dist[i]) << "i=" << i;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Fused multi-block scan capability (scan_packed_blocks /
+// packed_score_threshold)
+// ---------------------------------------------------------------------------
+
+// Fixture for the packed-scan capability tests: trained quantizer, packed
+// blocks over `count` vectors laid out the way the IVF dumper does, the
+// quantized query, reference distances from the existing block scan and the
+// exact integer scores straight from the scalar kernel.
+struct PackedScanSetup {
+  std::shared_ptr<zvec::turbo::Quantizer> quantizer;
+  std::shared_ptr<const zvec::turbo::PackedCodeQuantizer> packer;
+  std::vector<uint8_t> packed;
+  std::vector<uint8_t> qquery;
+  std::vector<float> ref_dists;
+  std::vector<int32_t> ref_scores;
+  float delta = 0.0f;
+  float bias = 0.0f;
+  size_t count = 0;
+  size_t nsq = 0;
+  size_t nblocks = 0;
+  size_t block_bytes = 0;
+};
+
+static void make_packed_scan_setup(size_t dim, size_t nsq, size_t count,
+                                   PackedScanSetup *f) {
+  f->nsq = nsq;
+  f->count = count;
+  f->quantizer = make_pqfs_quantizer(dim, nsq);
+  ASSERT_TRUE(f->quantizer);
+  auto holder = make_random_holder(count, dim);
+  ASSERT_EQ(0, f->quantizer->train(holder));
+
+  const size_t code_len = f->quantizer->quantized_datapoint_vector_length();
+  std::vector<uint8_t> codes(count * code_len);
+  std::vector<float> query(dim);
+  auto iter = holder->create_iterator();
+  for (size_t i = 0; iter->is_valid(); iter->next(), ++i) {
+    if (i == 0) {
+      const float *v = reinterpret_cast<const float *>(iter->data());
+      query.assign(v, v + dim);
+    }
+    f->quantizer->quantize_data(iter->data(), codes.data() + i * code_len);
+  }
+
+  f->qquery.resize(f->quantizer->quantized_query_vector_length());
+  f->quantizer->quantize_query(query.data(), f->qquery.data());
+
+  f->packer = std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(
+      f->quantizer);
+  ASSERT_TRUE(f->packer);
+  f->block_bytes = fast_scan_packed_block_size(nsq);
+  f->nblocks = (count + kFastScanBlockSize - 1) / kFastScanBlockSize;
+  f->packed.assign(f->nblocks * f->block_bytes, 0);
+  for (size_t b = 0; b < f->nblocks; ++b) {
+    const size_t n =
+        std::min(kFastScanBlockSize, count - b * kFastScanBlockSize);
+    ASSERT_EQ(0, f->packer->pack_codes(
+                     codes.data() + b * kFastScanBlockSize * code_len, n,
+                     code_len, f->packed.data() + b * f->block_bytes));
+  }
+
+  f->ref_dists.resize(count);
+  f->packer->calc_distance_packed_block(f->packed.data(), count,
+                                        f->qquery.data(), f->ref_dists.data());
+
+  const uint8_t *tail = f->qquery.data() + fast_scan_packed_lut_size(nsq);
+  std::memcpy(&f->delta, tail, sizeof(float));
+  std::memcpy(&f->bias, tail + sizeof(float), sizeof(float));
+
+  f->ref_scores.resize(count);
+  for (size_t b = 0; b < f->nblocks; ++b) {
+    int32_t accu32[kFastScanBlockSize];
+    zvec::turbo::scalar::pq_adc_fast_scan(f->packed.data() + b * f->block_bytes,
+                                          f->qquery.data(), nsq, accu32);
+    const size_t n =
+        std::min(kFastScanBlockSize, count - b * kFastScanBlockSize);
+    for (size_t j = 0; j < n; ++j) {
+      f->ref_scores[b * kFastScanBlockSize + j] = accu32[j];
+    }
+  }
+}
+
+TEST(PqFastQuantizer, ScanPackedBlocksSurvivorsMatch) {
+  //! Four blocks: three full ones plus a 4-vector trailing block whose
+  //! padded slots must never surface.
+  PackedScanSetup f;
+  make_packed_scan_setup(32, 8, 100, &f);
+
+  std::vector<float> surv_dists(f.count);
+  std::vector<uint32_t> surv_slots(f.count);
+
+  const int32_t min_score =
+      *std::min_element(f.ref_scores.begin(), f.ref_scores.end());
+  const int32_t max_score =
+      *std::max_element(f.ref_scores.begin(), f.ref_scores.end());
+  const std::vector<int32_t> thresholds = {
+      std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min(),
+      min_score, (min_score + max_score) / 2, max_score + 1};
+  for (const int32_t threshold : thresholds) {
+    const size_t nsurv = f.packer->scan_packed_blocks(
+        f.packed.data(), f.count, f.qquery.data(), threshold, surv_dists.data(),
+        surv_slots.data());
+
+    std::vector<size_t> expect_idx;
+    for (size_t i = 0; i < f.count; ++i) {
+      if (f.ref_scores[i] < threshold) {
+        expect_idx.push_back(i);
+      }
+    }
+    ASSERT_EQ(expect_idx.size(), nsurv) << "threshold=" << threshold;
+    for (size_t s = 0; s < nsurv; ++s) {
+      const size_t idx = expect_idx[s];
+      ASSERT_EQ(idx, surv_slots[s]) << "threshold=" << threshold << " s=" << s;
+      ASSERT_FLOAT_EQ(f.ref_dists[idx], surv_dists[s])
+          << "threshold=" << threshold << " s=" << s;
+    }
+  }
+}
+
+TEST(PqFastQuantizer, PackedScoreThresholdRoundTrip) {
+  PackedScanSetup f;
+  make_packed_scan_setup(32, 8, 100, &f);
+
+  //! The heap-value affine (dist + add) * mul uses arbitrary coefficients:
+  //! inverting it must never kill a vector whose heap value is strictly
+  //! better than the heap top (quarter-delta margin keeps the expectation
+  //! clear of float rounding at exact ties).
+  const float add = 0.37f;
+  const float mul = 2.5f;
+  const float margin = f.delta * mul * 0.25f;
+  for (size_t i = 0; i < f.count; ++i) {
+    const float heap_top = (f.ref_dists[i] + add) * mul;
+    const int32_t thr =
+        f.packer->packed_score_threshold(f.qquery.data(), heap_top, add, mul);
+    for (size_t j = 0; j < f.count; ++j) {
+      if ((f.ref_dists[j] + add) * mul < heap_top - margin) {
+        EXPECT_LT(f.ref_scores[j], thr) << "i=" << i << " j=" << j;
+      }
+    }
+  }
+
+  //! Degenerate inputs disable pruning instead of producing garbage.
+  const int32_t kNoPrune = std::numeric_limits<int32_t>::max();
+  EXPECT_EQ(kNoPrune, f.packer->packed_score_threshold(f.qquery.data(), 1.0f,
+                                                       0.0f, 0.0f));
+  EXPECT_EQ(kNoPrune, f.packer->packed_score_threshold(f.qquery.data(), 1.0f,
+                                                       0.0f, -1.0f));
+  EXPECT_EQ(kNoPrune, f.packer->packed_score_threshold(
+                          f.qquery.data(),
+                          std::numeric_limits<float>::infinity(), 0.0f, 1.0f));
 }
 
 TEST(PqFastQuantizer, DistanceHandleMatchesAdc) {

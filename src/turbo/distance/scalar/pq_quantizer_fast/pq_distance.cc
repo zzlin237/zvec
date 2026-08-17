@@ -42,6 +42,25 @@ void pq_adc_fast_scan(const void *packed_codes_v, const void *packed_lut_v,
   }
 }
 
+void pq_adc_fast_scan_multi(const void *packed_codes, const void *packed_lut,
+                            size_t num_chunk, size_t num_blocks,
+                            int32_t threshold, int32_t *scores,
+                            uint32_t *masks) {
+  const size_t block_bytes = fast_scan_packed_block_size(num_chunk);
+  const auto *codes = reinterpret_cast<const uint8_t *>(packed_codes);
+  for (size_t b = 0; b < num_blocks; ++b) {
+    pq_adc_fast_scan(codes + b * block_bytes, packed_lut, num_chunk,
+                     scores + b * kFastScanBlockSize);
+    uint32_t mask = 0;
+    for (size_t j = 0; j < kFastScanBlockSize; ++j) {
+      if (scores[b * kFastScanBlockSize + j] < threshold) {
+        mask |= 1u << j;
+      }
+    }
+    masks[b] = mask;
+  }
+}
+
 void pq_adc_u8(const void *pq_code, const void *qquery, size_t num_chunk,
                float *out) {
   const auto *code = reinterpret_cast<const uint8_t *>(pq_code);

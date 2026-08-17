@@ -265,19 +265,21 @@ PqKernels get_pq_kernels(DataType data_type, QuantizeType quantize_type,
           IsArchMatch(cpu_arch_type, CpuArchType::kAVX512)) {
         // _mm512_shuffle_epi8 needs AVX512BW on top of AVX512F.
         return {scalar::pq_adc_u8, nullptr, nullptr,
-                avx512::pq_adc_fast_scan_avx512};
+                avx512::pq_adc_fast_scan_avx512,
+                avx512::pq_adc_fast_scan_multi_avx512};
       }
       if (CpuSupports(CpuArchType::kAVX2) &&
           IsArchMatch(cpu_arch_type, CpuArchType::kAVX2)) {
         return {scalar::pq_adc_u8, nullptr, nullptr,
-                avx2::pq_adc_fast_scan_avx2};
+                avx2::pq_adc_fast_scan_avx2, avx2::pq_adc_fast_scan_multi_avx2};
       }
       if (CpuSupports(CpuArchType::kNEON) &&
           IsArchMatch(cpu_arch_type, CpuArchType::kNEON)) {
         return {scalar::pq_adc_u8, nullptr, nullptr,
-                neon::pq_adc_fast_scan_neon};
+                neon::pq_adc_fast_scan_neon, neon::pq_adc_fast_scan_multi_neon};
       }
-      return {scalar::pq_adc_u8, nullptr, nullptr, scalar::pq_adc_fast_scan};
+      return {scalar::pq_adc_u8, nullptr, nullptr, scalar::pq_adc_fast_scan,
+              scalar::pq_adc_fast_scan_multi};
 
     case QuantizeType::kPQ:
       if (data_type == DataType::kInt4) {

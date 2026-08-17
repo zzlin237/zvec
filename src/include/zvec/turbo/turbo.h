@@ -97,6 +97,22 @@ using PqFastScanFunc = void (*)(const void *packed_codes,
                                 const void *packed_lut, size_t num_chunk,
                                 int32_t *accu32);
 
+// Multi-block FastScan kernel: scans `num_blocks` back-to-back packed blocks
+// in one call (amortized setup, LUT kept L1-hot / register-resident where the
+// ISA budget allows) and fuses an integer-domain threshold comparison so the
+// caller gets a per-block survive mask without materializing float distances.
+//   packed_codes: [num_blocks * round_up_even(num_chunk) * 16] uint8_t
+//   packed_lut:   [round_up_even(num_chunk) * 16] uint8_t
+//   threshold:    keep a vector when its score is strictly below this value;
+//                 INT32_MAX keeps every vector
+//   scores:       [32 * num_blocks] int32_t, always fully written
+//   masks:        [num_blocks] uint32_t; bit j of masks[b] is set iff
+//                 scores[32 * b + j] < threshold
+using PqFastScanMultiFunc = void (*)(const void *packed_codes,
+                                     const void *packed_lut, size_t num_chunk,
+                                     size_t num_blocks, int32_t threshold,
+                                     int32_t *scores, uint32_t *masks);
+
 // ISA-dispatched rotate/unrotate kernels.
 struct RotatorKernels {
   RotateFunc rotate = nullptr;
@@ -118,6 +134,7 @@ struct PqKernels {
   PqSdcDistanceFunc sdc_distance = nullptr;
   PqBatchAdcFunc batch_adc_distance = nullptr;
   PqFastScanFunc fast_scan = nullptr;
+  PqFastScanMultiFunc fast_scan_multi = nullptr;
 };
 
 enum class MetricType {

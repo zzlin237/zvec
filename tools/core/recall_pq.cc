@@ -42,8 +42,8 @@ static bool load_queries(const string &query_file, const string &first_sep,
   TxtInputReader<float> reader;
   vector<SparseData<float>> sparse_data;
   vector<vector<uint64_t>> taglists;
-  if (!reader.load_query(query_file, first_sep, second_sep, queries, sparse_data,
-                         taglists)) {
+  if (!reader.load_query(query_file, first_sep, second_sep, queries,
+                         sparse_data, taglists)) {
     LOG_ERROR("Failed to load query file");
     return false;
   }
@@ -57,11 +57,11 @@ static bool load_queries(const string &query_file, const string &first_sep,
 }
 
 // Generate ground truth by linear search on the reference (flat) index
-static bool generate_ground_truth(
-    core_interface::Index::Pointer flat_index,
-    const vector<vector<float>> &queries, size_t gt_count,
-    vector<vector<pair<uint64_t, float>>> &gt,
-    shared_ptr<ThreadPool> pool) {
+static bool generate_ground_truth(core_interface::Index::Pointer flat_index,
+                                  const vector<vector<float>> &queries,
+                                  size_t gt_count,
+                                  vector<vector<pair<uint64_t, float>>> &gt,
+                                  shared_ptr<ThreadPool> pool) {
   cout << "Generating ground truth from flat index (gt_count=" << gt_count
        << ")..." << endl;
 
@@ -117,10 +117,9 @@ static bool generate_ground_truth(
 }
 
 // Compute recall@K by comparing keys (ID-based comparison)
-static void compute_recall_by_id(
-    const vector<IndexDocument> &knn_res,
-    const vector<pair<uint64_t, float>> &one_gt, size_t topk,
-    map<size_t, float> &recall_acc) {
+static void compute_recall_by_id(const vector<IndexDocument> &knn_res,
+                                 const vector<pair<uint64_t, float>> &one_gt,
+                                 size_t topk, map<size_t, float> &recall_acc) {
   size_t result_size = std::min(topk, one_gt.size());
   if (result_size == 0) return;
 
@@ -187,8 +186,7 @@ static void run_recall_test(
     query_param_clone->is_linear = false;
 
     core_interface::SearchResult search_result;
-    int ret =
-        pq_index->Search(query_data, query_param_clone, &search_result);
+    int ret = pq_index->Search(query_data, query_param_clone, &search_result);
     if (ret < 0) {
       LOG_ERROR("Search failed, ret=%d, idx=%zu", ret, i);
       return;
@@ -205,8 +203,8 @@ static void run_recall_test(
 
   cout << "  Results for [" << label << "]:" << endl;
   for (auto &it : recall_res) {
-    cout << "    Recall@" << it.first << ": "
-         << it.second / queries.size() << "%" << endl;
+    cout << "    Recall@" << it.first << ": " << it.second / queries.size()
+         << "%" << endl;
   }
 }
 
@@ -279,17 +277,17 @@ int main(int argc, char *argv[]) {
   auto config_common = config_node["IndexCommon"];
 
   // Log level
-  map<string, int> LOG_LEVEL_MAP = {{"debug", IndexLogger::LEVEL_DEBUG},
-                                     {"info", IndexLogger::LEVEL_INFO},
-                                     {"warn", IndexLogger::LEVEL_WARN},
-                                     {"error", IndexLogger::LEVEL_ERROR},
-                                     {"fatal", IndexLogger::LEVEL_FATAL}};
+  map<string, int> LOG_LEVEL_MAP = {
+      {"debug", zvec::ailego::Logger::LEVEL_DEBUG},
+      {"info", zvec::ailego::Logger::LEVEL_INFO},
+      {"warn", zvec::ailego::Logger::LEVEL_WARN},
+      {"error", zvec::ailego::Logger::LEVEL_ERROR},
+      {"fatal", zvec::ailego::Logger::LEVEL_FATAL}};
   string log_level = config_common["LogLevel"]
                          ? config_common["LogLevel"].as<string>()
                          : "info";
   transform(log_level.begin(), log_level.end(), log_level.begin(), ::tolower);
   if (LOG_LEVEL_MAP.find(log_level) != LOG_LEVEL_MAP.end()) {
-    IndexLoggerBroker::SetLevel(LOG_LEVEL_MAP[log_level]);
     zvec::ailego::LoggerBroker::SetLevel(LOG_LEVEL_MAP[log_level]);
   }
 
@@ -358,9 +356,8 @@ int main(int argc, char *argv[]) {
 
     auto ref_index_config = refiner_config["ReferenceIndex"];
     if (ref_index_config && ref_index_config["Config"]) {
-      auto params =
-          core_interface::IndexFactory::DeserializeIndexParamFromJson(
-              ref_index_config["Config"].as<std::string>());
+      auto params = core_interface::IndexFactory::DeserializeIndexParamFromJson(
+          ref_index_config["Config"].as<std::string>());
       flat_index = core_interface::IndexFactory::CreateAndInitIndex(*params);
 
       if (ref_index_config["Path"]) {
@@ -399,27 +396,26 @@ int main(int argc, char *argv[]) {
         LOG_ERROR("FlatIndexConfig is required when FlatIndexPath is set");
         return -1;
       }
-      auto params =
-          core_interface::IndexFactory::DeserializeIndexParamFromJson(
-              flat_config_json);
+      auto params = core_interface::IndexFactory::DeserializeIndexParamFromJson(
+          flat_config_json);
       flat_index = core_interface::IndexFactory::CreateAndInitIndex(*params);
 
       core_interface::StorageOptions storage_options;
-      storage_options.type =
-          core_interface::StorageOptions::StorageType::kMMAP;
+      storage_options.type = core_interface::StorageOptions::StorageType::kMMAP;
       storage_options.create_new = false;
       storage_options.read_only = true;
 
       int ret = flat_index->Open(flat_path, storage_options);
       if (ret != 0) {
-        LOG_ERROR("Failed to open flat index at %s, ret=%d",
-                  flat_path.c_str(), ret);
+        LOG_ERROR("Failed to open flat index at %s, ret=%d", flat_path.c_str(),
+                  ret);
         return -1;
       }
       cout << "Loaded flat index for GT from: " << flat_path << endl;
     } else {
-      LOG_ERROR("Either RefinerConfig.ReferenceIndex or FlatIndexPath must "
-                "be provided for ground truth generation");
+      LOG_ERROR(
+          "Either RefinerConfig.ReferenceIndex or FlatIndexPath must "
+          "be provided for ground truth generation");
       return -1;
     }
   }
@@ -436,8 +432,8 @@ int main(int argc, char *argv[]) {
     auto pq_query_param = query_param->Clone();
     // Ensure no refiner is set
     pq_query_param->refiner_param = nullptr;
-    run_recall_test(pq_index, pq_query_param, queries, topk, gt,
-                    topk_ids, "HNSW+PQ (no refiner)", pool);
+    run_recall_test(pq_index, pq_query_param, queries, topk, gt, topk_ids,
+                    "HNSW+PQ (no refiner)", pool);
   }
 
   // ---- Test 2: PQ + Refiner (re-rank top ef_search candidates with FP32) ----
@@ -447,8 +443,8 @@ int main(int argc, char *argv[]) {
     refiner_param->reference_index = flat_index;
     refiner_query_param->refiner_param = refiner_param;
 
-    run_recall_test(pq_index, refiner_query_param, queries, topk, gt,
-                    topk_ids, "HNSW+PQ+Refiner", pool);
+    run_recall_test(pq_index, refiner_query_param, queries, topk, gt, topk_ids,
+                    "HNSW+PQ+Refiner", pool);
   }
 
   // Cleanup

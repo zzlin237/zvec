@@ -30,7 +30,7 @@ cc_binary(
     STRICT PACKED
     SRCS recall_pq.cc
     INCS ${PROJECT_ROOT_DIR}/src/core/
-    LIBS gflags yaml-cpp magic_enum core_framework core_metric core_quantizer core_utility core_knn_flat core_knn_flat_sparse core_knn_hnsw core_knn_hnsw_sparse core_knn_hnsw_rabitq core_knn_vamana core_knn_cluster core_knn_ivf roaring core_interface core_knn_diskann
+    LIBS gflags yaml-cpp magic_enum core_framework core_metric core_quantizer core_utility core_knn_flat core_knn_flat_sparse core_knn_hnsw core_knn_hnsw_sparse core_knn_hnsw_rabitq core_knn_ivf_rabitq core_knn_vamana core_knn_cluster core_knn_ivf roaring core_interface core_knn_diskann
   )
 
 cc_binary(
@@ -38,7 +38,7 @@ cc_binary(
     STRICT PACKED
     SRCS recall_ivfpq.cc
     INCS ${PROJECT_ROOT_DIR}/src/core/
-    LIBS gflags yaml-cpp magic_enum core_framework core_metric core_quantizer core_utility core_knn_flat core_knn_flat_sparse core_knn_hnsw core_knn_hnsw_sparse core_knn_hnsw_rabitq core_knn_vamana core_knn_cluster core_knn_ivf roaring core_interface core_knn_diskann
+    LIBS gflags yaml-cpp magic_enum core_framework core_metric core_quantizer core_utility core_knn_flat core_knn_flat_sparse core_knn_hnsw core_knn_hnsw_sparse core_knn_hnsw_rabitq core_knn_ivf_rabitq core_knn_vamana core_knn_cluster core_knn_ivf roaring core_interface core_knn_diskann
   )
 
 cc_binary(

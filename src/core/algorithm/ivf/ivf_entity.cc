@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "ivf_entity.h"
+#include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <turbo/quantizer/common/pq_quantizer/precompute_table_quantizer.h>
 #include <zvec/ailego/utility/base64_helper.h>
 #include <zvec/ailego/utility/float_helper.h>
@@ -939,6 +941,13 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
   std::vector<float> distances(block_vecs);
   const size_t batch_size = kBatchBlocks;
   const size_t block_size = header_.block_size;
+  //! Fused packed-scan buffers (survivors of one read batch).
+  std::vector<float> surv_dists;
+  std::vector<uint32_t> surv_slots;
+  if (packed_quantizer_) {
+    surv_dists.resize(batch_size * block_vecs);
+    surv_slots.resize(batch_size * block_vecs);
+  }
   const auto norm_val = this->inverted_list_normalize_value(inverted_list_id);
   //! Residual distance = term1 + (term2 + term3); term1 is a per-list
   //! constant folded into residual_base before the heap emplace.
@@ -986,6 +995,35 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
     auto keys = get_keys(list_meta->id_offset + i * block_vecs, items);
     if (!keys) {
       return IndexError_ReadData;
+    }
+
+    //! Fused packed scan over the whole read batch: the integer threshold
+    //! is inverted from the heap top (heap state stays in IVF; the affine
+    //! constants go to the quantizer as generic floats), pruning happens
+    //! inside the kernel and only survivors are dequantized / filtered /
+    //! pushed onto the heap.
+    if (packed_quantizer_) {
+      int32_t thr = std::numeric_limits<int32_t>::max();
+      if (heap->full()) {
+        thr = packed_quantizer_->packed_score_threshold(
+            query, heap->front().score(), residual_base, norm_val);
+      }
+      const size_t nsurv = packed_quantizer_->scan_packed_blocks(
+          data, items, query, thr, surv_dists.data(), surv_slots.data());
+      *(context_stats->mutable_dist_calced_count()) += items;
+      for (size_t s = 0; s < nsurv; ++s) {
+        const uint32_t slot = surv_slots[s];
+        if (keys[slot] == kInvalidKey) {
+          continue;
+        }
+        if (filter(keys[slot])) {
+          ++(*context_stats->mutable_filtered_count());
+          continue;
+        }
+        heap->emplace(keys[slot], (surv_dists[s] + residual_base) * norm_val,
+                      list_meta->id_offset + i * block_vecs + slot);
+      }
+      continue;
     }
 
     //! Compute distances for each block
@@ -1048,6 +1086,13 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
   std::vector<float> distances(block_vecs);
   const size_t batch_size = kBatchBlocks;
   const size_t block_size = header_.block_size;
+  //! Fused packed-scan buffers (survivors of one read batch).
+  std::vector<float> surv_dists;
+  std::vector<uint32_t> surv_slots;
+  if (packed_quantizer_) {
+    surv_dists.resize(batch_size * block_vecs);
+    surv_slots.resize(batch_size * block_vecs);
+  }
   const auto norm_val = this->inverted_list_normalize_value(inverted_list_id);
   //! Residual distance = term1 + (term2 + term3); term1 is a per-list
   //! constant folded into residual_base before the heap emplace.
@@ -1095,6 +1140,28 @@ int IVFEntity::search(size_t inverted_list_id, const void *query,
     auto keys = get_keys(list_meta->id_offset + i * block_vecs, items);
     if (!keys) {
       return IndexError_ReadData;
+    }
+
+    //! Fused packed scan over the whole read batch (see the filtered
+    //! variant for the contract; no per-vector filter here).
+    if (packed_quantizer_) {
+      int32_t thr = std::numeric_limits<int32_t>::max();
+      if (heap->full()) {
+        thr = packed_quantizer_->packed_score_threshold(
+            query, heap->front().score(), residual_base, norm_val);
+      }
+      const size_t nsurv = packed_quantizer_->scan_packed_blocks(
+          data, items, query, thr, surv_dists.data(), surv_slots.data());
+      *(context_stats->mutable_dist_calced_count()) += items;
+      for (size_t s = 0; s < nsurv; ++s) {
+        const uint32_t slot = surv_slots[s];
+        if (keys[slot] == kInvalidKey) {
+          continue;
+        }
+        heap->emplace(keys[slot], (surv_dists[s] + residual_base) * norm_val,
+                      list_meta->id_offset + i * block_vecs + slot);
+      }
+      continue;
     }
 
     //! Compute distances for each block

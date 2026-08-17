@@ -40,19 +40,13 @@ inline __m256i widen_lane_sum(__m256i s) {
   return _mm256_add_epi32(_mm256_cvtepu16_epi32(lo), _mm256_cvtepu16_epi32(hi));
 }
 
-}  // namespace
-#endif
-
-void pq_adc_fast_scan_avx2(const void *packed_codes_v, const void *packed_lut_v,
-                           size_t num_chunk, int32_t *accu32) {
-#if defined(__AVX2__)
+// One packed block with hoisted constants: shared by the single-block entry
+// and the multi-block loop, which keeps low_mask / u16_mask / the even chunk
+// count live across blocks.
+void fast_scan_block_impl(const uint8_t *packed_codes,
+                          const uint8_t *packed_lut, size_t nsq_even,
+                          __m256i low_mask, __m256i u16_mask, int32_t *accu32) {
   constexpr int kSpillPeriod = 128;  // sub-quantizer pairs per int32 spill
-  const auto *packed_codes = reinterpret_cast<const uint8_t *>(packed_codes_v);
-  const auto *packed_lut = reinterpret_cast<const uint8_t *>(packed_lut_v);
-  const size_t nsq_even = fast_scan_even_chunk(num_chunk);
-
-  const __m256i low_mask = _mm256_set1_epi8(0x0F);
-  const __m256i u16_mask = _mm256_set1_epi16(0x00FF);
 
   // int32 accumulators, one register per contiguous group of 8 vectors.
   __m256i acc_a = _mm256_setzero_si256();  // vectors  0..7
@@ -121,10 +115,66 @@ void pq_adc_fast_scan_avx2(const void *packed_codes_v, const void *packed_lut_v,
   _mm256_storeu_si256(reinterpret_cast<__m256i *>(accu32 + 8), acc_c);
   _mm256_storeu_si256(reinterpret_cast<__m256i *>(accu32 + 16), acc_b);
   _mm256_storeu_si256(reinterpret_cast<__m256i *>(accu32 + 24), acc_d);
+}
+
+// Per-block 32-bit survive mask over freshly stored scores: bit j is set iff
+// scores[j] < threshold. Each compare covers one 8-score group in index
+// order, so the four movemask bytes assemble directly into the mask.
+inline uint32_t block_lt_mask(const int32_t *scores, int32_t threshold) {
+  const __m256i thr = _mm256_set1_epi32(threshold);
+  uint32_t mask = 0;
+  for (int g = 0; g < 4; ++g) {
+    const __m256i gt = _mm256_cmpgt_epi32(
+        thr,
+        _mm256_loadu_si256(reinterpret_cast<const __m256i *>(scores + 8 * g)));
+    // cmpgt yields all-ones lanes; movemask_ps extracts their sign bits and
+    // keeps the lane order (the cast is bit-preserving).
+    mask |= static_cast<uint32_t>(_mm256_movemask_ps(_mm256_castsi256_ps(gt)))
+            << (8 * g);
+  }
+  return mask;
+}
+
+}  // namespace
+#endif
+
+void pq_adc_fast_scan_avx2(const void *packed_codes_v, const void *packed_lut_v,
+                           size_t num_chunk, int32_t *accu32) {
+#if defined(__AVX2__)
+  const auto *packed_codes = reinterpret_cast<const uint8_t *>(packed_codes_v);
+  const auto *packed_lut = reinterpret_cast<const uint8_t *>(packed_lut_v);
+  const size_t nsq_even = fast_scan_even_chunk(num_chunk);
+  const __m256i low_mask = _mm256_set1_epi8(0x0F);
+  const __m256i u16_mask = _mm256_set1_epi16(0x00FF);
+  fast_scan_block_impl(packed_codes, packed_lut, nsq_even, low_mask, u16_mask,
+                       accu32);
 #else
   // Unlike the float-returning PQ kernels, a no-op stub here would leave
   // accu32 untouched and silently yield zero distances, so forward instead.
   scalar::pq_adc_fast_scan(packed_codes_v, packed_lut_v, num_chunk, accu32);
+#endif
+}
+
+void pq_adc_fast_scan_multi_avx2(const void *packed_codes_v,
+                                 const void *packed_lut_v, size_t num_chunk,
+                                 size_t num_blocks, int32_t threshold,
+                                 int32_t *scores, uint32_t *masks) {
+#if defined(__AVX2__)
+  const size_t block_bytes = fast_scan_packed_block_size(num_chunk);
+  const size_t nsq_even = fast_scan_even_chunk(num_chunk);
+  const auto *packed_codes = reinterpret_cast<const uint8_t *>(packed_codes_v);
+  const auto *packed_lut = reinterpret_cast<const uint8_t *>(packed_lut_v);
+  const __m256i low_mask = _mm256_set1_epi8(0x0F);
+  const __m256i u16_mask = _mm256_set1_epi16(0x00FF);
+  for (size_t b = 0; b < num_blocks; ++b) {
+    int32_t *block_scores = scores + b * kFastScanBlockSize;
+    fast_scan_block_impl(packed_codes + b * block_bytes, packed_lut, nsq_even,
+                         low_mask, u16_mask, block_scores);
+    masks[b] = block_lt_mask(block_scores, threshold);
+  }
+#else
+  scalar::pq_adc_fast_scan_multi(packed_codes_v, packed_lut_v, num_chunk,
+                                 num_blocks, threshold, scores, masks);
 #endif
 }
 

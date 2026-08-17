@@ -117,4 +117,24 @@ void pq_adc_fast_scan_neon(const void *packed_codes_v, const void *packed_lut_v,
 #endif
 }
 
+void pq_adc_fast_scan_multi_neon(const void *packed_codes_v,
+                                 const void *packed_lut_v, size_t num_chunk,
+                                 size_t num_blocks, int32_t threshold,
+                                 int32_t *scores, uint32_t *masks) {
+  const size_t block_bytes = fast_scan_packed_block_size(num_chunk);
+  const auto *packed_codes = reinterpret_cast<const uint8_t *>(packed_codes_v);
+  for (size_t b = 0; b < num_blocks; ++b) {
+    int32_t *block_scores = scores + b * kFastScanBlockSize;
+    pq_adc_fast_scan_neon(packed_codes + b * block_bytes, packed_lut_v,
+                          num_chunk, block_scores);
+    uint32_t mask = 0;
+    for (size_t j = 0; j < kFastScanBlockSize; ++j) {
+      if (block_scores[j] < threshold) {
+        mask |= 1u << j;
+      }
+    }
+    masks[b] = mask;
+  }
+}
+
 }  // namespace zvec::turbo::neon

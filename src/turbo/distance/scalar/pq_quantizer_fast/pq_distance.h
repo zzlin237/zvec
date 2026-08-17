@@ -39,6 +39,16 @@ namespace zvec::turbo::scalar {
 void pq_adc_fast_scan(const void *packed_codes, const void *packed_lut,
                       size_t num_chunk, int32_t *accu32);
 
+// Multi-block variant: scans `num_blocks` back-to-back packed blocks in one
+// call and fuses an integer-domain threshold comparison. `scores` receives
+// 32 * num_blocks int32 sums (always fully written); bit j of `masks[b]` is
+// set iff scores[32 * b + j] < threshold. Bit-exact with looping
+// pq_adc_fast_scan per block.
+void pq_adc_fast_scan_multi(const void *packed_codes, const void *packed_lut,
+                            size_t num_chunk, size_t num_blocks,
+                            int32_t threshold, int32_t *scores,
+                            uint32_t *masks);
+
 // Single-code ADC against a quantized FastScan query: `pq_code` is one plain
 // nibble-packed code (subquantizer m in the low nibble of byte m / 2 when m
 // is even, high nibble when odd), `qquery` is the packed uint8 LUT followed
