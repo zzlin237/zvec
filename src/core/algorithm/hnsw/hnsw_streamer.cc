@@ -78,6 +78,7 @@ int HnswStreamer::init(const IndexMeta &imeta, const ailego::Params &params) {
 
   params.get(PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS,
              &turbo_quantizer_class_);
+  params.get(PARAM_HNSW_STREAMER_QG_ENABLE, &qg_enable_);
 
   params.get(PARAM_HNSW_STREAMER_DOCS_SOFT_LIMIT, &docs_soft_limit_);
   if (docs_soft_limit_ > 0 && docs_soft_limit_ > docs_hard_limit_) {
@@ -260,6 +261,43 @@ int HnswStreamer::setup_entity() {
   meta_.mutable_streamer_params()->set("entity_vector_size",
                                        static_cast<uint64_t>(vec_size));
   entity_->set_vector_size(vec_size);
+
+  // Quantized graph region (see hnsw_qg.h).  Same bridging problem as the
+  // vector size: the geometry decides node_size, so it must be known before
+  // entity init() and therefore before the quantizer is restored.  Priority:
+  // persisted values from a previous build > live quantizer capability.
+  uint64_t qg_block_vectors = 0;
+  uint64_t qg_block_bytes = 0;
+  bool qg_materialized = false;
+  if (sp.get("entity_qg_block_bytes", &qg_block_bytes) &&
+      sp.get("entity_qg_block_vectors", &qg_block_vectors)) {
+    sp.get("entity_qg_materialized", &qg_materialized);
+  } else if (qg_enable_) {
+    auto packer =
+        std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(
+            add_quantizer_);
+    if (packer) {
+      qg_block_vectors = packer->packed_block_vectors();
+      qg_block_bytes = packer->packed_block_bytes();
+    } else {
+      LOG_WARN(
+          "Quantizer '%s' has no packed-code capability, "
+          "quantized graph disabled",
+          turbo_quantizer_class_.c_str());
+    }
+  }
+  if (qg_block_bytes > 0 && qg_block_vectors > 0) {
+    entity_->set_qg_layout(static_cast<size_t>(qg_block_vectors),
+                           static_cast<size_t>(qg_block_bytes));
+    entity_->set_qg_materialized(qg_materialized);
+    meta_.mutable_streamer_params()->set("entity_qg_block_vectors",
+                                         qg_block_vectors);
+    meta_.mutable_streamer_params()->set("entity_qg_block_bytes",
+                                         qg_block_bytes);
+    meta_.mutable_streamer_params()->set("entity_qg_materialized",
+                                         qg_materialized);
+  }
+
   entity_->set_chunk_size(chunk_size_);
   entity_->set_filter_same_key(filter_same_key_);
   entity_->set_get_vector(get_vector_enabled_);
@@ -275,9 +313,17 @@ int HnswStreamer::setup_entity() {
 static std::string QuantizerClassName(
     const zvec::turbo::Quantizer::Pointer &q) {
   if (!q) return {};
+  //! Only types that map to exactly one registered class can be recovered
+  //! this way: kPQ is shared by PqInt8Quantizer / PqInt4Quantizer and kRecord
+  //! by Int8Quantizer / Int4Quantizer, so those must be told apart by the
+  //! turbo_quantizer_class parameter instead.
   switch (q->type()) {
     case zvec::turbo::QuantizeType::kFp32:
       return "Fp32Quantizer";
+    case zvec::turbo::QuantizeType::kFp16:
+      return "Fp16Quantizer";
+    case zvec::turbo::QuantizeType::kPQFast:
+      return "PqFastQuantizer";
     default:
       return {};
   }
@@ -344,6 +390,23 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
           persisted_vs > 0) {
         meta_.mutable_streamer_params()->set("entity_vector_size",
                                              persisted_vs);
+      }
+      //! Same reason for the quantized graph geometry: it decides node_size,
+      //! which setup_entity() must compute exactly as the previous build did.
+      uint64_t qg_bytes = 0;
+      uint64_t qg_vectors = 0;
+      if (stored_meta.streamer_params().get("entity_qg_block_bytes",
+                                            &qg_bytes) &&
+          stored_meta.streamer_params().get("entity_qg_block_vectors",
+                                            &qg_vectors)) {
+        bool qg_materialized = false;
+        stored_meta.streamer_params().get("entity_qg_materialized",
+                                          &qg_materialized);
+        meta_.mutable_streamer_params()->set("entity_qg_block_bytes", qg_bytes);
+        meta_.mutable_streamer_params()->set("entity_qg_block_vectors",
+                                             qg_vectors);
+        meta_.mutable_streamer_params()->set("entity_qg_materialized",
+                                             qg_materialized);
       }
     }
   }
@@ -618,8 +681,48 @@ void HnswStreamer::persist_quantizer_to_meta() {
   }
 }
 
+int HnswStreamer::materialize_qg_if_needed() {
+  if (!entity_->qg_enabled() || entity_->qg_ready()) {
+    return 0;
+  }
+
+  auto packer =
+      std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(
+          add_quantizer_);
+  if (!packer) {
+    LOG_ERROR(
+        "Quantized graph region is reserved but quantizer '%s' exposes no "
+        "packed-code capability",
+        turbo_quantizer_class_.c_str());
+    return IndexError_Unsupported;
+  }
+
+  //! Exclusive: materialization reads every neighbor list, so no vector may
+  //! be added while it runs, and none afterwards (the blocks would go stale).
+  shared_mutex_.lock();
+  AILEGO_DEFER([&]() { shared_mutex_.unlock(); });
+
+  int ret = entity_->materialize_qg(packer.get(), 0U);
+  if (ret != 0) {
+    LOG_ERROR("Failed to materialize the quantized graph, ret=%d", ret);
+    return ret;
+  }
+  meta_.mutable_streamer_params()->set("entity_qg_materialized", true);
+
+  //! Contexts hold a clone of the entity, whose header snapshot still says
+  //! "not materialized".  Invalidating the magic makes every context re-clone
+  //! on next use, so searches pick up the region.
+  magic_ = IndexContext::GenerateMagic();
+  return 0;
+}
+
 int HnswStreamer::close(void) {
   LOG_INFO("HnswStreamer close");
+
+  int qg_ret = materialize_qg_if_needed();
+  if (qg_ret != 0) {
+    return qg_ret;
+  }
 
   stats_.clear();
   meta_.set_metric(metric_->name(), 0, metric_->params());
@@ -636,6 +739,11 @@ int HnswStreamer::close(void) {
 
 int HnswStreamer::flush(uint64_t checkpoint) {
   LOG_INFO("HnswStreamer flush checkpoint=%zu", (size_t)checkpoint);
+
+  int qg_ret = materialize_qg_if_needed();
+  if (qg_ret != 0) {
+    return qg_ret;
+  }
 
   meta_.set_metric(metric_->name(), 0, metric_->params());
   persist_quantizer_to_meta();
@@ -772,9 +880,36 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
   }
   AILEGO_DEFER([&]() { shared_mutex_.unlock_shared(); });
 
+  //! The quantized graph region holds each node's neighbor codes, so adding a
+  //! vector after materialization would change neighbor lists the region no
+  //! longer matches.  The index is read-only from then on.
+  if (ailego_unlikely(entity_->qg_ready())) {
+    LOG_ERROR("Cannot add vector: the quantized graph is already materialized");
+    (*stats_.mutable_discarded_count())++;
+    return IndexError_Unsupported;
+  }
+
   ctx->clear();
   ctx->bind_dist_space(add_distance_, add_batch_distance_, provider_);
-  ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
+  //! Graph construction compares stored codes with each other (SDC).  A
+  //! quantizer without SDC (e.g. FastScan, which keeps no symmetric distance
+  //! table) must build on the original vectors instead: detaching the
+  //! quantizer makes the calculator fall back to the provider metric over raw
+  //! vectors, which is both usable and more accurate than SDC.  The stored
+  //! representation is unaffected, codes are still written for search time.
+  const bool build_with_sdc =
+      add_quantizer_ == nullptr || add_quantizer_->supports_sdc();
+  if (ailego_unlikely(!build_with_sdc && provider_ == nullptr)) {
+    LOG_ERROR(
+        "Turbo quantizer '%s' provides no code-vs-code distance, so an "
+        "original vector provider is required to build the graph",
+        turbo_quantizer_class_.c_str());
+    (*stats_.mutable_discarded_count())++;
+    return IndexError_Unsupported;
+  }
+  ctx->update_dist_caculator_quantizer(
+      build_with_sdc ? add_quantizer_ : zvec::turbo::Quantizer::Pointer{},
+      /*symmetric=*/build_with_sdc);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
   //! use the original vector from provider as the build query, fetched
@@ -884,9 +1019,36 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
   }
   AILEGO_DEFER([&]() { shared_mutex_.unlock_shared(); });
 
+  //! The quantized graph region holds each node's neighbor codes, so adding a
+  //! vector after materialization would change neighbor lists the region no
+  //! longer matches.  The index is read-only from then on.
+  if (ailego_unlikely(entity_->qg_ready())) {
+    LOG_ERROR("Cannot add vector: the quantized graph is already materialized");
+    (*stats_.mutable_discarded_count())++;
+    return IndexError_Unsupported;
+  }
+
   ctx->clear();
   ctx->bind_dist_space(add_distance_, add_batch_distance_, provider_);
-  ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
+  //! Graph construction compares stored codes with each other (SDC).  A
+  //! quantizer without SDC (e.g. FastScan, which keeps no symmetric distance
+  //! table) must build on the original vectors instead: detaching the
+  //! quantizer makes the calculator fall back to the provider metric over raw
+  //! vectors, which is both usable and more accurate than SDC.  The stored
+  //! representation is unaffected, codes are still written for search time.
+  const bool build_with_sdc =
+      add_quantizer_ == nullptr || add_quantizer_->supports_sdc();
+  if (ailego_unlikely(!build_with_sdc && provider_ == nullptr)) {
+    LOG_ERROR(
+        "Turbo quantizer '%s' provides no code-vs-code distance, so an "
+        "original vector provider is required to build the graph",
+        turbo_quantizer_class_.c_str());
+    (*stats_.mutable_discarded_count())++;
+    return IndexError_Unsupported;
+  }
+  ctx->update_dist_caculator_quantizer(
+      build_with_sdc ? add_quantizer_ : zvec::turbo::Quantizer::Pointer{},
+      /*symmetric=*/build_with_sdc);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
   //! use the original vector from provider as the build query

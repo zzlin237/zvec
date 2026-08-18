@@ -219,6 +219,13 @@ void fast_search_neighbors(const EntityType &entity, HeapType &pool,
   std::vector<float> dists(buf_capacity);
   std::vector<const void *> neighbor_vecs(buf_capacity);
 
+  //! Quantized graph path: the node record carries the packed codes of all
+  //! its neighbors (see hnsw_qg.h), so one sequential read plus one batch
+  //! scan replaces the per-neighbor vector gather below.  The scan covers
+  //! every neighbor, visited ones included, because a packed block cannot be
+  //! scanned selectively; filtering therefore moves after the distances.
+  const bool qg_path = entity.qg_ready() && dc.has_block_scan();
+
   while (pool.has_next()) {
     auto current_node = pool.pop();
 
@@ -230,6 +237,37 @@ void fast_search_neighbors(const EntityType &entity, HeapType &pool,
       neighbor_ids.resize(buf_capacity);
       dists.resize(buf_capacity);
       neighbor_vecs.resize(buf_capacity);
+    }
+
+    if (qg_path) {
+      const uint32_t count = static_cast<uint32_t>(neighbors.size());
+      if (count == 0) continue;
+
+      const char *block =
+          static_cast<const char *>(entity.get_qg_block_ptr(current_node));
+      const size_t block_bytes =
+          (entity.qg_region_size() * count + max_deg - 1) / max_deg;
+      for (size_t off = 0; off < block_bytes; off += 64) {
+        ailego_prefetch(block + off);
+      }
+
+      dc.block_dist(block, count, dists.data());
+
+      uint32_t unvisited_count = 0;
+      for (uint32_t i = 0; i < count; ++i) {
+        node_id_t node = neighbors[i];
+        if (visit.visited(node)) continue;
+        visit.set_visited(node);
+        //! Compact in place: unvisited_count <= i always holds.
+        neighbor_ids[unvisited_count] = node;
+        dists[unvisited_count] = dists[i];
+        unvisited_count++;
+      }
+
+      if (unvisited_count == 0) continue;
+      pool.push_block(dists.data(), neighbor_ids.data(),
+                      static_cast<int32_t>(unvisited_count));
+      continue;
     }
 
     const uint32_t po =

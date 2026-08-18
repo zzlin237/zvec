@@ -49,10 +49,14 @@ int HnswStreamerEntity::init(size_t max_doc_cnt) {
   neighbor_size_ = neighbors_size();
   upper_neighbor_size_ = upper_neighbors_size();
 
-  //! vector + key + level 0 neighbors
+  //! vector + key + level 0 neighbors, with the quantized graph region (if
+  //! any) appended after them so that no existing offset moves; QgLayout owns
+  //! the region placement and the resulting record alignment.
   size_t size = vector_size() + sizeof(key_t) + neighbor_size_;
 
-  size = AlignSize(size);
+  QgLayout layout = qg_layout();
+  size = layout.configure(size, l0_neighbor_cnt());
+  set_qg_region(layout);
   set_node_size(size);
   return 0;
 }
@@ -104,6 +108,71 @@ int HnswStreamerEntity::update_neighbors(
   }
 
   return 0;
+}
+
+int HnswStreamerEntity::materialize_qg(
+    const zvec::turbo::PackedCodeQuantizer *packer, uint32_t thread_count) {
+  //! Adapter over this entity's storage; a local class so it can reach the
+  //! protected chunk accessors while keeping the materializer (hnsw_qg.cc)
+  //! free of any node layout knowledge.
+  class View final : public QgGraphView {
+   public:
+    explicit View(HnswStreamerEntity *self) : self_(self) {}
+
+    uint32_t doc_count() const override {
+      return self_->doc_cnt();
+    }
+
+    size_t code_length() const override {
+      return self_->vector_size();
+    }
+
+    size_t copy_l0_neighbors(uint32_t id, uint32_t *out) const override {
+      const Neighbors neighbors = self_->get_neighbors(0, id);
+      const size_t count =
+          std::min<size_t>(neighbors.size(), self_->l0_neighbor_cnt());
+      for (size_t i = 0; i < count; ++i) {
+        out[i] = neighbors[i];
+      }
+      return count;
+    }
+
+    int copy_code(uint32_t id, void *out) const override {
+      const void *code = self_->get_vector(id);
+      if (ailego_unlikely(code == nullptr)) {
+        return IndexError_ReadData;
+      }
+      std::memcpy(out, code, self_->vector_size());
+      return 0;
+    }
+
+    int write_block(uint32_t id, size_t block_index, const void *data,
+                    size_t len) override {
+      uint32_t chunk_idx = id >> self_->node_index_mask_bits_;
+      size_t offset = (id & self_->node_index_mask_) * self_->node_size() +
+                      self_->qg_offset() + block_index * len;
+      self_->sync_chunks(ChunkBroker::CHUNK_TYPE_NODE, chunk_idx,
+                         &self_->node_chunks_);
+      //! Records are allocated with the region included, so this write stays
+      //! inside the chunk's data area and touches only this node's bytes.
+      size_t written = self_->node_chunks_[chunk_idx]->write(offset, data, len);
+      return written == len ? 0 : IndexError_WriteData;
+    }
+
+   private:
+    HnswStreamerEntity *self_;
+  };
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  QgLayout layout = qg_layout();
+  View view(this);
+  int ret =
+      QgMaterialize(view, layout, l0_neighbor_cnt(), packer, thread_count);
+  if (ret != 0) {
+    return ret;
+  }
+  set_qg_materialized(true);
+  return flush_header();
 }
 
 const Neighbors HnswStreamerEntity::get_neighbors(level_t level,
@@ -329,8 +398,24 @@ int HnswStreamerEntity::init_chunks(const Chunk::Pointer &header_chunk) {
     LOG_ERROR("Read header chunk failed");
     return IndexError_ReadData;
   }
-  *mutable_header() =
+  HNSWHeader loaded =
       *reinterpret_cast<const HNSWHeader *>(header_block.data());
+
+  //! Guard the geometry the node offsets depend on BEFORE the header is
+  //! overwritten: node_size is computed by init() from vector_size + key +
+  //! level 0 neighbors (+ the optional quantized graph region) and
+  //! init_chunk_params() has already derived node_cnt_per_chunk_ /
+  //! node_index_mask_ / chunk_size_ from it.  Adopting a different persisted
+  //! node_size would leave that geometry stale and shift every node offset
+  //! silently, so a drift must be rejected here.
+  if (node_size() != loaded.node_size()) {
+    LOG_ERROR("node size %zu mismatch index previous %zu", node_size(),
+              loaded.node_size());
+    broker_->close();
+    return IndexError_Mismatch;
+  }
+
+  *mutable_header() = loaded;
 
   int ret = check_hnsw_index(&header());
   if (ret != 0) {

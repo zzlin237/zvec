@@ -227,6 +227,13 @@ class HnswStreamerEntity : public HnswEntity {
     return level == 0 ? neighbor_size_ : upper_neighbor_size_;
   }
 
+  //! Fill the QG region of every node from the codes of its level 0
+  //! neighbors, then persist the header.  One-shot materialization: the index
+  //! must not be modified afterwards, or the region goes stale.
+  //! `thread_count` 0 selects the hardware concurrency.
+  int materialize_qg(const zvec::turbo::PackedCodeQuantizer *packer,
+                     uint32_t thread_count);
+
 
  protected:
   union UpperNeighborIndexMeta {
@@ -870,6 +877,14 @@ class HnswMmapStreamerEntity : public HnswStreamerEntity {
   ailego_force_inline const void *get_vector_ptr(node_id_t id) const {
     uint32_t chunk_idx = id >> node_index_mask_bits_;
     uint32_t offset = (id & node_index_mask_) * node_size();
+    return get_node_chunk_base(chunk_idx) + offset;
+  }
+
+  //! Direct pointer to the node's quantized graph region, holding the packed
+  //! codes of its level 0 neighbors.  Only valid when qg_ready().
+  ailego_force_inline const void *get_qg_block_ptr(node_id_t id) const {
+    uint32_t chunk_idx = id >> node_index_mask_bits_;
+    uint32_t offset = (id & node_index_mask_) * node_size() + qg_offset();
     return get_node_chunk_base(chunk_idx) + offset;
   }
 

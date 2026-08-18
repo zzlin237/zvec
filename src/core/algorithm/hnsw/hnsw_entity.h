@@ -21,6 +21,7 @@
 #include <zvec/core/framework/index_error.h>
 #include <zvec/core/framework/index_storage.h>
 #include <zvec/core/interface/vector_source.h>
+#include "hnsw_qg.h"
 
 namespace zvec {
 namespace core {
@@ -49,7 +50,18 @@ struct GraphHeader {
   uint32_t ef_construction;
   uint32_t options;
   uint32_t min_neighbor_count;
-  uint8_t reserved_[4080];
+  //! Quantized graph (QG) region, appended to every node record after its
+  //! level 0 neighbor ids: the packed codes of those neighbors, so that one
+  //! sequential read plus one batch scan replaces per-neighbor random vector
+  //! accesses.  Taken from reserved_ so sizeof(GraphHeader) is unchanged and
+  //! indexes built before the region stay readable (all fields read as 0,
+  //! which means "no QG region").
+  uint32_t qg_block_bytes;    // bytes per packed block, 0 disables the region
+  uint32_t qg_block_vectors;  // vectors covered by one packed block
+  uint32_t qg_region_size;    // bytes reserved per node record
+  uint32_t qg_offset;         // region offset inside the node record
+  uint32_t qg_materialized;   // whether the region has been filled
+  uint8_t reserved_[4060];
 };
 
 static_assert(sizeof(GraphHeader) % 32 == 0,
@@ -111,6 +123,30 @@ struct HNSWHeader {
 
   size_t vector_size() const {
     return graph.vector_size;
+  }
+
+  size_t node_size() const {
+    return graph.node_size;
+  }
+
+  size_t qg_block_bytes() const {
+    return graph.qg_block_bytes;
+  }
+
+  size_t qg_block_vectors() const {
+    return graph.qg_block_vectors;
+  }
+
+  size_t qg_region_size() const {
+    return graph.qg_region_size;
+  }
+
+  size_t qg_offset() const {
+    return graph.qg_offset;
+  }
+
+  bool qg_materialized() const {
+    return graph.qg_materialized != 0U;
   }
 
   size_t ef_construction() const {
@@ -454,6 +490,55 @@ class HnswEntity {
 
   void set_ef_construction(size_t ef) {
     header_.graph.ef_construction = ef;
+  }
+
+  //! Configure the quantized graph region (see hnsw_qg.h).  The layout is
+  //! described by the quantizer capability that will consume it, so the graph
+  //! layer stays free of any quantization detail.  Passing 0 disables the
+  //! region.  Must be called before init(), which derives the region
+  //! placement and the node size from it.
+  void set_qg_layout(size_t block_vectors, size_t block_bytes) {
+    header_.graph.qg_block_vectors = static_cast<uint32_t>(block_vectors);
+    header_.graph.qg_block_bytes = static_cast<uint32_t>(block_bytes);
+  }
+
+  //! Current region geometry
+  QgLayout qg_layout() const {
+    QgLayout layout;
+    layout.block_vectors = header_.graph.qg_block_vectors;
+    layout.block_bytes = header_.graph.qg_block_bytes;
+    layout.region_size = header_.graph.qg_region_size;
+    layout.offset = header_.graph.qg_offset;
+    return layout;
+  }
+
+  //! Store the region placement derived by QgLayout::configure()
+  void set_qg_region(const QgLayout &layout) {
+    header_.graph.qg_region_size = layout.region_size;
+    header_.graph.qg_offset = layout.offset;
+  }
+
+  //! Whether a QG region is reserved in every node record
+  inline bool qg_enabled() const {
+    return header_.graph.qg_region_size != 0U;
+  }
+
+  //! Whether the QG region has been filled and may be scanned
+  inline bool qg_ready() const {
+    return header_.graph.qg_region_size != 0U &&
+           header_.graph.qg_materialized != 0U;
+  }
+
+  inline void set_qg_materialized(bool materialized) {
+    header_.graph.qg_materialized = materialized ? 1U : 0U;
+  }
+
+  inline size_t qg_offset() const {
+    return header_.graph.qg_offset;
+  }
+
+  inline size_t qg_region_size() const {
+    return header_.graph.qg_region_size;
   }
 
  protected:

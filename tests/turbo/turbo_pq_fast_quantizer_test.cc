@@ -785,12 +785,20 @@ TEST(PqFastQuantizer, DistanceHandleMatchesAdc) {
     ASSERT_FLOAT_EQ(impl(dp_list[i]), batch_dist[i]) << "i=" << i;
   }
 
-  // No SDC: sym_distance() must return an empty handle.
+  // FastScan now provides SDC (code-vs-code) for HNSW graph construction:
+  // sym_distance() returns a valid handle that agrees with
+  // calc_distance_dp_dp over stored codes.
   auto fast =
       std::dynamic_pointer_cast<zvec::turbo::PqFastQuantizer>(quantizer);
   ASSERT_TRUE(fast);
-  auto sym = fast->sym_distance(codes.data(), qmeta);
-  EXPECT_FALSE(sym.valid());
+  const void *code0 = codes.data();
+  auto sym = fast->sym_distance(code0, qmeta);
+  EXPECT_TRUE(sym.valid());
+  for (size_t i = 0; i < COUNT; ++i) {
+    const void *code = codes.data() + i * code_len;
+    ASSERT_FLOAT_EQ(fast->calc_distance_dp_dp(code, code0), sym(code))
+        << "i=" << i;
+  }
 }
 
 TEST(PqFastQuantizer, InnerProductMetric) {

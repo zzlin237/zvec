@@ -33,6 +33,13 @@ class PackedCodeQuantizer {
  public:
   virtual ~PackedCodeQuantizer() = default;
 
+  //! Vectors covered by one packed block.  Storage layers need it to size and
+  //! address the region they reserve for packed codes.
+  virtual size_t packed_block_vectors() const = 0;
+
+  //! Byte size of one packed block produced by pack_codes()
+  virtual size_t packed_block_bytes() const = 0;
+
   //! Pack up to 32 plain codes (laid out `stride` bytes apart) into one
   //! packed block consumable by calc_distance_packed_block.  Slots beyond
   //! `num` are zero-filled; `out` must hold one full packed block.

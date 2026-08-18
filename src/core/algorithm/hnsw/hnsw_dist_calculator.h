@@ -82,7 +82,9 @@ class HnswDistCalculator {
         batch_distance_(metric->batch_distance()),
         query_(nullptr),
         dim_(dim),
-        compare_cnt_(0) {}
+        compare_cnt_(0) {
+    bind_block_scan();
+  }
 
   void update(const HnswEntity *entity, const IndexMetric::Pointer &metric) {
     entity_ = entity;
@@ -106,6 +108,7 @@ class HnswDistCalculator {
     distance_ = metric->distance();
     batch_distance_ = metric->batch_distance();
     dim_ = dim;
+    bind_block_scan();
   }
 
   inline void update_distance(
@@ -124,10 +127,27 @@ class HnswDistCalculator {
                                bool symmetric) {
     quantizer_ = std::move(quantizer);
     symmetric_ = symmetric;
+    bind_block_scan();
   }
 
   inline bool has_quantizer() const {
     return quantizer_ != nullptr;
+  }
+
+  //! Whether a whole quantized graph block can be scanned in one call, i.e.
+  //! the bound quantizer exposes the packed-code capability and the bound
+  //! query is a quantized query (the symmetric build path has no such query).
+  inline bool has_block_scan() const {
+    return packed_ != nullptr && !symmetric_;
+  }
+
+  //! Distance from the bound query to every code packed in `block`, which
+  //! holds the level 0 neighbors of one node (see hnsw_qg.h).  `num` is the
+  //! neighbor count; trailing padded slots of the last packed block are not
+  //! written to `distances`.
+  inline void block_dist(const void *block, size_t num, dist_t *distances) {
+    compare_cnt_ += num;
+    packed_->calc_distance_packed_block(block, num, query_, distances);
   }
 
   //! Update the dimension used by distance computation
@@ -258,8 +278,8 @@ class HnswDistCalculator {
     if (quantizer_ != nullptr) {
       if (!symmetric_) {
         //! Batch ADC between stored codes and the pre-quantized query
-        quantizer_->calc_distance_dp_query_batch(
-            vecs, static_cast<int>(num), query_, distances);
+        quantizer_->calc_distance_dp_query_batch(vecs, static_cast<int>(num),
+                                                 query_, distances);
       } else {
         //! No batch SDC kernel: per-vector dp-vs-dp distance
         for (size_t i = 0; i < num; ++i) {
@@ -362,12 +382,22 @@ class HnswDistCalculator {
   HnswDistCalculator(const HnswDistCalculator &) = delete;
   HnswDistCalculator &operator=(const HnswDistCalculator &) = delete;
 
+  //! Resolve the optional packed-code capability of the bound quantizer once,
+  //! so the search loop never pays a dynamic_cast per hop.
+  inline void bind_block_scan() {
+    packed_ = dynamic_cast<const zvec::turbo::PackedCodeQuantizer *>(
+        quantizer_.get());
+  }
+
  private:
   const HnswEntity *entity_;
 
   //! Optional turbo quantizer; when set, distances go through its
   //! calc_* APIs instead of the IndexMetric handles below.
   zvec::turbo::Quantizer::Pointer quantizer_{};
+  //! Packed-code capability of quantizer_ when it exposes one, cached for the
+  //! quantized graph block scan (see hnsw_qg.h).
+  const zvec::turbo::PackedCodeQuantizer *packed_{nullptr};
   //! Distance semantics of the attached quantizer: true = graph
   //! construction (dp-vs-dp), false = search (dp-vs-query).
   bool symmetric_{false};

@@ -54,6 +54,11 @@ void PqFastQuantizer::setup_functions() {
   scan_multi_fn_ = pq_k.fast_scan_multi;
   adc_fn_ = pq_k.adc_distance;
 
+  // FastScan itself has no SDC kernel, but its stored code is the same plain
+  // nibble layout as kPQ+kInt4, so reuse that family's SDC kernel for
+  // code-vs-code distance during graph construction (see calc_distance_dp_dp).
+  sdc_fn_ = get_pq_kernels(DataType::kInt4, QuantizeType::kPQ).sdc_distance;
+
   // L2-only batch distance for encoding and KMeans training: the PQ
   // codebook is trained/encoded in L2 space regardless of the search metric.
   l2_batch_fn_ =
@@ -336,6 +341,9 @@ int PqFastQuantizer::train(IndexHolder::Pointer holder, int thread_count) {
 
   // Pre-compute sub-centroid norms for the precomputed residual table.
   compute_sub_centroid_norms();
+
+  // Pre-compute the SDC dist_table for code-vs-code distance (graph build).
+  compute_dist_table();
   return 0;
 }
 
@@ -571,6 +579,27 @@ void PqFastQuantizer::compute_sub_centroid_norms() {
   }
 }
 
+void PqFastQuantizer::compute_dist_table() {
+  const size_t k = kNumCentroids;
+  const size_t d = sub_dim_;
+  dist_table_.resize(static_cast<size_t>(num_chunk_) * k * k, 0.0f);
+
+  // Centroid-to-centroid distances via the metric-aware batch_fn_ (L2 for
+  // both L2 and Cosine, since Cosine trains on normalized data).  Mirrors
+  // PqInt4Quantizer::compute_dist_table so the two SDC results are identical.
+  for (uint32_t m = 0; m < num_chunk_; ++m) {
+    float *table_m = dist_table_.data() + m * k * k;
+    const auto &centroid_ptrs = centroid_ptrs_cache_[m];
+    const void *centroid_i = centroid_ptrs[0];
+    for (uint32_t i = 0; i < k; ++i) {
+      batch_fn_(const_cast<const void **>(centroid_ptrs.data()),
+                reinterpret_cast<const uint8_t *>(centroid_i) +
+                    static_cast<size_t>(i) * d * element_size(),
+                k, d, table_m + i * k);
+    }
+  }
+}
+
 int PqFastQuantizer::build_centroid_distance_table(const void *centroids,
                                                    size_t centroid_num,
                                                    std::string *table) const {
@@ -721,6 +750,14 @@ int PqFastQuantizer::pack_codes(const void *codes, size_t num, size_t stride,
   fast_scan_pack_codes(reinterpret_cast<const uint8_t *>(codes), num, stride,
                        num_chunk_, reinterpret_cast<uint8_t *>(out));
   return 0;
+}
+
+size_t PqFastQuantizer::packed_block_vectors() const {
+  return kFastScanBlockSize;
+}
+
+size_t PqFastQuantizer::packed_block_bytes() const {
+  return fast_scan_packed_block_size(num_chunk_);
 }
 
 // ---------------------------------------------------------------------------
@@ -885,10 +922,15 @@ void PqFastQuantizer::calc_distance_dp_query_batch_unquantized(
 
 float PqFastQuantizer::calc_distance_dp_dp(const void *dp1,
                                            const void *dp2) const {
-  // FastScan is a pure batch-scan quantizer: no SDC dist_table is kept.
-  (void)dp1;
-  (void)dp2;
-  return 0.0f;
+  // Code-vs-code (SDC): dp1/dp2 are plain nibble codes (same layout as
+  // PqInt4).  Sum the centroid-to-centroid dist_table_ over sub-quantizers
+  // via the shared int4 SDC kernel.  Only valid after train() built
+  // dist_table_ (graph construction); not restored on deserialize.
+  float d = 0.0f;
+  sdc_fn_(reinterpret_cast<const uint8_t *>(dp1),
+          reinterpret_cast<const uint8_t *>(dp2), dist_table_.data(),
+          num_chunk_, &d);
+  return d;
 }
 
 int PqFastQuantizer::quantize(const void *query, const IndexQueryMeta &qmeta,
@@ -997,11 +1039,21 @@ DistanceImpl PqFastQuantizer::distance(const void *query,
 }
 
 DistanceImpl PqFastQuantizer::sym_distance(
-    const void * /*query*/, const IndexQueryMeta & /*qmeta*/) const {
-  // FastScan keeps no SDC dist_table, so code-vs-code distance is not
-  // available.  Return an empty handle so callers fall back instead of the
-  // base-class forward, which would mis-read a PQ code as a LUT.
-  return DistanceImpl{};
+    const void *query, const IndexQueryMeta & /*qmeta*/) const {
+  // SDC compares two plain nibble PQ codes via the centroid-to-centroid
+  // dist_table_.  The kernel needs a lambda: 5 params (extra dist_table
+  // pointer) vs DistanceFunc's 4.  Mirrors PqInt4Quantizer::sym_distance.
+  auto sdc = sdc_fn_;
+  const void *dt = dist_table_.data();
+  DistanceFunc sdc_func = [sdc, dt](const void *a, const void *b, size_t dim,
+                                    float *out) { sdc(a, b, dt, dim, out); };
+
+  // The query here is a stored PQ code, not a LUT.
+  size_t code_bytes = quantized_datapoint_vector_length();
+  std::string code_storage(static_cast<const char *>(query), code_bytes);
+
+  return DistanceImpl(std::move(sdc_func), std::move(code_storage),
+                      static_cast<size_t>(num_chunk_));
 }
 
 // ---------------------------------------------------------------------------

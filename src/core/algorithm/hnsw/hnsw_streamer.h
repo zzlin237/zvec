@@ -93,6 +93,12 @@ class HnswStreamer : public IndexStreamer {
     return add_quantizer_;
   }
 
+  //! Whether the quantized graph region is materialized, i.e. a search scans
+  //! packed neighbor blocks instead of gathering a vector per candidate.
+  bool qg_ready(void) const {
+    return entity_ != nullptr && entity_->qg_ready();
+  }
+
  protected:
   //! Initialize Streamer
   int init(const IndexMeta &imeta, const ailego::Params &params) override;
@@ -105,8 +111,7 @@ class HnswStreamer : public IndexStreamer {
 
   //! Initialize separate quantizers for add and search
   int init_quantizer(zvec::turbo::Quantizer::Pointer add_quantizer,
-                     zvec::turbo::Quantizer::Pointer search_quantizer)
-      override;
+                     zvec::turbo::Quantizer::Pointer search_quantizer) override;
 
   //! Create a context
   Context::Pointer create_context(void) const override;
@@ -216,8 +221,7 @@ class HnswStreamer : public IndexStreamer {
   //! Validate a query against the storage meta, unless a quantizer is
   //! attached: a quantized query (e.g. a PQ LUT) has its own format
   //! defined by the quantizer and does not match the stored layout.
-  inline int check_query_params(const void *query,
-                                const IndexQueryMeta &qmeta,
+  inline int check_query_params(const void *query, const IndexQueryMeta &qmeta,
                                 bool quantized) const {
     if (quantized) {
       if (ailego_unlikely(!query)) {
@@ -237,19 +241,18 @@ class HnswStreamer : public IndexStreamer {
       const zvec::turbo::Quantizer::Pointer &quantizer,
       const IndexQueryMeta &qmeta) const {
     if (!quantizer ||
-        quantizer->type() != zvec::turbo::QuantizeType::kPQ) {
+        (quantizer->type() != zvec::turbo::QuantizeType::kPQ &&
+         quantizer->type() != zvec::turbo::QuantizeType::kPQFast)) {
       return false;
     }
     IndexMeta::DataType input_type = IndexMeta::DT_UNDEFINED;
     if (quantizer->input_data_type() == zvec::turbo::DataType::kFp32) {
       input_type = IndexMeta::DT_FP32;
-    } else if (quantizer->input_data_type() ==
-               zvec::turbo::DataType::kFp16) {
+    } else if (quantizer->input_data_type() == zvec::turbo::DataType::kFp16) {
       input_type = IndexMeta::DT_FP16;
     }
     return input_type != IndexMeta::DT_UNDEFINED &&
-           meta_.data_type() == input_type &&
-           qmeta.data_type() == input_type;
+           meta_.data_type() == input_type && qmeta.data_type() == input_type;
   }
 
   inline int check_sparse_count_is_zero(const uint32_t *sparse_count,
@@ -271,6 +274,11 @@ class HnswStreamer : public IndexStreamer {
   //! Serialize turbo quantizer state into meta_.streamer_params_
   //! so it is included in dump/close/flush persistence.
   void persist_quantizer_to_meta();
+
+  //! Materialize the quantized graph region (see hnsw_qg.h) on flush/close
+  //! when it is reserved and still empty.  Afterwards the index is read-only:
+  //! further vectors would change neighbor lists and leave the region stale.
+  int materialize_qg_if_needed();
 
   //! To share ctx across streamer/searcher, we need to update the context for
   //! current streamer/searcher
@@ -313,6 +321,12 @@ class HnswStreamer : public IndexStreamer {
   zvec::turbo::Quantizer::Pointer add_quantizer_{};
   zvec::turbo::Quantizer::Pointer search_quantizer_{};
   std::string turbo_quantizer_class_{};
+
+  //! Quantized graph region (see hnsw_qg.h): requested by params, effective
+  //! only when the quantizer exposes the packed-code capability.  Once the
+  //! region is materialized (on flush/close) the index accepts no more
+  //! vectors, because the stored blocks would go stale.
+  bool qg_enable_{false};
 
   Stats stats_{};
   std::mutex mutex_{};

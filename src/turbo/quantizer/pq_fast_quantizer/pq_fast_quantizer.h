@@ -48,10 +48,10 @@ using namespace zvec::core;
 //! Final distance: dist = accu * delta + bias.
 //!
 //! FastScan is a batch-scan quantizer (IVF inverted lists, linear scan).
-//! It exposes an ADC DistanceImpl handle (single plain-code look-up over
-//! the quantized LUT) but no SDC: sym_distance() returns an empty handle,
-//! so it must not be used for HNSW graph construction (pairwise
-//! code-vs-code distance).  Supported metrics: SquaredEuclidean,
+//! It exposes an ADC DistanceImpl handle (single plain-code look-up over the
+//! quantized LUT).  It also provides SDC (code-vs-code) via the shared int4
+//! centroid-distance table, used only for HNSW graph construction; search
+//! runs the packed block scan.  Supported metrics: SquaredEuclidean,
 //! InnerProduct and Cosine (= normalize + L2; the original vector norm is
 //! stored after each code for dequantize, aligned with PqInt4Quantizer).
 class PqFastQuantizer : public Quantizer,
@@ -101,6 +101,12 @@ class PqFastQuantizer : public Quantizer,
   int pack_codes(const void *codes, size_t num, size_t stride,
                  void *out) const override;
 
+  //! PackedCodeQuantizer capability: geometry of one packed block, so storage
+  //! layers can size the region they reserve for packed codes.
+  size_t packed_block_vectors() const override;
+
+  size_t packed_block_bytes() const override;
+
   float calc_distance_dp_query(const void *dp,
                                const void *query) const override;
 
@@ -134,6 +140,14 @@ class PqFastQuantizer : public Quantizer,
       float *dist_list) const override;
 
   float calc_distance_dp_dp(const void *dp1, const void *dp2) const override;
+
+  //! FastScan shares PqInt4's 16-centroid codebook and plain nibble code
+  //! layout, so code-vs-code (SDC) distance is available via the same
+  //! centroid-to-centroid dist_table_ and int4 SDC kernel.  Used only for
+  //! graph construction (HNSW); search still runs the packed block scan.
+  bool supports_sdc() const override {
+    return true;
+  }
 
   DistanceImpl distance(const void *query,
                         const IndexQueryMeta &qmeta) const override;
@@ -215,6 +229,12 @@ class PqFastQuantizer : public Quantizer,
   //! build_centroid_distance_table().  Built in train() and deserialize().
   void compute_sub_centroid_norms();
 
+  //! Build the centroid-to-centroid distance table for SDC (code-vs-code),
+  //! [num_chunk * kNumCentroids * kNumCentroids].  Built in train() only:
+  //! SDC is used during graph construction, not after deserialize (search
+  //! uses ADC), so it is intentionally not restored on reopen.
+  void compute_dist_table();
+
   //! Build centroid_ptrs_cache_ from current centroids_.
   void build_centroid_ptrs_cache();
 
@@ -283,6 +303,10 @@ class PqFastQuantizer : public Quantizer,
   //! (plain nibble code + packed u8 LUT with delta/bias tail).
   PqAdcDistanceFunc adc_fn_{nullptr};
 
+  //! ISA-dispatched int4 SDC kernel (code-vs-code via dist_table_), reused
+  //! from the kPQ+kInt4 family.  Used only for HNSW graph construction.
+  PqSdcDistanceFunc sdc_fn_{nullptr};
+
   //! Metric-aware batch distance function for the search-side LUT
   //! (L2: squared euclidean, IP: -dot).  Data type matches input.
   BatchDistanceFunc batch_fn_{};
@@ -298,6 +322,10 @@ class PqFastQuantizer : public Quantizer,
   //! Squared norms of the sub-centroids: [num_chunk * kNumCentroids].
   //! Used by build_centroid_distance_table().
   std::vector<float> sub_centroid_norms_;
+
+  //! Centroid-to-centroid distance table for SDC:
+  //! [num_chunk * kNumCentroids * kNumCentroids].  Built in train() only.
+  std::vector<float> dist_table_;
 };
 
 }  // namespace turbo
