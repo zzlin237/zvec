@@ -325,14 +325,15 @@ TEST_F(HnswQgTest, TestQgSearchRecall) {
   }
 }
 
-//! FastScan now supports SDC (code-vs-code), so it builds the graph on the
-//! codes like PqInt4, with no provider of original vectors: distinct codes
-//! give a non-negative distance and a code against itself gives ~0.
-TEST_F(HnswQgTest, TestSupportsSdc) {
+//! FastScan builds the graph on the codes (code-vs-code, SDC) like PqInt4,
+//! with no provider of original vectors: a code against itself gives ~0 and
+//! two distinct codes give a non-negative distance.  Guards the class of bug
+//! where a missing SDC silently returns 0 for every pair, which collapses
+//! neighbor pruning without any error.
+TEST_F(HnswQgTest, TestSdcDistance) {
   auto quantizer = make_fast_quantizer();
   ASSERT_TRUE(quantizer != nullptr);
   ASSERT_EQ(0, quantizer->train(make_train_holder(42)));
-  ASSERT_TRUE(quantizer->supports_sdc());
 
   IndexQueryMeta qmeta(IndexMeta::DataType::DT_FP32,
                        static_cast<uint32_t>(kDim));

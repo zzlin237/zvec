@@ -214,17 +214,20 @@ void fast_search_neighbors(const EntityType &entity, HeapType &pool,
   visit.set_visited(entry_point);
   pool.push_block(&entry_dist, &entry_point, 1);
 
-  uint32_t buf_capacity = max_deg;
-  std::vector<node_id_t> neighbor_ids(buf_capacity);
-  std::vector<float> dists(buf_capacity);
-  std::vector<const void *> neighbor_vecs(buf_capacity);
-
   //! Quantized graph path: the node record carries the packed codes of all
   //! its neighbors (see hnsw_qg.h), so one sequential read plus one batch
   //! scan replaces the per-neighbor vector gather below.  The scan covers
   //! every neighbor, visited ones included, because a packed block cannot be
   //! scanned selectively; filtering therefore moves after the distances.
   const bool qg_path = entity.qg_ready() && dc.has_block_scan();
+  //! Region geometry is fixed for the whole search; hoisted out of the loop.
+  const QgLayout qg_layout = qg_path ? entity.qg_layout() : QgLayout{};
+
+  uint32_t buf_capacity = max_deg;
+  std::vector<node_id_t> neighbor_ids(buf_capacity);
+  std::vector<float> dists(buf_capacity);
+  //! Gather-only scratch: the QG path reads codes straight from the region.
+  std::vector<const void *> neighbor_vecs(qg_path ? 0 : buf_capacity);
 
   while (pool.has_next()) {
     auto current_node = pool.pop();
@@ -236,7 +239,9 @@ void fast_search_neighbors(const EntityType &entity, HeapType &pool,
       buf_capacity = neighbors.size();
       neighbor_ids.resize(buf_capacity);
       dists.resize(buf_capacity);
-      neighbor_vecs.resize(buf_capacity);
+      if (!qg_path) {
+        neighbor_vecs.resize(buf_capacity);
+      }
     }
 
     if (qg_path) {
@@ -245,8 +250,9 @@ void fast_search_neighbors(const EntityType &entity, HeapType &pool,
 
       const char *block =
           static_cast<const char *>(entity.get_qg_block_ptr(current_node));
-      const size_t block_bytes =
-          (entity.qg_region_size() * count + max_deg - 1) / max_deg;
+      //! Only the packed blocks that `count` neighbors actually span; the
+      //! region is sized for the maximum level 0 degree.
+      const size_t block_bytes = qg_layout.region_bytes(count);
       for (size_t off = 0; off < block_bytes; off += 64) {
         ailego_prefetch(block + off);
       }

@@ -139,15 +139,11 @@ class PqFastQuantizer : public Quantizer,
       const void *const *dp_list, int dp_num, const void *query,
       float *dist_list) const override;
 
-  float calc_distance_dp_dp(const void *dp1, const void *dp2) const override;
-
-  //! FastScan shares PqInt4's 16-centroid codebook and plain nibble code
-  //! layout, so code-vs-code (SDC) distance is available via the same
+  //! Code-vs-code (SDC) distance.  FastScan shares PqInt4's 16-centroid
+  //! codebook and plain nibble code layout, so it reuses the same
   //! centroid-to-centroid dist_table_ and int4 SDC kernel.  Used only for
   //! graph construction (HNSW); search still runs the packed block scan.
-  bool supports_sdc() const override {
-    return true;
-  }
+  float calc_distance_dp_dp(const void *dp1, const void *dp2) const override;
 
   DistanceImpl distance(const void *query,
                         const IndexQueryMeta &qmeta) const override;

@@ -891,25 +891,7 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
 
   ctx->clear();
   ctx->bind_dist_space(add_distance_, add_batch_distance_, provider_);
-  //! Graph construction compares stored codes with each other (SDC).  A
-  //! quantizer without SDC (e.g. FastScan, which keeps no symmetric distance
-  //! table) must build on the original vectors instead: detaching the
-  //! quantizer makes the calculator fall back to the provider metric over raw
-  //! vectors, which is both usable and more accurate than SDC.  The stored
-  //! representation is unaffected, codes are still written for search time.
-  const bool build_with_sdc =
-      add_quantizer_ == nullptr || add_quantizer_->supports_sdc();
-  if (ailego_unlikely(!build_with_sdc && provider_ == nullptr)) {
-    LOG_ERROR(
-        "Turbo quantizer '%s' provides no code-vs-code distance, so an "
-        "original vector provider is required to build the graph",
-        turbo_quantizer_class_.c_str());
-    (*stats_.mutable_discarded_count())++;
-    return IndexError_Unsupported;
-  }
-  ctx->update_dist_caculator_quantizer(
-      build_with_sdc ? add_quantizer_ : zvec::turbo::Quantizer::Pointer{},
-      /*symmetric=*/build_with_sdc);
+  ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
   //! use the original vector from provider as the build query, fetched
@@ -1030,25 +1012,7 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
 
   ctx->clear();
   ctx->bind_dist_space(add_distance_, add_batch_distance_, provider_);
-  //! Graph construction compares stored codes with each other (SDC).  A
-  //! quantizer without SDC (e.g. FastScan, which keeps no symmetric distance
-  //! table) must build on the original vectors instead: detaching the
-  //! quantizer makes the calculator fall back to the provider metric over raw
-  //! vectors, which is both usable and more accurate than SDC.  The stored
-  //! representation is unaffected, codes are still written for search time.
-  const bool build_with_sdc =
-      add_quantizer_ == nullptr || add_quantizer_->supports_sdc();
-  if (ailego_unlikely(!build_with_sdc && provider_ == nullptr)) {
-    LOG_ERROR(
-        "Turbo quantizer '%s' provides no code-vs-code distance, so an "
-        "original vector provider is required to build the graph",
-        turbo_quantizer_class_.c_str());
-    (*stats_.mutable_discarded_count())++;
-    return IndexError_Unsupported;
-  }
-  ctx->update_dist_caculator_quantizer(
-      build_with_sdc ? add_quantizer_ : zvec::turbo::Quantizer::Pointer{},
-      /*symmetric=*/build_with_sdc);
+  ctx->update_dist_caculator_quantizer(add_quantizer_, /*symmetric=*/true);
   ctx->check_need_adjuct_ctx(entity_->doc_cnt());
 
   //! use the original vector from provider as the build query

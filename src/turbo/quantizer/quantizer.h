@@ -124,14 +124,6 @@ class Quantizer {
   //! Distance between two quantized datapoints
   virtual float calc_distance_dp_dp(const void *dp1, const void *dp2) const = 0;
 
-  //! Whether code-vs-code (symmetric, SDC) distance is available.  Batch-scan
-  //! quantizers such as FastScan keep no symmetric distance table, so callers
-  //! that would use a stored code as the query (e.g. graph construction) must
-  //! fall back to the asymmetric path with a quantized query instead.
-  virtual bool supports_sdc() const {
-    return true;
-  }
-
   //! Quantize a query vector for search
   virtual int quantize(const void * /*query*/, const IndexQueryMeta & /*qmeta*/,
                        std::string * /*out*/,

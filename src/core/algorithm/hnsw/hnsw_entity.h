@@ -129,26 +129,6 @@ struct HNSWHeader {
     return graph.node_size;
   }
 
-  size_t qg_block_bytes() const {
-    return graph.qg_block_bytes;
-  }
-
-  size_t qg_block_vectors() const {
-    return graph.qg_block_vectors;
-  }
-
-  size_t qg_region_size() const {
-    return graph.qg_region_size;
-  }
-
-  size_t qg_offset() const {
-    return graph.qg_offset;
-  }
-
-  bool qg_materialized() const {
-    return graph.qg_materialized != 0U;
-  }
-
   size_t ef_construction() const {
     return graph.ef_construction;
   }
