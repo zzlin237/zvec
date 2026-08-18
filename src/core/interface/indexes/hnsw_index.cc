@@ -139,6 +139,21 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
         proxima_index_params_.set("num_chunk", pq_param->num_chunk);
         break;
       }
+      case QuantizerType::kPQFast: {
+        const auto *pq_param = dynamic_cast<const PqQuantizerParam *>(
+            param_.quantizer_param.get());
+        if (!pq_param) {
+          break;
+        }
+        proxima_index_params_.set(
+            core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, "PqFastQuantizer");
+        proxima_index_params_.set("num_chunk", pq_param->num_chunk);
+        // FastScan on a graph only pays off with the quantized graph region:
+        // without it a hop falls back to per-candidate scalar ADC, which is
+        // slower than the gather-style PQ quantizers.
+        proxima_index_params_.set(core::PARAM_HNSW_STREAMER_QG_ENABLE, true);
+        break;
+      }
       default:
         // kNone or unsupported type -> leave turbo_quantizer_class_ empty
         // (streamer will use legacy metric distance path)

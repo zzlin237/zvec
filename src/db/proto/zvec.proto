@@ -77,6 +77,9 @@ enum QuantizeType {
   QT_INT4 = 3;
   QT_RABITQ = 4;
   QT_PQ = 5;
+  // 4-bit PQ with FastScan: codes are block-interleaved over 32 vectors and
+  // scanned with an in-register uint8 LUT.  num_bits is implied (always 4).
+  QT_PQ_FAST = 6;
 };
 
 enum MetricType {

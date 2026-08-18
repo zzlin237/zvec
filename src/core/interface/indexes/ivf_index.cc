@@ -54,6 +54,19 @@ int IVFIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
       proxima_index_params_.set("num_chunk", pq_param->num_chunk);
       break;
     }
+    case QuantizerType::kPQFast: {
+      const auto *pq_param =
+          dynamic_cast<const PqQuantizerParam *>(param_.quantizer_param.get());
+      if (!pq_param) {
+        break;
+      }
+      // The packed layout interleaves exactly 32 codes, which matches the
+      // builder's default block_vector_count, so no extra param is needed.
+      proxima_index_params_.set(core::PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS,
+                                "PqFastQuantizer");
+      proxima_index_params_.set("num_chunk", pq_param->num_chunk);
+      break;
+    }
     default:
       // kNone or unsupported type -> plain IVF (legacy metric distance path)
       break;

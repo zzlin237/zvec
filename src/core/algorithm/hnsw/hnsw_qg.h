@@ -107,10 +107,13 @@ class QgGraphView {
 //! Fill the QG region of every node with the packed codes of its level 0
 //! neighbors.
 //!
-//! One-shot by design: the caller must hold exclusive access, and neighbor
-//! lists must stay frozen afterwards or the region goes stale.  Blocks not
-//! covered by a node's actual degree are zero filled, so a scan of the whole
-//! region is always well defined.
+//! The caller must hold exclusive access while this runs, and must invalidate
+//! the region on any later graph mutation (a rebuild then restores it).
+//! Blocks not covered by a node's actual degree are zero filled, so a scan of
+//! the whole region is always well defined.
+//!
+//! Cost is O(doc_count * max_degree): every call rebuilds the whole region,
+//! there is no dirty-node tracking yet.
 //!
 //! @param max_degree maximum level 0 degree, sizing the neighbor buffers
 //! @param packer the packed-code capability of the active quantizer

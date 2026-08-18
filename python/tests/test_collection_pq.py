@@ -137,21 +137,26 @@ def docs(dataset: np.ndarray) -> list[Doc]:
 
 class TestHnswPqCollection:
     @pytest.mark.parametrize(
-        "num_bits,min_recall",
-        [(8, 0.6), (4, 0.3)],
-        ids=["pq_int8", "pq_int4"],
+        "quantize_type,num_bits,min_recall",
+        [
+            (QuantizeType.PQ, 8, 0.6),
+            (QuantizeType.PQ, 4, 0.3),
+            (QuantizeType.PQ_FAST, 4, 0.3),
+        ],
+        ids=["pq_int8", "pq_int4", "pq_fast"],
     )
     def test_insert_query_recall(
-        self, tmp_path_factory, dataset, docs, num_bits, min_recall
+        self, tmp_path_factory, dataset, docs, quantize_type, num_bits,
+        min_recall
     ):
         coll = create_collection(
             tmp_path_factory,
-            f"test_hnsw_pq_int{num_bits}",
+            f"test_hnsw_{quantize_type.name.lower()}_{num_bits}",
             HnswIndexParam(
                 metric_type=MetricType.L2,
                 m=16,
                 ef_construction=200,
-                quantize_type=QuantizeType.PQ,
+                quantize_type=quantize_type,
                 quantizer_param=QuantizerParam(num_chunk=8, num_bits=num_bits),
             ),
         )
@@ -169,7 +174,59 @@ class TestHnswPqCollection:
 
             recall = average_recall(coll, dataset, HnswQueryParam(ef=200))
             assert recall >= min_recall, (
-                f"HNSW+PQ int{num_bits} recall@{TOPK} too low: {recall:.3f}"
+                f"HNSW+{quantize_type.name} recall@{TOPK} too low: "
+                f"{recall:.3f}"
+            )
+        finally:
+            coll.destroy()
+
+    def test_fast_scan_insert_after_optimize(
+        self, tmp_path_factory, dataset, docs
+    ):
+        """PQ_FAST keeps a quantized graph region that an insert invalidates.
+
+        Inserting after the index was built must still succeed (the region is
+        rebuilt on the next flush), and recall must survive both states.
+        """
+        coll = create_collection(
+            tmp_path_factory,
+            "test_hnsw_pq_fast_reinsert",
+            HnswIndexParam(
+                metric_type=MetricType.L2,
+                m=16,
+                ef_construction=200,
+                quantize_type=QuantizeType.PQ_FAST,
+                quantizer_param=QuantizerParam(num_chunk=8),
+            ),
+        )
+        try:
+            for item in coll.insert(docs):
+                assert item.ok()
+            coll.optimize(option=OptimizeOption())
+            recall_before = average_recall(
+                coll, dataset, HnswQueryParam(ef=200)
+            )
+            assert recall_before >= 0.3
+
+            # Insert into the already built segment: this invalidates the
+            # quantized graph region instead of rejecting the write.
+            extra = make_vectors(20, DIM, seed=7)
+            extra_docs = [
+                Doc(
+                    id=f"extra_{i}",
+                    fields={"id": NUM_DOCS + i},
+                    vectors={"embedding": extra[i].tolist()},
+                )
+                for i in range(len(extra))
+            ]
+            for item in coll.insert(extra_docs):
+                assert item.ok()
+            assert coll.stats.doc_count == len(docs) + len(extra_docs)
+
+            coll.flush()
+            recall_after = average_recall(coll, dataset, HnswQueryParam(ef=200))
+            assert recall_after >= 0.3, (
+                f"recall collapsed after re-insert: {recall_after:.3f}"
             )
         finally:
             coll.destroy()
@@ -206,21 +263,32 @@ class TestHnswPqCollection:
             f"{recalls[4]:.3f}"
         )
 
-    def test_persistence_reopen(self, tmp_path_factory, dataset, docs):
+    @pytest.mark.parametrize(
+        "quantize_type,num_bits,min_recall",
+        [(QuantizeType.PQ, 8, 0.6), (QuantizeType.PQ_FAST, 4, 0.3)],
+        ids=["pq_int8", "pq_fast"],
+    )
+    def test_persistence_reopen(
+        self, tmp_path_factory, dataset, docs, quantize_type, num_bits,
+        min_recall
+    ):
         temp_dir = tmp_path_factory.mktemp("zvec_pq_reopen")
-        path = str(temp_dir / "test_hnsw_pq_reopen")
+        name = f"test_hnsw_{quantize_type.name.lower()}_reopen"
+        path = str(temp_dir / name)
         option = CollectionOption(read_only=False, enable_mmap=True)
 
         coll = zvec.create_and_open(
             path=path,
             schema=make_schema(
-                "test_hnsw_pq_reopen",
+                name,
                 HnswIndexParam(
                     metric_type=MetricType.L2,
                     m=16,
                     ef_construction=200,
-                    quantize_type=QuantizeType.PQ,
-                    quantizer_param=QuantizerParam(num_chunk=8, num_bits=8),
+                    quantize_type=quantize_type,
+                    quantizer_param=QuantizerParam(
+                        num_chunk=8, num_bits=num_bits
+                    ),
                 ),
             ),
             option=option,
@@ -233,11 +301,12 @@ class TestHnswPqCollection:
         coll.flush()
 
         recall_before = average_recall(coll, dataset, HnswQueryParam(ef=200))
-        assert recall_before >= 0.6
+        assert recall_before >= min_recall
         del coll
 
-        # Reopen: the PQ codebook must be restored from the persisted index,
-        # otherwise recall would collapse.
+        # Reopen: the PQ codebook must be restored from the persisted index
+        # (and for PQ_FAST also the quantized graph geometry), otherwise
+        # recall would collapse.
         reopened = zvec.open(path=path, option=option)
         try:
             assert reopened.stats.doc_count == len(docs)
@@ -257,21 +326,26 @@ class TestHnswPqCollection:
 
 class TestIvfPqCollection:
     @pytest.mark.parametrize(
-        "num_bits,min_recall",
-        [(8, 0.6), (4, 0.3)],
-        ids=["pq_int8", "pq_int4"],
+        "quantize_type,num_bits,min_recall",
+        [
+            (QuantizeType.PQ, 8, 0.6),
+            (QuantizeType.PQ, 4, 0.3),
+            (QuantizeType.PQ_FAST, 4, 0.3),
+        ],
+        ids=["pq_int8", "pq_int4", "pq_fast"],
     )
     def test_insert_optimize_query_recall(
-        self, tmp_path_factory, dataset, docs, num_bits, min_recall
+        self, tmp_path_factory, dataset, docs, quantize_type, num_bits,
+        min_recall
     ):
         coll = create_collection(
             tmp_path_factory,
-            f"test_ivf_pq_int{num_bits}",
+            f"test_ivf_{quantize_type.name.lower()}_{num_bits}",
             IVFIndexParam(
                 metric_type=MetricType.L2,
                 n_list=8,
                 n_iters=5,
-                quantize_type=QuantizeType.PQ,
+                quantize_type=quantize_type,
                 quantizer_param=QuantizerParam(num_chunk=8, num_bits=num_bits),
             ),
         )
@@ -288,7 +362,8 @@ class TestIvfPqCollection:
             # Probe all lists so recall loss comes from PQ only.
             recall = average_recall(coll, dataset, IVFQueryParam(nprobe=8))
             assert recall >= min_recall, (
-                f"IVF+PQ int{num_bits} recall@{TOPK} too low: {recall:.3f}"
+                f"IVF+{quantize_type.name} recall@{TOPK} too low: "
+                f"{recall:.3f}"
             )
         finally:
             coll.destroy()

@@ -19,6 +19,7 @@
 #include <thread>
 #include <vector>
 #include <zvec/ailego/logger/logger.h>
+#include <zvec/ailego/utility/time_helper.h>
 #include <zvec/core/framework/index_error.h>
 #include <zvec/core/framework/index_threads.h>
 
@@ -57,6 +58,7 @@ size_t QgLayout::configure(size_t base_size, size_t degree) {
 int QgMaterialize(QgGraphView &graph, const QgLayout &layout, size_t max_degree,
                   const zvec::turbo::PackedCodeQuantizer *packer,
                   uint32_t thread_count) {
+  ailego::ElapsedTime timer;
   if (packer == nullptr) {
     LOG_ERROR("Materialize quantized graph without a packer");
     return IndexError_InvalidArgument;
@@ -157,8 +159,10 @@ int QgMaterialize(QgGraphView &graph, const QgLayout &layout, size_t max_degree,
   }
 
   LOG_INFO(
-      "Materialized quantized graph, docs=%u blocks/node=%zu region=%u bytes",
-      docs, blocks, layout.region_size);
+      "Materialized quantized graph, docs=%u blocks/node=%zu region=%u bytes "
+      "cost=%zums",
+      docs, blocks, layout.region_size,
+      static_cast<size_t>(timer.milli_seconds()));
   return 0;
 }
 

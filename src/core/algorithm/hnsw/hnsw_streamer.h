@@ -275,10 +275,22 @@ class HnswStreamer : public IndexStreamer {
   //! so it is included in dump/close/flush persistence.
   void persist_quantizer_to_meta();
 
+  //! Create and init a turbo quantizer of `class_name` from the current meta
+  //! and streamer params, without binding it to this streamer.  Used both to
+  //! build the real quantizer and to probe a capability (e.g. the quantized
+  //! graph geometry) before the real one exists.
+  zvec::turbo::Quantizer::Pointer create_turbo_quantizer(
+      const std::string &class_name) const;
+
   //! Materialize the quantized graph region (see hnsw_qg.h) on flush/close
-  //! when it is reserved and still empty.  Afterwards the index is read-only:
-  //! further vectors would change neighbor lists and leave the region stale.
+  //! when it is reserved and still stale.  Repeatable: an insert invalidates
+  //! the region and the next flush rebuilds it.
   int materialize_qg_if_needed();
+
+  //! Mark the quantized graph region stale after an insert and refresh the
+  //! context magic, so no search keeps scanning blocks that no longer match
+  //! the neighbor lists.
+  int invalidate_qg();
 
   //! To share ctx across streamer/searcher, we need to update the context for
   //! current streamer/searcher
@@ -323,9 +335,9 @@ class HnswStreamer : public IndexStreamer {
   std::string turbo_quantizer_class_{};
 
   //! Quantized graph region (see hnsw_qg.h): requested by params, effective
-  //! only when the quantizer exposes the packed-code capability.  Once the
-  //! region is materialized (on flush/close) the index accepts no more
-  //! vectors, because the stored blocks would go stale.
+  //! only when the quantizer exposes the packed-code capability.  Inserts
+  //! invalidate the materialized region; the next flush rebuilds it, so a
+  //! write-heavy segment pays that rebuild on every flush.
   bool qg_enable_{false};
 
   Stats stats_{};

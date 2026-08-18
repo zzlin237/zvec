@@ -33,7 +33,7 @@ namespace zvec {
 std::unordered_map<DataType, std::set<QuantizeType>> quantize_type_map = {
     {DataType::VECTOR_FP32,
      {QuantizeType::FP16, QuantizeType::INT4, QuantizeType::INT8,
-      QuantizeType::RABITQ, QuantizeType::PQ}},
+      QuantizeType::RABITQ, QuantizeType::PQ, QuantizeType::PQ_FAST}},
     // {DataType::VECTOR_FP64, {QuantizeType::FP16}},
     {DataType::SPARSE_VECTOR_FP32, {QuantizeType::FP16}},
 };
@@ -261,7 +261,10 @@ Status FieldSchema::validate() const {
           }
         }
       }
-      if (vector_index_params->quantize_type() == QuantizeType::PQ) {
+      const bool is_pq_family =
+          vector_index_params->quantize_type() == QuantizeType::PQ ||
+          vector_index_params->quantize_type() == QuantizeType::PQ_FAST;
+      if (is_pq_family) {
         // Turbo PQ quantizers are only wired into the HNSW streamer and the
         // IVF builder; other index types would silently ignore them.
         if (index_params_->type() != IndexType::HNSW &&
@@ -273,7 +276,10 @@ Status FieldSchema::validate() const {
               IndexTypeCodeBook::AsString(index_params_->type()));
         }
         const auto &qp = vector_index_params->quantizer_param();
-        if (qp.num_bits() != 4 && qp.num_bits() != 8) {
+        // FastScan is inherently 4-bit (a 16-entry LUT is what fits one SIMD
+        // lane), so num_bits carries no meaning there and is not validated.
+        if (vector_index_params->quantize_type() == QuantizeType::PQ &&
+            qp.num_bits() != 4 && qp.num_bits() != 8) {
           return Status::InvalidArgument(
               "schema validate failed: PQ num_bits must be 4 or 8, but "
               "field[",

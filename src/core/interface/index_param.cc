@@ -477,6 +477,10 @@ QuantizerParam::Pointer QuantizerParam::Create(QuantizerType t) {
   switch (t) {
     case QuantizerType::kPQ:
       return std::make_shared<PqQuantizerParam>();
+    case QuantizerType::kPQFast:
+      //! FastScan is inherently 4-bit; keep num_bits consistent with that.
+      return std::make_shared<PqQuantizerParam>(8, 4, false,
+                                                QuantizerType::kPQFast);
     default:
       return std::make_shared<QuantizerParam>(t);
   }

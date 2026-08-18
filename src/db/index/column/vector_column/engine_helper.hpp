@@ -316,6 +316,8 @@ class ProximaEngineHelper {
         return core_interface::QuantizerType::kRabitq;
       case QuantizeType::PQ:
         return core_interface::QuantizerType::kPQ;
+      case QuantizeType::PQ_FAST:
+        return core_interface::QuantizerType::kPQFast;
       default:
         return tl::make_unexpected(
             Status::InvalidArgument("unsupported quantize type"));
@@ -377,14 +379,21 @@ class ProximaEngineHelper {
     if (auto quantize_type =
             convert_to_engine_quantize_type(db_index_params->quantize_type());
         quantize_type.has_value()) {
-      if (quantize_type.value() == core_interface::QuantizerType::kPQ) {
+      if (quantize_type.value() == core_interface::QuantizerType::kPQ ||
+          quantize_type.value() == core_interface::QuantizerType::kPQFast) {
         // PQ carries extra fields (num_chunk/num_bits) on the derived param;
         // build it explicitly so the concrete type survives Clone() in the
         // builder and the dynamic_cast in the engine index succeeds.
         const auto &qp = db_index_params->quantizer_param();
+        // FastScan is inherently 4-bit (a 16-entry LUT is what fits one SIMD
+        // lane), so num_bits is forced rather than taken from the caller,
+        // which normally leaves it at the shared default of 8.
+        const bool is_fast =
+            quantize_type.value() == core_interface::QuantizerType::kPQFast;
         index_param_builder->WithQuantizerParam(
             std::make_shared<core_interface::PqQuantizerParam>(
-                qp.num_chunk(), qp.num_bits(), qp.enable_rotate()));
+                qp.num_chunk(), is_fast ? 4 : qp.num_bits(), qp.enable_rotate(),
+                quantize_type.value()));
       } else {
         index_param_builder->WithQuantizerParam(
             core_interface::QuantizerParam::Create(quantize_type.value()));

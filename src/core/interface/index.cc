@@ -180,6 +180,7 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
           // no converter needed.
           return core::IndexError_Success;
         case QuantizerType::kPQ:
+        case QuantizerType::kPQFast:
           // PQ is handled by turbo quantizer in streamer.
           // Cosine normalization is done inside PqInt8Quantizer,
           // no converter needed — creating CosineNormalizeConverter would
@@ -215,6 +216,7 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
           // needed
           return core::IndexError_Success;
         case QuantizerType::kPQ:
+        case QuantizerType::kPQFast:
           // PQ is handled by turbo quantizer in streamer, no converter needed
           return core::IndexError_Success;
         case QuantizerType::kFP16:

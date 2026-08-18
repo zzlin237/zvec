@@ -467,6 +467,8 @@ struct QuantizeTypeCodeBook {
         return QuantizeType::RABITQ;
       case proto::QuantizeType::QT_PQ:
         return QuantizeType::PQ;
+      case proto::QuantizeType::QT_PQ_FAST:
+        return QuantizeType::PQ_FAST;
       default:
         return QuantizeType::UNDEFINED;
     }
@@ -484,6 +486,8 @@ struct QuantizeTypeCodeBook {
         return proto::QuantizeType::QT_RABITQ;
       case QuantizeType::PQ:
         return proto::QuantizeType::QT_PQ;
+      case QuantizeType::PQ_FAST:
+        return proto::QuantizeType::QT_PQ_FAST;
       default:
         return proto::QuantizeType::QT_UNDEFINED;
     }
@@ -501,6 +505,8 @@ struct QuantizeTypeCodeBook {
         return "RABITQ";
       case QuantizeType::PQ:
         return "PQ";
+      case QuantizeType::PQ_FAST:
+        return "PQ_FAST";
       default:
         return "UNDEFINED";
     }

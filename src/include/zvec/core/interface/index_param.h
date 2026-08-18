@@ -104,6 +104,10 @@ enum class QuantizerType {
   kUniformUint7,
   // Global uniform quantization with the full uint8 code range [0, 255].
   kUniformUint8,
+  // 4-bit Product Quantization with FastScan: codes are block-interleaved
+  // over 32 vectors and scanned with an in-register uint8 LUT.  Shares
+  // PqQuantizerParam (num_bits is implied and always 4).
+  kPQFast,
 };
 
 struct ZVEC_CORE_API SerializableBase {
@@ -157,16 +161,16 @@ struct ZVEC_CORE_API QuantizerParam : public SerializableBase {
   bool DeserializeFromJsonObject(const ailego::JsonObject &json_obj) override;
 };
 
-//! Product-Quantization specific params
+//! Product-Quantization specific params.  Shared by kPQ and kPQFast: the
+//! FastScan variant ignores num_bits (its 16-centroid layout is inherent).
 struct PqQuantizerParam : public QuantizerParam {
   int num_chunk = 8;  // M: number of chunks
   int num_bits = 8;   // bits per chunk
 
   // Constructors
-  PqQuantizerParam(int chunks = 8, int bits = 8, bool rotate = false)
-      : QuantizerParam(QuantizerType::kPQ, rotate),
-        num_chunk(chunks),
-        num_bits(bits) {}
+  PqQuantizerParam(int chunks = 8, int bits = 8, bool rotate = false,
+                   QuantizerType t = QuantizerType::kPQ)
+      : QuantizerParam(t, rotate), num_chunk(chunks), num_bits(bits) {}
 
   QuantizerParam::Pointer Clone() const override {
     return std::make_shared<PqQuantizerParam>(*this);

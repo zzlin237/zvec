@@ -79,6 +79,10 @@ enum class QuantizeType : uint32_t {
   INT4 = 3,
   RABITQ = 4,
   PQ = 5,
+  //! 4-bit PQ with FastScan: codes are block-interleaved over 32 vectors and
+  //! scanned with an in-register uint8 LUT.  On HNSW it also enables the
+  //! quantized graph region.  num_bits is implied (always 4).
+  PQ_FAST = 6,
 };
 
 enum class MetricType : uint32_t {

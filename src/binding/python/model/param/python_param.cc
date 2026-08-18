@@ -74,6 +74,8 @@ static std::string quantize_type_to_string(const QuantizeType type) {
       return "RABITQ";
     case QuantizeType::PQ:
       return "PQ";
+    case QuantizeType::PQ_FAST:
+      return "PQ_FAST";
     default:
       return "UNDEFINED";
   }
@@ -414,7 +416,8 @@ Attributes:
         divisible by this value. Defaults to 8.
     num_bits (int): Bits per PQ sub-quantizer code, 8 (256 centroids) or
         4 (16 centroids, nibble-packed). Only effective with
-        quantize_type=PQ. Defaults to 8.
+        quantize_type=PQ; ignored by quantize_type=PQ_FAST, which is
+        inherently 4-bit. Defaults to 8.
 
 Examples:
     >>> qp = QuantizerParam(enable_rotate=True)
@@ -446,9 +449,7 @@ Examples:
           "quantize_type=PQ.")
       .def_property_readonly(
           "num_bits",
-          [](const QuantizerParam &self) -> int {
-            return self.num_bits();
-          },
+          [](const QuantizerParam &self) -> int { return self.num_bits(); },
           "int: Bits per PQ sub-quantizer code (4 or 8). Only effective "
           "with quantize_type=PQ.")
       .def(
@@ -589,6 +590,18 @@ Examples:
     ...     ef_construction=500,
     ...     quantize_type=QuantizeType.PQ,
     ...     quantizer_param=QuantizerParam(num_chunk=32, num_bits=8),
+    ... )
+
+    >>> # HNSW + FastScan: 4-bit PQ scanned with an in-register SIMD LUT.
+    >>> # Each node also stores its neighbors' packed codes (quantized graph),
+    >>> # which is built on flush and rebuilt after further inserts, so the
+    >>> # per-node record - and the index - grows well beyond plain PQ.
+    >>> fast_params = HnswIndexParam(
+    ...     metric_type=MetricType.L2,
+    ...     m=15,
+    ...     ef_construction=500,
+    ...     quantize_type=QuantizeType.PQ_FAST,
+    ...     quantizer_param=QuantizerParam(num_chunk=32),
     ... )
 )pbdoc");
   hnsw_params
@@ -1150,6 +1163,15 @@ Examples:
     ...     n_list=100,
     ...     quantize_type=QuantizeType.PQ,
     ...     quantizer_param=QuantizerParam(num_chunk=16, num_bits=8),
+    ... )
+
+    >>> # IVF + FastScan: 4-bit PQ codes stored block-interleaved over 32
+    >>> # vectors and scanned with an in-register SIMD LUT.
+    >>> fast_params = IVFIndexParam(
+    ...     metric_type=MetricType.L2,
+    ...     n_list=100,
+    ...     quantize_type=QuantizeType.PQ_FAST,
+    ...     quantizer_param=QuantizerParam(num_chunk=16),
     ... )
 )pbdoc");
   ivf_params

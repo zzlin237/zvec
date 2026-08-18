@@ -230,6 +230,35 @@ int HnswStreamer::cleanup(void) {
   return 0;
 }
 
+zvec::turbo::Quantizer::Pointer HnswStreamer::create_turbo_quantizer(
+    const std::string &class_name) const {
+  auto quantizer = IndexFactory::CreateQuantizer(class_name);
+  if (!quantizer) {
+    LOG_WARN("HnswStreamer: failed to create quantizer '%s'",
+             class_name.c_str());
+    return nullptr;
+  }
+
+  ailego::Params quantizer_params;
+  auto &sp = meta_.streamer_params();
+  int nsq = 0;
+  if (sp.get("num_chunk", &nsq)) {
+    quantizer_params.set("num_chunk", nsq);
+  }
+  bool use_zero_mean = false;
+  if (sp.get("use_zero_mean", &use_zero_mean)) {
+    quantizer_params.set("use_zero_mean", use_zero_mean);
+  }
+
+  int ret = quantizer->init(meta_, quantizer_params);
+  if (ret != 0) {
+    LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d", class_name.c_str(),
+              ret);
+    return nullptr;
+  }
+  return quantizer;
+}
+
 int HnswStreamer::setup_entity() {
   entity_->set_use_key_info_map(use_id_map_);
   entity_->set_ef_construction(ef_construction_);
@@ -273,9 +302,16 @@ int HnswStreamer::setup_entity() {
       sp.get("entity_qg_block_vectors", &qg_block_vectors)) {
     sp.get("entity_qg_materialized", &qg_materialized);
   } else if (qg_enable_) {
+    //! The geometry only depends on the code layout, not on trained data, so
+    //! when the real quantizer does not exist yet (a new index creates it
+    //! after this point) an untrained probe instance answers just as well.
+    auto source = add_quantizer_;
+    if (!source && !turbo_quantizer_class_.empty()) {
+      source = create_turbo_quantizer(turbo_quantizer_class_);
+    }
     auto packer =
         std::dynamic_pointer_cast<const zvec::turbo::PackedCodeQuantizer>(
-            add_quantizer_);
+            source);
     if (packer) {
       qg_block_vectors = packer->packed_block_vectors();
       qg_block_bytes = packer->packed_block_bytes();
@@ -587,30 +623,14 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
       }
     } else if (!turbo_quantizer_class_.empty()) {
       // New index: create and init a fresh quantizer.
-      add_quantizer_ = IndexFactory::CreateQuantizer(turbo_quantizer_class_);
+      add_quantizer_ = create_turbo_quantizer(turbo_quantizer_class_);
       if (add_quantizer_) {
-        ailego::Params quantizer_params;
-        int nsq = 0;
-        if (sp.get("num_chunk", &nsq)) {
-          quantizer_params.set("num_chunk", nsq);
-        }
-        bool use_zero_mean = false;
-        if (sp.get("use_zero_mean", &use_zero_mean)) {
-          quantizer_params.set("use_zero_mean", use_zero_mean);
-        }
-        ret = add_quantizer_->init(meta_, quantizer_params);
-        if (ret != 0) {
-          LOG_ERROR("Failed to init turbo quantizer '%s', ret=%d",
-                    turbo_quantizer_class_.c_str(), ret);
-          add_quantizer_.reset();
-        } else {
-          search_quantizer_ = add_quantizer_;
-          LOG_INFO("HnswStreamer: using turbo quantizer '%s'",
-                   turbo_quantizer_class_.c_str());
-        }
+        search_quantizer_ = add_quantizer_;
+        LOG_INFO("HnswStreamer: using turbo quantizer '%s'",
+                 turbo_quantizer_class_.c_str());
       } else {
         LOG_WARN(
-            "HnswStreamer: failed to create quantizer '%s', "
+            "HnswStreamer: quantizer '%s' unavailable, "
             "falling back to metric distance",
             turbo_quantizer_class_.c_str());
       }
@@ -681,6 +701,29 @@ void HnswStreamer::persist_quantizer_to_meta() {
   }
 }
 
+int HnswStreamer::invalidate_qg() {
+  const std::lock_guard<std::mutex> lk(mutex_);
+  //! Re-check under the lock: concurrent adds all reach this point, only the
+  //! first one has to do the work.
+  if (!entity_->qg_ready()) {
+    return 0;
+  }
+
+  int ret = entity_->invalidate_qg();
+  if (ret != 0) {
+    LOG_ERROR("Failed to invalidate the quantized graph, ret=%d", ret);
+    return ret;
+  }
+  meta_.mutable_streamer_params()->set("entity_qg_materialized", false);
+
+  //! Search contexts hold a clone of the entity whose header snapshot still
+  //! says "materialized"; without a new magic they would keep scanning the now
+  //! stale region.  Bumping it forces every context to re-clone on next use.
+  magic_ = IndexContext::GenerateMagic();
+  LOG_INFO("Quantized graph invalidated by an insert, rebuilt on next flush");
+  return 0;
+}
+
 int HnswStreamer::materialize_qg_if_needed() {
   if (!entity_->qg_enabled() || entity_->qg_ready()) {
     return 0;
@@ -698,7 +741,8 @@ int HnswStreamer::materialize_qg_if_needed() {
   }
 
   //! Exclusive: materialization reads every neighbor list, so no vector may
-  //! be added while it runs, and none afterwards (the blocks would go stale).
+  //! be added while it runs.  An insert afterwards invalidates the region and
+  //! the next flush rebuilds it.
   shared_mutex_.lock();
   AILEGO_DEFER([&]() { shared_mutex_.unlock(); });
 
@@ -880,13 +924,15 @@ int HnswStreamer::add_with_id_impl(uint32_t id, const void *query,
   }
   AILEGO_DEFER([&]() { shared_mutex_.unlock_shared(); });
 
-  //! The quantized graph region holds each node's neighbor codes, so adding a
-  //! vector after materialization would change neighbor lists the region no
-  //! longer matches.  The index is read-only from then on.
+  //! The quantized graph region holds each node's neighbor codes, so this
+  //! insert invalidates it: the next flush rebuilds the region, and until then
+  //! searches fall back to the per-candidate path.
   if (ailego_unlikely(entity_->qg_ready())) {
-    LOG_ERROR("Cannot add vector: the quantized graph is already materialized");
-    (*stats_.mutable_discarded_count())++;
-    return IndexError_Unsupported;
+    ret = invalidate_qg();
+    if (ailego_unlikely(ret != 0)) {
+      (*stats_.mutable_discarded_count())++;
+      return ret;
+    }
   }
 
   ctx->clear();
@@ -1001,13 +1047,15 @@ int HnswStreamer::add_impl(uint64_t pkey, const void *query,
   }
   AILEGO_DEFER([&]() { shared_mutex_.unlock_shared(); });
 
-  //! The quantized graph region holds each node's neighbor codes, so adding a
-  //! vector after materialization would change neighbor lists the region no
-  //! longer matches.  The index is read-only from then on.
+  //! The quantized graph region holds each node's neighbor codes, so this
+  //! insert invalidates it: the next flush rebuilds the region, and until then
+  //! searches fall back to the per-candidate path.
   if (ailego_unlikely(entity_->qg_ready())) {
-    LOG_ERROR("Cannot add vector: the quantized graph is already materialized");
-    (*stats_.mutable_discarded_count())++;
-    return IndexError_Unsupported;
+    ret = invalidate_qg();
+    if (ailego_unlikely(ret != 0)) {
+      (*stats_.mutable_discarded_count())++;
+      return ret;
+    }
   }
 
   ctx->clear();

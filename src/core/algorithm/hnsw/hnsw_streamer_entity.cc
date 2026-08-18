@@ -175,6 +175,18 @@ int HnswStreamerEntity::materialize_qg(
   return flush_header();
 }
 
+int HnswStreamerEntity::invalidate_qg() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!qg_ready()) {
+    return 0;
+  }
+  set_qg_materialized(false);
+  //! Persist right away: the region no longer matches the neighbor lists, and
+  //! a header still claiming "materialized" would make a reopened index scan
+  //! stale blocks and return wrong distances without any error.
+  return flush_header();
+}
+
 const Neighbors HnswStreamerEntity::get_neighbors(level_t level,
                                                   node_id_t id) const {
   size_t offset = 0UL;

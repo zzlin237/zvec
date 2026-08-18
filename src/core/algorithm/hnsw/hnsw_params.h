@@ -123,8 +123,9 @@ static const std::string PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS(
 
 //! Enable the quantized graph region (see hnsw_qg.h): every node record also
 //! stores the packed codes of its level 0 neighbors, materialized on
-//! flush/close, after which the index is read-only.  Requires a turbo
-//! quantizer exposing the packed-code capability.
+//! flush/close.  An insert invalidates the region and the next flush rebuilds
+//! it, so a write-heavy segment pays a full rebuild per flush.  Requires a
+//! turbo quantizer exposing the packed-code capability.
 static const std::string PARAM_HNSW_STREAMER_QG_ENABLE(
     "proxima.hnsw.streamer.qg_enable");
 

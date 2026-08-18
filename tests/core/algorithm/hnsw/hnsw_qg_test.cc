@@ -277,15 +277,32 @@ TEST_F(HnswQgTest, TestQgSearchRecall) {
       ASSERT_EQ(0, streamer->add_impl(i, raw_vecs[i].data(), qmeta, add_ctx));
     }
 
-    //! Materializes the region, after which the index is read-only.
+    //! Materializes the region, so the block scan takes over.
     ASSERT_EQ(0, streamer->flush(0UL));
     ASSERT_TRUE(hnsw->qg_ready());
-    ASSERT_EQ(
-        IndexError_Unsupported,
-        streamer->add_impl(kDocCount, raw_vecs[0].data(), qmeta, add_ctx));
 
     float avg_recall = run_queries(streamer, queries, qmeta, &total_compared);
     EXPECT_GE(avg_recall, 0.8f) << "avg_recall=" << avg_recall;
+
+    //! An insert after materialization is accepted and invalidates the region
+    //! (its blocks no longer match the neighbor lists); searches keep working
+    //! through the per-candidate fallback, and the next flush rebuilds it.
+    ASSERT_EQ(
+        0, streamer->add_impl(kDocCount, raw_vecs[0].data(), qmeta, add_ctx));
+    EXPECT_FALSE(hnsw->qg_ready());
+
+    size_t stale_compared = 0;
+    float stale_recall = run_queries(streamer, queries, qmeta, &stale_compared);
+    EXPECT_GE(stale_recall, 0.8f) << "invalidated avg_recall=" << stale_recall;
+
+    ASSERT_EQ(0, streamer->flush(0UL));
+    EXPECT_TRUE(hnsw->qg_ready());
+
+    size_t rebuilt_compared = 0;
+    float rebuilt_recall =
+        run_queries(streamer, queries, qmeta, &rebuilt_compared);
+    EXPECT_GE(rebuilt_recall, 0.8f) << "rebuilt avg_recall=" << rebuilt_recall;
+    EXPECT_GT(rebuilt_compared, kQueryCount);
 
     ASSERT_EQ(0, streamer->close());
   }

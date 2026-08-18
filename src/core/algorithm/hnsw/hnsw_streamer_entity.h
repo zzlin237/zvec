@@ -228,11 +228,16 @@ class HnswStreamerEntity : public HnswEntity {
   }
 
   //! Fill the QG region of every node from the codes of its level 0
-  //! neighbors, then persist the header.  One-shot materialization: the index
-  //! must not be modified afterwards, or the region goes stale.
-  //! `thread_count` 0 selects the hardware concurrency.
+  //! neighbors, then persist the header.  Repeatable: a graph mutation
+  //! invalidates the region (see invalidate_qg) and the next flush rebuilds
+  //! it.  `thread_count` 0 selects the hardware concurrency.
   int materialize_qg(const zvec::turbo::PackedCodeQuantizer *packer,
                      uint32_t thread_count);
+
+  //! Mark the QG region stale after a graph mutation and persist the header
+  //! immediately, so a crash before the next flush can never leave a reopened
+  //! index scanning a region that no longer matches its neighbor lists.
+  int invalidate_qg();
 
 
  protected:
