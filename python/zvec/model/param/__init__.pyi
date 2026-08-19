@@ -1332,14 +1332,17 @@ class QuantizerParam:
 
     Optional parameters for quantizer configuration.
 
-    This class is only needed when customizing quantizer behavior (e.g., enabling
-    random rotation or configuring PQ sub-quantizers).
+    This class is only needed when customizing quantizer behavior (e.g.,
+    enabling rotation -- random for INT8/INT4, OPQ for PQ/PQ_FAST -- or
+    configuring PQ sub-quantizers).
     It can be omitted for default quantization settings.
 
     Attributes:
-        enable_rotate (bool): Whether to apply random rotation before INT8/INT4
-            quantization to reduce quantization error.
-            Only effective with quantize_type=INT8 or INT4. Defaults to False.
+        enable_rotate (bool): Whether to apply rotation before quantization to
+            reduce quantization error. For quantize_type=INT8 or INT4 this is a
+            random rotation; for quantize_type=PQ or PQ_FAST this enables OPQ,
+            where the rotation matrix is learned jointly with the PQ codebook
+            and persisted with the index. Defaults to False.
         num_chunk (int): Number of PQ sub-quantizers (codebooks).
             Only effective with quantize_type=PQ. The vector dimension must be
             divisible by this value. Defaults to 8.
@@ -1357,6 +1360,7 @@ class QuantizerParam:
         >>> qp_pq4 = QuantizerParam(num_chunk=32, num_bits=4)
         >>> print(qp_pq4.num_bits)
         4
+        >>> qp_opq = QuantizerParam(num_chunk=32, enable_rotate=True)  # PQ + OPQ
     """
 
     def __getstate__(self) -> tuple: ...
@@ -1367,8 +1371,9 @@ class QuantizerParam:
         Constructs a QuantizerParam instance.
 
         Args:
-            enable_rotate (bool, optional): Whether to apply random rotation
-                before INT8/INT4 quantization. Defaults to False.
+            enable_rotate (bool, optional): Whether to apply rotation before
+                quantization: random rotation for INT8/INT4, learned OPQ
+                rotation for PQ/PQ_FAST. Defaults to False.
             num_chunk (int, optional): Number of PQ sub-quantizers.
                 Only effective with quantize_type=PQ. Defaults to 8.
             num_bits (int, optional): Bits per PQ sub-quantizer code (4 or 8).
@@ -1386,7 +1391,8 @@ class QuantizerParam:
     @property
     def enable_rotate(self) -> bool:
         """
-        bool: Whether random rotation is enabled before INT8/INT4 quantization.
+        bool: Whether rotation is enabled before quantization: random rotation
+            for INT8/INT4, learned OPQ rotation for PQ/PQ_FAST.
         """
 
     @property

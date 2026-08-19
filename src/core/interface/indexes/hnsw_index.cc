@@ -137,6 +137,12 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
         proxima_index_params_.set(
             core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, pq_class);
         proxima_index_params_.set("num_chunk", pq_param->num_chunk);
+        // enable_rotate on a PQ quantizer means OPQ: the turbo quantizer
+        // trains a rotation matrix jointly with the codebook and persists it
+        // in its own blob (no converter-side rotator involved).
+        if (pq_param->enable_rotate) {
+          proxima_index_params_.set("rotate_type", std::string("opq"));
+        }
         break;
       }
       case QuantizerType::kPQFast: {
@@ -148,6 +154,10 @@ int HNSWIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
         proxima_index_params_.set(
             core::PARAM_HNSW_STREAMER_TURBO_QUANTIZER_CLASS, "PqFastQuantizer");
         proxima_index_params_.set("num_chunk", pq_param->num_chunk);
+        // See the kPQ branch: enable_rotate selects OPQ inside the quantizer.
+        if (pq_param->enable_rotate) {
+          proxima_index_params_.set("rotate_type", std::string("opq"));
+        }
         // FastScan on a graph only pays off with the quantized graph region:
         // without it a hop falls back to per-candidate scalar ADC, which is
         // slower than the gather-style PQ quantizers.

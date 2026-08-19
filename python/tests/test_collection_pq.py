@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""End-to-end tests for PQ quantization (HNSW + IVF, int8/int4)."""
+"""End-to-end tests for PQ quantization (HNSW + IVF, int8/int4, OPQ)."""
 
 from __future__ import annotations
 
@@ -51,6 +51,17 @@ TOPK = 10
 def make_vectors(num: int, dim: int, seed: int = 42) -> np.ndarray:
     rng = np.random.default_rng(seed)
     return rng.standard_normal((num, dim)).astype(np.float32)
+
+
+def make_anisotropic_vectors(
+    num: int, dim: int, offset: float = 8.0, seed: int = 42
+) -> np.ndarray:
+    """Gaussian noise plus a large common component along one direction,
+    mimicking the anisotropic distribution of real embeddings."""
+    rng = np.random.default_rng(seed)
+    direction = np.full(dim, 1.0 / np.sqrt(dim), dtype=np.float32)
+    noise = rng.standard_normal((num, dim)).astype(np.float32)
+    return noise + offset * direction
 
 
 def make_docs(vectors: np.ndarray) -> list[Doc]:
@@ -179,6 +190,91 @@ class TestHnswPqCollection:
             )
         finally:
             coll.destroy()
+
+    @pytest.mark.parametrize(
+        "quantize_type,num_bits,min_recall",
+        [
+            (QuantizeType.PQ, 8, 0.6),
+            (QuantizeType.PQ, 4, 0.3),
+            (QuantizeType.PQ_FAST, 4, 0.3),
+        ],
+        ids=["opq_int8", "opq_int4", "opq_fast"],
+    )
+    def test_opq_recall(
+        self, tmp_path_factory, dataset, docs, quantize_type, num_bits,
+        min_recall
+    ):
+        """enable_rotate on PQ/PQ_FAST selects OPQ: the rotation matrix is
+        learned jointly with the codebook, recall must not degrade."""
+        coll = create_collection(
+            tmp_path_factory,
+            f"test_hnsw_opq_{quantize_type.name.lower()}_{num_bits}",
+            HnswIndexParam(
+                metric_type=MetricType.L2,
+                m=16,
+                ef_construction=200,
+                quantize_type=quantize_type,
+                quantizer_param=QuantizerParam(
+                    num_chunk=8, num_bits=num_bits, enable_rotate=True
+                ),
+            ),
+        )
+        try:
+            for item in coll.insert(docs):
+                assert item.ok()
+            coll.optimize(option=OptimizeOption())
+
+            recall = average_recall(coll, dataset, HnswQueryParam(ef=200))
+            assert recall >= min_recall, (
+                f"HNSW+{quantize_type.name}+OPQ recall@{TOPK} too low: "
+                f"{recall:.3f}"
+            )
+        finally:
+            coll.destroy()
+
+    def test_opq_effective_no_regression_on_anisotropic(
+        self, tmp_path_factory
+    ):
+        """On anisotropic data the OPQ path must train end-to-end and keep
+        a healthy recall without regressing against plain PQ.
+
+        OPQ is not guaranteed to strictly win on small synthetic datasets,
+        so the comparison uses a tolerance instead of strict ordering.
+        """
+        vectors = make_anisotropic_vectors(NUM_DOCS, DIM)
+        aniso_docs = make_docs(vectors)
+        recalls = {}
+        for enable_rotate in (False, True):
+            suffix = "opq" if enable_rotate else "plain"
+            coll = create_collection(
+                tmp_path_factory,
+                f"test_hnsw_pq_aniso_{suffix}",
+                HnswIndexParam(
+                    metric_type=MetricType.L2,
+                    m=16,
+                    ef_construction=200,
+                    quantize_type=QuantizeType.PQ,
+                    quantizer_param=QuantizerParam(
+                        num_chunk=8, num_bits=8, enable_rotate=enable_rotate
+                    ),
+                ),
+            )
+            try:
+                for item in coll.insert(aniso_docs):
+                    assert item.ok()
+                coll.optimize(option=OptimizeOption())
+                recalls[enable_rotate] = average_recall(
+                    coll, vectors, HnswQueryParam(ef=200)
+                )
+            finally:
+                coll.destroy()
+        assert recalls[True] >= 0.6, (
+            f"OPQ recall too low on anisotropic data: {recalls[True]:.3f}"
+        )
+        assert recalls[True] >= recalls[False] - 0.1, (
+            f"OPQ recall {recalls[True]:.3f} regressed against plain PQ "
+            f"{recalls[False]:.3f} on anisotropic data"
+        )
 
     def test_fast_scan_insert_after_optimize(
         self, tmp_path_factory, dataset, docs
@@ -320,6 +416,52 @@ class TestHnswPqCollection:
         finally:
             reopened.destroy()
 
+    def test_persistence_reopen_opq(self, tmp_path_factory, dataset, docs):
+        """The OPQ rotation matrix lives in the quantizer blob and must be
+        restored on reopen with unchanged recall."""
+        temp_dir = tmp_path_factory.mktemp("zvec_pq_reopen_opq")
+        name = "test_hnsw_opq_reopen"
+        path = str(temp_dir / name)
+        option = CollectionOption(read_only=False, enable_mmap=True)
+
+        coll = zvec.create_and_open(
+            path=path,
+            schema=make_schema(
+                name,
+                HnswIndexParam(
+                    metric_type=MetricType.L2,
+                    m=16,
+                    ef_construction=200,
+                    quantize_type=QuantizeType.PQ,
+                    quantizer_param=QuantizerParam(
+                        num_chunk=8, num_bits=8, enable_rotate=True
+                    ),
+                ),
+            ),
+            option=option,
+        )
+        for item in coll.insert(docs):
+            assert item.ok()
+        coll.optimize(option=OptimizeOption())
+        coll.flush()
+
+        recall_before = average_recall(coll, dataset, HnswQueryParam(ef=200))
+        assert recall_before >= 0.6
+        del coll
+
+        reopened = zvec.open(path=path, option=option)
+        try:
+            assert reopened.stats.doc_count == len(docs)
+            recall_after = average_recall(
+                reopened, dataset, HnswQueryParam(ef=200)
+            )
+            assert recall_after == pytest.approx(recall_before, abs=0.05), (
+                f"OPQ recall changed after reopen: {recall_after:.3f} "
+                f"(before: {recall_before:.3f})"
+            )
+        finally:
+            reopened.destroy()
+
 
 # ==================== IVF + PQ ====================
 
@@ -368,11 +510,81 @@ class TestIvfPqCollection:
         finally:
             coll.destroy()
 
+    @pytest.mark.parametrize(
+        "quantize_type,num_bits,min_recall",
+        [
+            (QuantizeType.PQ, 8, 0.6),
+            (QuantizeType.PQ_FAST, 4, 0.3),
+        ],
+        ids=["opq_int8", "opq_fast"],
+    )
+    def test_opq_recall(
+        self, tmp_path_factory, dataset, docs, quantize_type, num_bits,
+        min_recall
+    ):
+        coll = create_collection(
+            tmp_path_factory,
+            f"test_ivf_opq_{quantize_type.name.lower()}_{num_bits}",
+            IVFIndexParam(
+                metric_type=MetricType.L2,
+                n_list=8,
+                n_iters=5,
+                quantize_type=quantize_type,
+                quantizer_param=QuantizerParam(
+                    num_chunk=8, num_bits=num_bits, enable_rotate=True
+                ),
+            ),
+        )
+        try:
+            for item in coll.insert(docs):
+                assert item.ok()
+            coll.optimize(option=OptimizeOption())
+
+            recall = average_recall(coll, dataset, IVFQueryParam(nprobe=8))
+            assert recall >= min_recall, (
+                f"IVF+{quantize_type.name}+OPQ recall@{TOPK} too low: "
+                f"{recall:.3f}"
+            )
+        finally:
+            coll.destroy()
+
 
 # ==================== Schema validation ====================
 
 
 class TestPqSchemaValidation:
+    @pytest.mark.parametrize(
+        "index_param_factory",
+        [
+            lambda: HnswIndexParam(
+                metric_type=MetricType.L2,
+                quantize_type=QuantizeType.PQ,
+                quantizer_param=QuantizerParam(
+                    num_chunk=8, enable_rotate=True
+                ),
+            ),
+            lambda: IVFIndexParam(
+                metric_type=MetricType.L2,
+                n_list=8,
+                quantize_type=QuantizeType.PQ,
+                quantizer_param=QuantizerParam(
+                    num_chunk=8, enable_rotate=True
+                ),
+            ),
+        ],
+        ids=["hnsw_opq", "ivf_opq"],
+    )
+    def test_pq_with_enable_rotate_accepted(
+        self, tmp_path_factory, index_param_factory
+    ):
+        """PQ + enable_rotate (OPQ) is a valid configuration."""
+        coll = create_collection(
+            tmp_path_factory,
+            "test_pq_opq_accepted",
+            index_param_factory(),
+        )
+        coll.destroy()
+
     def test_flat_pq_rejected(self, tmp_path_factory):
         """PQ is only wired into HNSW / IVF; FLAT must be rejected."""
         with pytest.raises(Exception):

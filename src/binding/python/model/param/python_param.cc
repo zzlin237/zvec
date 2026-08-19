@@ -408,9 +408,11 @@ Encapsulates quantization-related settings such as enable_rotate and
 num_chunk. Designed for future extensibility.
 
 Attributes:
-    enable_rotate (bool): Whether to apply random rotation before INT8/INT4
-        quantization to reduce quantization error.
-        Only effective with quantize_type=INT8 or INT4. Defaults to False.
+    enable_rotate (bool): Whether to apply rotation before quantization to
+        reduce quantization error. For quantize_type=INT8 or INT4 this is a
+        random rotation; for quantize_type=PQ or PQ_FAST this enables OPQ,
+        where the rotation matrix is learned jointly with the PQ codebook
+        and persisted with the index. Defaults to False.
     num_chunk (int): Number of PQ sub-quantizers (codebooks).
         Only effective with quantize_type=PQ. The vector dimension must be
         divisible by this value. Defaults to 8.
@@ -429,6 +431,7 @@ Examples:
     >>> qp_pq4 = QuantizerParam(num_chunk=32, num_bits=4)
     >>> print(qp_pq4.num_bits)
     4
+    >>> qp_opq = QuantizerParam(num_chunk=32, enable_rotate=True)  # PQ + OPQ
 )pbdoc");
   quantizer_param
       .def(py::init<bool, int, int>(), py::arg("enable_rotate") = false,
@@ -438,8 +441,8 @@ Examples:
           [](const QuantizerParam &self) -> bool {
             return self.enable_rotate();
           },
-          "bool: Whether random rotation is enabled before INT8/INT4 "
-          "quantization.")
+          "bool: Whether rotation is enabled before quantization: random "
+          "rotation for INT8/INT4, learned OPQ rotation for PQ/PQ_FAST.")
       .def_property_readonly(
           "num_chunk",
           [](const QuantizerParam &self) -> int {

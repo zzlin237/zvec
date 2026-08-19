@@ -244,7 +244,11 @@ int Index::CreateAndInitConverterReformer(const QuantizerParam &param,
     }
   }
 
-  // Pass enable_rotate to converter_params (effective for INT8 and INT4)
+  // Pass enable_rotate to converter_params (effective for INT8 and INT4).
+  // PQ / PQFast never reach this point: they returned above because the turbo
+  // quantizer owns the whole quantization path, and there enable_rotate means
+  // OPQ -- a rotation trained jointly with the codebook and persisted in the
+  // quantizer blob, not a converter-side random rotation.
   if (param.enable_rotate) {
     if (param.type == QuantizerType::kInt8 ||
         param.type == QuantizerType::kInt4) {

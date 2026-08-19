@@ -168,8 +168,11 @@ class QuantizerParam {
   }
 
  private:
-  // When enabled, vectors are rotated before INT8/INT4 quantization to reduce
-  // quantization error. Only effective with quantize_type=INT8 or INT4.
+  // When enabled, vectors are rotated before quantization to reduce
+  // quantization error. For quantize_type=INT8 or INT4 this is a random
+  // rotation; for quantize_type=PQ or PQ_FAST this enables OPQ, where the
+  // rotation matrix is learned jointly with the PQ codebook and persisted
+  // with the index.
   bool enable_rotate_{false};
   // Number of PQ sub-quantizers (codebooks). Only effective with
   // quantize_type=PQ. The vector dimension must be divisible by this value.

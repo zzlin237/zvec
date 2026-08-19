@@ -52,6 +52,12 @@ int IVFIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
       proxima_index_params_.set(core::PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS,
                                 pq_class);
       proxima_index_params_.set("num_chunk", pq_param->num_chunk);
+      // enable_rotate on a PQ quantizer means OPQ: the turbo quantizer trains
+      // a rotation matrix jointly with the codebook and persists it in its
+      // own blob (no converter-side rotator involved).
+      if (pq_param->enable_rotate) {
+        proxima_index_params_.set("rotate_type", std::string("opq"));
+      }
       break;
     }
     case QuantizerType::kPQFast: {
@@ -65,6 +71,10 @@ int IVFIndex::CreateAndInitStreamer(const BaseIndexParam &param) {
       proxima_index_params_.set(core::PARAM_IVF_BUILDER_TURBO_QUANTIZER_CLASS,
                                 "PqFastQuantizer");
       proxima_index_params_.set("num_chunk", pq_param->num_chunk);
+      // See the kPQ branch: enable_rotate selects OPQ inside the quantizer.
+      if (pq_param->enable_rotate) {
+        proxima_index_params_.set("rotate_type", std::string("opq"));
+      }
       break;
     }
     default:
