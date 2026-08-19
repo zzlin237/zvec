@@ -991,6 +991,17 @@ int IVFBuilder::prepare_turbo_quantizer() {
       quantizer_params.set("use_zero_mean",
                            params_.get_as_bool("use_zero_mean"));
     }
+    //! Optional OPQ rotation: build-time parameters; the trained matrix is
+    //! persisted with the quantizer, so reopening never re-trains it.
+    if (params_.has("rotate_type")) {
+      quantizer_params.set("rotate_type", params_.get_as_string("rotate_type"));
+    }
+    if (params_.has("opq_iter")) {
+      quantizer_params.set("opq_iter", params_.get_as_uint32("opq_iter"));
+    }
+    if (params_.has("opq_pq_iter")) {
+      quantizer_params.set("opq_pq_iter", params_.get_as_uint32("opq_pq_iter"));
+    }
     //! Residual mode: the quantizer sees residual vectors, whose intrinsic
     //! metric is L2 regardless of the quantizer type.
     int ret = turbo_quantizer_->init(use_residual_ ? residual_meta_ : meta_,

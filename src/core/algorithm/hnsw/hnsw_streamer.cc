@@ -249,6 +249,20 @@ zvec::turbo::Quantizer::Pointer HnswStreamer::create_turbo_quantizer(
   if (sp.get("use_zero_mean", &use_zero_mean)) {
     quantizer_params.set("use_zero_mean", use_zero_mean);
   }
+  // Optional OPQ rotation (build-time only; the trained matrix travels with
+  // the serialized quantizer, so the reopen path does not depend on these).
+  std::string rotate_type;
+  if (sp.get("rotate_type", &rotate_type)) {
+    quantizer_params.set("rotate_type", rotate_type);
+  }
+  uint32_t opq_iter = 0;
+  if (sp.get("opq_iter", &opq_iter)) {
+    quantizer_params.set("opq_iter", opq_iter);
+  }
+  uint32_t opq_pq_iter = 0;
+  if (sp.get("opq_pq_iter", &opq_pq_iter)) {
+    quantizer_params.set("opq_pq_iter", opq_pq_iter);
+  }
 
   int ret = quantizer->init(meta_, quantizer_params);
   if (ret != 0) {
@@ -599,6 +613,10 @@ int HnswStreamer::open(IndexStorage::Pointer stg) {
         bool use_zero_mean = false;
         if (sp.get("use_zero_mean", &use_zero_mean)) {
           quantizer_params.set("use_zero_mean", use_zero_mean);
+        }
+        std::string rotate_type;
+        if (sp.get("rotate_type", &rotate_type)) {
+          quantizer_params.set("rotate_type", rotate_type);
         }
         ret = add_quantizer_->init(meta_, quantizer_params);
         if (ret != 0) {

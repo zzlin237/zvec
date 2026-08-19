@@ -22,6 +22,7 @@
 #include <vector>
 #include <ailego/algorithm/kmeans.h>
 #include <ailego/math/normalizer.h>
+#include <zvec/ailego/logger/logger.h>
 #include <zvec/core/framework/index_factory.h>
 #include <zvec/core/framework/index_threads.h>
 #include "common/fast_scan_common.h"
@@ -39,7 +40,8 @@ struct PqFastSerPayload {
   uint32_t num_centroids;  // always 16
   uint8_t use_zero_mean;
   uint8_t input_data_type;  // turbo DataType: kFp32=3, kFp16=2
-  uint8_t reserved[2];
+  uint8_t rotate_type;      // RotateType, 0 = no rotation (was reserved)
+  uint8_t reserved;
 };
 
 void PqFastQuantizer::setup_functions() {
@@ -135,6 +137,31 @@ int PqFastQuantizer::init(const IndexMeta &meta, const ailego::Params &params) {
   params.get("epsilon", &epsilon_);
   params.get("use_zero_mean", &use_zero_mean_);
 
+  // Optional OPQ rotation: the codebook is trained in the rotated space and
+  // every encode/query path applies the same rotation.  The rotator only
+  // solves for the matrix (OPQ step 1); the alternating loop lives in train().
+  std::string rotate_type;
+  params.get("rotate_type", &rotate_type);
+  if (!rotate_type.empty() && rotate_type != "none") {
+    if (rotate_type != "opq") {
+      return kErrUnsupported;
+    }
+    // Rotation is a pure fp32 transform; fp16 codebooks would need a lossy
+    // round trip on every path, so reject the combination outright.
+    if (input_data_type_ != DataType::kFp32) {
+      return kErrUnsupported;
+    }
+    params.get("opq_iter", &opq_iter_);
+    params.get("opq_pq_iter", &opq_pq_iter_);
+    if (opq_iter_ == 0 || opq_pq_iter_ == 0) {
+      return kErrInvalidArgument;
+    }
+    rotator_ = OpqRotator::create(static_cast<int>(original_dim_));
+    if (!rotator_) {
+      return kErrInvalidArgument;
+    }
+  }
+
   // Zero-mean centering shifts the space, which breaks the IP LUT
   // decomposition -- keep it for L2 / Cosine (Cosine runs in normalized
   // space where L2 semantics apply).
@@ -169,7 +196,8 @@ void PqFastQuantizer::build_centroid_ptrs_cache() {
 
 template <typename T>
 void PqFastQuantizer::train_subquantizer(const T *data, size_t num,
-                                         size_t stride, size_t sub_idx) {
+                                         size_t stride, size_t sub_idx,
+                                         uint32_t max_iters) {
   const size_t k = kNumCentroids;
   const size_t d = sub_dim_;
   uint8_t *centroids_m =
@@ -202,7 +230,7 @@ void PqFastQuantizer::train_subquantizer(const T *data, size_t num,
 
   // Lloyd iterations
   double cost = 0.0;
-  for (uint32_t iter = 0; iter < kMaxKmeansIters; ++iter) {
+  for (uint32_t iter = 0; iter < max_iters; ++iter) {
     double old_cost = cost;
     bool result = algorithm.cluster_once(*local_threads, &cost);
     if (!result) {
@@ -300,6 +328,55 @@ int PqFastQuantizer::train(IndexHolder::Pointer holder, int thread_count) {
     }
   }
 
+  // OPQ: alternate the two orthogonal sub-problems.  Step 2 (fix the rotation,
+  // train the codebook) is train_all_chunks() below; step 1 (fix the codebook,
+  // train the rotation) is OpqRotator::fit().  The loop lives here because the
+  // codebook belongs to the quantizer -- the rotator only solves for R.
+  if (rotator_ && num > 0) {
+    const float *base = reinterpret_cast<const float *>(all_data.data());
+    const size_t total = num * original_dim_;
+    std::vector<float> x(base, base + total);  // original space, pre-rotation
+    std::vector<float> x_hat(total);
+    float prev_mse = 0.0f;
+
+    for (uint32_t it = 0; it < opq_iter_; ++it) {
+      rotate_batch(x.data(), num, all_data.data(), data_stride);
+      train_all_chunks(all_data.data(), num, data_stride, opq_pq_iter_,
+                       thread_count);
+      build_centroid_ptrs_cache();
+      float mse = encode_reconstruct_batch(
+          reinterpret_cast<const float *>(all_data.data()), num, x_hat.data());
+      LOG_INFO("PqFastQuantizer OPQ round %u/%u: reconstruction mse=%f", it + 1,
+               opq_iter_, mse);
+      if (it > 0 && (mse >= prev_mse ||
+                     (prev_mse - mse) <= prev_mse * kOpqMinImprovement)) {
+        break;
+      }
+      prev_mse = mse;
+      rotator_->fit(x.data(), x_hat.data(), num);
+    }
+
+    // Rotate with the final matrix so the codebook trained below matches it.
+    rotate_batch(x.data(), num, all_data.data(), data_stride);
+  }
+
+  train_all_chunks(all_data.data(), num, data_stride, kMaxKmeansIters,
+                   thread_count);
+
+  // Pre-build centroid pointer cache for fast encode/search.
+  build_centroid_ptrs_cache();
+
+  // Pre-compute sub-centroid norms for the precomputed residual table.
+  compute_sub_centroid_norms();
+
+  // Pre-compute the SDC dist_table for code-vs-code distance (graph build).
+  compute_dist_table();
+  return 0;
+}
+
+void PqFastQuantizer::train_all_chunks(const void *data, size_t num,
+                                       size_t stride, uint32_t max_iters,
+                                       int thread_count) {
   // Create thread pool.
   auto threads = std::make_shared<SingleQueueIndexThreads>(
       static_cast<uint32_t>(thread_count), false);
@@ -312,11 +389,12 @@ int PqFastQuantizer::train(IndexHolder::Pointer holder, int thread_count) {
   auto submit_training = [&](const auto *typed_data) {
     using T = std::remove_const_t<std::remove_pointer_t<decltype(typed_data)>>;
     for (size_t i = 0; i < pool_count; ++i) {
-      task_group->submit(ailego::Closure::New(
-          [this, typed_data, num, data_stride, i, pool_count, &finished]() {
+      task_group->submit(
+          ailego::Closure::New([this, typed_data, num, stride, i, pool_count,
+                                max_iters, &finished]() {
             for (uint32_t m = static_cast<uint32_t>(i); m < num_chunk_;
                  m += static_cast<uint32_t>(pool_count)) {
-              train_subquantizer<T>(typed_data, num, data_stride, m);
+              train_subquantizer<T>(typed_data, num, stride, m, max_iters);
               finished++;
             }
           }));
@@ -325,26 +403,65 @@ int PqFastQuantizer::train(IndexHolder::Pointer holder, int thread_count) {
 
   switch (input_data_type_) {
     case DataType::kFp16:
-      submit_training(
-          reinterpret_cast<const ailego::Float16 *>(all_data.data()));
+      submit_training(reinterpret_cast<const ailego::Float16 *>(data));
       break;
     case DataType::kFp32:
-      submit_training(reinterpret_cast<const float *>(all_data.data()));
+      submit_training(reinterpret_cast<const float *>(data));
       break;
     default:
       break;
   }
   task_group->wait_finish();
+}
 
-  // Pre-build centroid pointer cache for fast encode/search.
-  build_centroid_ptrs_cache();
+float PqFastQuantizer::encode_reconstruct_batch(const float *rotated,
+                                                size_t num,
+                                                float *x_hat) const {
+  float dists[kNumCentroids];
+  double sum_err = 0.0;
 
-  // Pre-compute sub-centroid norms for the precomputed residual table.
-  compute_sub_centroid_norms();
+  for (size_t i = 0; i < num; ++i) {
+    const float *vec = rotated + i * original_dim_;
+    float *out = x_hat + i * original_dim_;
+    for (uint32_t m = 0; m < num_chunk_; ++m) {
+      const void *sub_vec = vec + static_cast<size_t>(m) * sub_dim_;
+      const auto &centroid_ptrs = centroid_ptrs_cache_[m];
+      // Same L2 argmin as quantize_data(); const_cast: kernel is read-only.
+      l2_batch_fn_(const_cast<const void **>(centroid_ptrs.data()), sub_vec,
+                   kNumCentroids, sub_dim_, dists);
+      float best_dist = dists[0];
+      uint32_t best_idx = 0;
+      for (uint32_t j = 1; j < kNumCentroids; ++j) {
+        if (dists[j] < best_dist) {
+          best_dist = dists[j];
+          best_idx = j;
+        }
+      }
+      std::memcpy(out + static_cast<size_t>(m) * sub_dim_,
+                  centroid_ptrs[best_idx], sub_dim_ * sizeof(float));
+      sum_err += best_dist;
+    }
+  }
+  return static_cast<float>(sum_err / static_cast<double>(num));
+}
 
-  // Pre-compute the SDC dist_table for code-vs-code distance (graph build).
-  compute_dist_table();
-  return 0;
+void PqFastQuantizer::rotate_batch(const float *src, size_t num, void *dst,
+                                   size_t dst_stride) const {
+  uint8_t *out = reinterpret_cast<uint8_t *>(dst);
+  for (size_t i = 0; i < num; ++i) {
+    rotator_->apply(src + i * original_dim_,
+                    reinterpret_cast<float *>(out + i * dst_stride));
+  }
+}
+
+const void *PqFastQuantizer::apply_rotation(const void *vec,
+                                            std::vector<float> *buf) const {
+  if (!rotator_) {
+    return vec;
+  }
+  buf->resize(original_dim_);
+  rotator_->apply(reinterpret_cast<const float *>(vec), buf->data());
+  return buf->data();
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +515,10 @@ void PqFastQuantizer::quantize_data(const void *input, void *output) const {
     }
     vec = centered_vec_storage.data();
   }
+
+  // OPQ: rotate last, mirroring train() (normalize -> center -> rotate).
+  std::vector<float> rotated_vec_storage;
+  vec = apply_rotation(vec, &rotated_vec_storage);
 
   // Zero the packed code buffer first: nibble packing ORs codes in, and an
   // odd num_chunk leaves the last byte's high nibble as the (zero) pad.
@@ -485,6 +606,11 @@ void PqFastQuantizer::compute_float_lut(const void *input, float *lut) const {
     }
     query = centered_query_storage.data();
   }
+
+  // OPQ: rotate last, exactly as quantize_data() does.  preprocess_query()
+  // must stay in lockstep with this chain.
+  std::vector<float> rotated_query_storage;
+  query = apply_rotation(query, &rotated_query_storage);
 
   // LUT[m][j] = distance(q_m, c_m[j]) via the metric-aware batch_fn_:
   // L2/Cosine: ||q_m - c_m[j]||^2   IP: -dot(q_m, c_m[j]).
@@ -624,6 +750,7 @@ int PqFastQuantizer::build_centroid_distance_table(const void *centroids,
   float *tab = reinterpret_cast<float *>(&(*table)[0]);
 
   std::vector<float> buf(original_dim_);
+  std::vector<float> rotated;
   const float *src = reinterpret_cast<const float *>(centroids);
   float dists[kNumCentroids];
   for (size_t i = 0; i < centroid_num; ++i) {
@@ -633,6 +760,14 @@ int PqFastQuantizer::build_centroid_distance_table(const void *centroids,
     //! long as query/centroid/codebook share the shifted space.
     if (use_zero_mean_) {
       subtract_center(buf.data());
+    }
+    //! Rotate the coarse centroid too: the rotation is orthogonal, so
+    //! ||q - c - r||^2 == ||Rq - Rc - Rr||^2 and the decomposition holds as
+    //! long as query, centroid and codebook all live in the rotated space.
+    if (rotator_) {
+      rotated.resize(original_dim_);
+      rotator_->apply(buf.data(), rotated.data());
+      std::memcpy(buf.data(), rotated.data(), original_dim_ * sizeof(float));
     }
     const uint8_t *buf_bytes = reinterpret_cast<const uint8_t *>(buf.data());
     const uint32_t elem_size = element_size();
@@ -738,6 +873,12 @@ int PqFastQuantizer::preprocess_query(const void *input, float *out) const {
   }
   if (use_zero_mean_) {
     subtract_center(out);
+  }
+  if (rotator_) {
+    std::vector<float> rotated(original_dim_);
+    rotator_->apply(out, rotated.data());
+    std::memcpy(out, rotated.data(),
+                static_cast<size_t>(original_dim_) * sizeof(float));
   }
   return 0;
 }
@@ -997,6 +1138,13 @@ int PqFastQuantizer::dequantize(const void *in, const IndexQueryMeta &qmeta,
     }
   }
 
+  // Undo the OPQ rotation FIRST: the code was produced in the rotated space,
+  // while zero-mean centering and the Cosine norm were applied before it.
+  if (rotator_) {
+    std::vector<float> rotated(result, result + original_dim_);
+    rotator_->apply_inverse(rotated.data(), result);
+  }
+
   // Undo zero-mean centering: add the centroid back.
   if (use_zero_mean_) {
     for (uint32_t j = 0; j < original_dim_; ++j) {
@@ -1077,11 +1225,21 @@ int PqFastQuantizer::serialize(std::string *out) const {
   payload.num_centroids = kNumCentroids;
   payload.use_zero_mean = use_zero_mean_ ? 1 : 0;
   payload.input_data_type = static_cast<uint8_t>(input_data_type_);
+  payload.rotate_type =
+      rotator_ ? static_cast<uint8_t>(RotateType::kOpq) : uint8_t{0};
+
+  // The rotator blob is self-describing (RotatorSerHeader + matrix), so the
+  // payload only needs the type tag to know whether one follows.
+  std::string rotator_blob;
+  if (rotator_) {
+    int rc = rotator_->serialize(&rotator_blob);
+    if (rc != 0) return rc;
+  }
 
   size_t centroids_bytes = centroids_.size();  // already byte buffer
   size_t centroid_bytes = use_zero_mean_ ? centroid_.size() * sizeof(float) : 0;
-  hdr.payload_size =
-      static_cast<uint32_t>(sizeof(payload) + centroids_bytes + centroid_bytes);
+  hdr.payload_size = static_cast<uint32_t>(
+      sizeof(payload) + centroids_bytes + centroid_bytes + rotator_blob.size());
 
   out->clear();
   out->append(reinterpret_cast<const char *>(&hdr), sizeof(hdr));
@@ -1093,6 +1251,7 @@ int PqFastQuantizer::serialize(std::string *out) const {
     out->append(reinterpret_cast<const char *>(centroid_.data()),
                 centroid_bytes);
   }
+  out->append(rotator_blob);
   return 0;
 }
 
@@ -1142,6 +1301,25 @@ int PqFastQuantizer::deserialize(const void *data, size_t len) {
     centroid_.resize(original_dim_);
     std::memcpy(centroid_.data(), ptr, centroid_bytes);
     ptr += centroid_bytes;
+  }
+
+  // Restore the OPQ rotation matrix.  The blob carries its own header, so no
+  // extra length field is needed, and the init() params are irrelevant here.
+  if (payload.rotate_type != 0) {
+    if (payload.rotate_type != static_cast<uint8_t>(RotateType::kOpq)) {
+      return kErrUnsupported;
+    }
+    const size_t consumed =
+        static_cast<size_t>(ptr - reinterpret_cast<const char *>(data));
+    if (consumed >= len) return kErrInvalidArgument;
+    rotator_ = OpqRotator::from_blob(ptr, len - consumed);
+    if (!rotator_) return kErrInvalidArgument;
+    if (rotator_->in_dim() != static_cast<int>(original_dim_)) {
+      rotator_.reset();
+      return kErrInvalidArgument;
+    }
+  } else {
+    rotator_.reset();
   }
 
   // Re-dispatch kernels and batch distance functions.

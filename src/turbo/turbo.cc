@@ -352,6 +352,11 @@ RotatorKernels get_rotator_kernels(RotateType rotate_type,
       }
       return {scalar::fht_rotate, scalar::fht_unrotate};
     }
+
+    case RotateType::kOpq:
+      // OPQ is a dense matrix-vector product handled inside the preprocessor
+      // (OpqRotator), so it has no ISA kernel family here.
+      return {};
   }
 
   assert(false && "unsupported RotateType");

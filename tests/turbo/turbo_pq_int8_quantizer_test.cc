@@ -1478,3 +1478,285 @@ TEST(PqInt8Fp16, ConsistencyWithFp32) {
   // FP16 precision loss and different codebooks cause some reordering).
   EXPECT_GT(tau, 0.5) << "Kendall tau=" << tau;
 }
+
+// ---------------------------------------------------------------------------
+// OPQ rotation (rotate_type = "opq")
+// ---------------------------------------------------------------------------
+
+// Build a PqInt8Quantizer with an optional OPQ rotation.
+static std::shared_ptr<zvec::turbo::Quantizer> make_opq_quantizer(
+    size_t dim, size_t num_chunk, const std::string &metric, bool use_opq,
+    IndexMeta::DataType data_type = IndexMeta::DataType::DT_FP32) {
+  auto q = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  if (!q) return nullptr;
+
+  IndexMeta meta;
+  meta.set_meta(data_type, dim);
+  meta.set_metric(metric, 0, Params());
+
+  Params params;
+  params.set("num_chunk", static_cast<uint32_t>(num_chunk));
+  if (use_opq) {
+    params.set("rotate_type", std::string("opq"));
+    params.set("opq_iter", static_cast<uint32_t>(4));
+    params.set("opq_pq_iter", static_cast<uint32_t>(4));
+  }
+  if (q->init(meta, params) != 0) return nullptr;
+  return q;
+}
+
+// Holder whose per-dimension variance decays geometrically: the sub-spaces are
+// badly balanced, which is exactly what OPQ is meant to fix.
+static std::shared_ptr<MultiPassIndexHolder<IndexMeta::DataType::DT_FP32>>
+make_anisotropic_holder(size_t count, size_t dim, uint32_t seed = 2024) {
+  auto holder =
+      std::make_shared<MultiPassIndexHolder<IndexMeta::DataType::DT_FP32>>(dim);
+  std::mt19937 gen(seed);
+  std::normal_distribution<float> normal(0.0f, 1.0f);
+  for (size_t i = 0; i < count; ++i) {
+    NumericalVector<float> vec(dim);
+    for (size_t j = 0; j < dim; ++j) {
+      vec[j] = normal(gen) * std::pow(0.85f, static_cast<float>(j));
+    }
+    holder->emplace(i + 1, vec);
+  }
+  return holder;
+}
+
+// Mean squared reconstruction error over the whole holder.
+static double reconstruction_mse(
+    const std::shared_ptr<zvec::turbo::Quantizer> &q,
+    const std::shared_ptr<MultiPassIndexHolder<IndexMeta::DataType::DT_FP32>>
+        &holder,
+    size_t dim) {
+  std::vector<uint8_t> code(q->quantized_datapoint_vector_length());
+  IndexQueryMeta qmeta;
+  qmeta.set_meta(IndexMeta::DataType::DT_FP32, static_cast<uint32_t>(dim));
+
+  double sum = 0.0;
+  size_t count = 0;
+  for (auto iter = holder->create_iterator(); iter->is_valid(); iter->next()) {
+    const float *raw = reinterpret_cast<const float *>(iter->data());
+    q->quantize_data(raw, code.data());
+    std::string recon;
+    if (q->dequantize(code.data(), qmeta, &recon) != 0) continue;
+    const float *rec = reinterpret_cast<const float *>(recon.data());
+    for (size_t j = 0; j < dim; ++j) {
+      const double d = static_cast<double>(raw[j]) - rec[j];
+      sum += d * d;
+    }
+    ++count;
+  }
+  return count ? sum / static_cast<double>(count) : 0.0;
+}
+
+TEST(PqInt8Opq, ReconstructionErrorNotWorseThanBaseline) {
+  const size_t DIM = 32;
+  const size_t NSQ = 8;
+  const size_t COUNT = 2000;
+
+  auto holder = make_anisotropic_holder(COUNT, DIM);
+
+  auto base = make_opq_quantizer(DIM, NSQ, "SquaredEuclidean", false);
+  ASSERT_TRUE(base);
+  ASSERT_EQ(0, base->train(holder));
+
+  auto opq = make_opq_quantizer(DIM, NSQ, "SquaredEuclidean", true);
+  ASSERT_TRUE(opq);
+  ASSERT_EQ(0, opq->train(holder));
+
+  const double base_mse = reconstruction_mse(base, holder, DIM);
+  const double opq_mse = reconstruction_mse(opq, holder, DIM);
+  std::cout << "PqInt8 reconstruction mse: base=" << base_mse
+            << " opq=" << opq_mse << std::endl;
+
+  EXPECT_GT(base_mse, 0.0);
+  EXPECT_LT(opq_mse, base_mse);
+}
+
+TEST(PqInt8Opq, RecallNotWorseThanBaseline) {
+  const size_t DIM = 32;
+  const size_t NSQ = 8;
+  const size_t COUNT = 1000;
+  const size_t QUERIES = 30;
+  const size_t TOPK = 10;
+
+  auto holder = make_anisotropic_holder(COUNT, DIM);
+
+  std::vector<std::vector<float>> raw;
+  raw.reserve(COUNT);
+  for (auto iter = holder->create_iterator(); iter->is_valid(); iter->next()) {
+    const float *v = reinterpret_cast<const float *>(iter->data());
+    raw.emplace_back(v, v + DIM);
+  }
+
+  auto measure_recall = [&](const std::shared_ptr<zvec::turbo::Quantizer> &q) {
+    std::vector<std::vector<uint8_t>> codes(raw.size());
+    for (size_t i = 0; i < raw.size(); ++i) {
+      codes[i].resize(q->quantized_datapoint_vector_length());
+      q->quantize_data(raw[i].data(), codes[i].data());
+    }
+    std::vector<float> lut(q->quantized_query_vector_length() / sizeof(float));
+
+    size_t hit = 0;
+    for (size_t qi = 0; qi < QUERIES; ++qi) {
+      const std::vector<float> &query = raw[qi * 7 % raw.size()];
+      // Ground truth by exact distance.
+      std::vector<std::pair<float, size_t>> exact;
+      exact.reserve(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) {
+        exact.emplace_back(
+            reference_sq_euclidean(query.data(), raw[i].data(), DIM), i);
+      }
+      std::partial_sort(exact.begin(), exact.begin() + TOPK, exact.end());
+
+      // ADC ranking.
+      q->quantize_query(query.data(), lut.data());
+      std::vector<std::pair<float, size_t>> adc;
+      adc.reserve(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) {
+        adc.emplace_back(q->calc_distance_dp_query(codes[i].data(), lut.data()),
+                         i);
+      }
+      std::partial_sort(adc.begin(), adc.begin() + TOPK, adc.end());
+
+      for (size_t a = 0; a < TOPK; ++a) {
+        for (size_t b = 0; b < TOPK; ++b) {
+          if (adc[a].second == exact[b].second) {
+            ++hit;
+            break;
+          }
+        }
+      }
+    }
+    return static_cast<double>(hit) / static_cast<double>(QUERIES * TOPK);
+  };
+
+  auto base = make_opq_quantizer(DIM, NSQ, "SquaredEuclidean", false);
+  ASSERT_TRUE(base);
+  ASSERT_EQ(0, base->train(holder));
+  auto opq = make_opq_quantizer(DIM, NSQ, "SquaredEuclidean", true);
+  ASSERT_TRUE(opq);
+  ASSERT_EQ(0, opq->train(holder));
+
+  const double base_recall = measure_recall(base);
+  const double opq_recall = measure_recall(opq);
+  std::cout << "PqInt8 recall@" << TOPK << ": base=" << base_recall
+            << " opq=" << opq_recall << std::endl;
+
+  EXPECT_GE(opq_recall, base_recall);
+}
+
+TEST(PqInt8Opq, CosineDequantizeRestoresNorm) {
+  const size_t DIM = 32;
+  const size_t NSQ = 8;
+  const size_t COUNT = 1000;
+
+  auto holder = make_anisotropic_holder(COUNT, DIM, 7);
+  auto opq = make_opq_quantizer(DIM, NSQ, "Cosine", true);
+  ASSERT_TRUE(opq);
+  ASSERT_EQ(0, opq->train(holder));
+
+  IndexQueryMeta qmeta;
+  qmeta.set_meta(IndexMeta::DataType::DT_FP32, static_cast<uint32_t>(DIM));
+  std::vector<uint8_t> code(opq->quantized_datapoint_vector_length());
+
+  size_t checked = 0;
+  for (auto iter = holder->create_iterator(); iter->is_valid() && checked < 20;
+       iter->next(), ++checked) {
+    const float *raw = reinterpret_cast<const float *>(iter->data());
+    opq->quantize_data(raw, code.data());
+    std::string recon;
+    ASSERT_EQ(0, opq->dequantize(code.data(), qmeta, &recon));
+    const float *rec = reinterpret_cast<const float *>(recon.data());
+
+    float raw_norm = 0.0f, rec_norm = 0.0f, dot = 0.0f;
+    for (size_t j = 0; j < DIM; ++j) {
+      raw_norm += raw[j] * raw[j];
+      rec_norm += rec[j] * rec[j];
+      dot += raw[j] * rec[j];
+    }
+    raw_norm = std::sqrt(raw_norm);
+    rec_norm = std::sqrt(rec_norm);
+    // The stored norm is the pre-rotation one and rotation is norm-preserving,
+    // so the reconstruction keeps the original magnitude, and the direction
+    // stays close to the input.
+    EXPECT_NEAR(rec_norm, raw_norm, raw_norm * 0.35f);
+    EXPECT_GT(dot / (raw_norm * rec_norm + 1e-12f), 0.5f);
+  }
+  EXPECT_EQ(20u, checked);
+}
+
+TEST(PqInt8Opq, SerializeDeserializeKeepsRotation) {
+  const size_t DIM = 32;
+  const size_t NSQ = 8;
+  const size_t COUNT = 800;
+
+  auto holder = make_anisotropic_holder(COUNT, DIM, 99);
+  auto opq = make_opq_quantizer(DIM, NSQ, "SquaredEuclidean", true);
+  ASSERT_TRUE(opq);
+  ASSERT_EQ(0, opq->train(holder));
+
+  auto base = make_opq_quantizer(DIM, NSQ, "SquaredEuclidean", false);
+  ASSERT_TRUE(base);
+  ASSERT_EQ(0, base->train(holder));
+
+  std::string opq_blob, base_blob;
+  ASSERT_EQ(0, opq->serialize(&opq_blob));
+  ASSERT_EQ(0, base->serialize(&base_blob));
+  // The OPQ blob carries exactly one extra rotator blob (header + matrix).
+  EXPECT_EQ(base_blob.size() + sizeof(zvec::turbo::RotatorSerHeader) +
+                DIM * DIM * sizeof(float),
+            opq_blob.size());
+
+  auto restored = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  ASSERT_TRUE(restored);
+  ASSERT_EQ(0, restored->deserialize(opq_blob));
+
+  std::vector<uint8_t> code1(opq->quantized_datapoint_vector_length());
+  std::vector<uint8_t> code2(restored->quantized_datapoint_vector_length());
+  std::vector<float> lut1(opq->quantized_query_vector_length() / sizeof(float));
+  std::vector<float> lut2(restored->quantized_query_vector_length() /
+                          sizeof(float));
+
+  size_t checked = 0;
+  for (auto iter = holder->create_iterator(); iter->is_valid() && checked < 20;
+       iter->next(), ++checked) {
+    opq->quantize_data(iter->data(), code1.data());
+    restored->quantize_data(iter->data(), code2.data());
+    for (size_t m = 0; m < NSQ; ++m) {
+      ASSERT_EQ(code1[m], code2[m]) << "checked=" << checked << " m=" << m;
+    }
+    opq->quantize_query(iter->data(), lut1.data());
+    restored->quantize_query(iter->data(), lut2.data());
+    EXPECT_NEAR(opq->calc_distance_dp_query(code1.data(), lut1.data()),
+                restored->calc_distance_dp_query(code2.data(), lut2.data()),
+                1e-6f);
+  }
+  EXPECT_EQ(20u, checked);
+}
+
+TEST(PqInt8Opq, InitRejectsUnsupportedConfigurations) {
+  // Unknown rotate_type.
+  auto q = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  ASSERT_TRUE(q);
+  IndexMeta meta;
+  meta.set_meta(IndexMeta::DataType::DT_FP32, 16);
+  meta.set_metric("SquaredEuclidean", 0, Params());
+  Params params;
+  params.set("num_chunk", static_cast<uint32_t>(4));
+  params.set("rotate_type", std::string("fht"));
+  EXPECT_NE(0, q->init(meta, params));
+
+  // OPQ is fp32-only.
+  EXPECT_EQ(nullptr, make_opq_quantizer(16, 4, "SquaredEuclidean", true,
+                                        IndexMeta::DataType::DT_FP16));
+
+  // "none" behaves exactly like the parameter being absent.
+  auto q2 = IndexFactory::CreateQuantizer("PqInt8Quantizer");
+  ASSERT_TRUE(q2);
+  Params params2;
+  params2.set("num_chunk", static_cast<uint32_t>(4));
+  params2.set("rotate_type", std::string("none"));
+  EXPECT_EQ(0, q2->init(meta, params2));
+}

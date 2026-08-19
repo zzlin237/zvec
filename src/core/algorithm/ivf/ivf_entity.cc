@@ -1484,6 +1484,12 @@ int IVFUtility::RestoreTurboQuantizer(const IndexMeta &meta,
     quantizer_params.set("use_zero_mean",
                          builder_params.get_as_bool("use_zero_mean"));
   }
+  //! Keep the OPQ configuration aligned with the builder side; the rotation
+  //! matrix itself is restored from the serialized quantizer payload.
+  if (builder_params.has("rotate_type")) {
+    quantizer_params.set("rotate_type",
+                         builder_params.get_as_string("rotate_type"));
+  }
   //! Residual mode: the quantizer was initialized with the residual space
   //! meta, whose intrinsic metric is L2 regardless of the quantizer type.
   //! Keep this aligned with the builder side.
